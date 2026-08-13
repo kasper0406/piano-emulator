@@ -48,7 +48,12 @@ are removed and fits `f'_1` and the formant envelope, with `c_L/2L` as a hard pr
 than derive it — phantoms also arise from nonlinearity in the *structural* parts (Bilbao et al., [JASA 142(4) EL344,
 2017](https://pubs.aip.org/asa/jasa/article/142/4/EL344/853105)).
 
-## 2. Tension-modulation pitch glide
+## 2. Tension-modulation pitch glide — **refuted by measurement** (`TUNING_REPORT.md` §6)
+
+> **Status:** the check this entry prescribed was run in Phase E: beyond 200 ms the recorded fundamental holds to a
+> few cents, and inside 100 ms the measurement's own error bar (±17–108 cents on the engine control) swamps any
+> plausible glide. Per this entry's own rule — "no drift → delete the entry" — do not build this. Kept for the record;
+> revisit only with a measurement technique that can see inside the first 100 ms.
 
 **Physics.** The same nonlinearity seen by the transverse modes: under the uniform-tension approximation `T̄(t) = T₀ +
 (ESπ²/4L²)·Σ n² y_n²(t)` (Bank & Sujbert Eq. A2; Legge & Fletcher, [JASA 76, 5,
@@ -97,6 +102,12 @@ land. Estimation is the existing tracker with the inharmonic seed removed: peak-
 T60 > 0.3 s, write the strongest 2–6 per key.
 
 ## 4. Bridge admittance: two-way string ↔ soundboard coupling
+
+> **Phase E update** (`TUNING_REPORT.md` §3, §4): the *coupling* half of this entry is strengthened — the treble
+> sympathetic halo is the report's #1 finding (C7 fortissimo: between-partial energy −3.5 dB vs the engine's −48 dB)
+> and its level is explicitly a stage-2 coupling parameter. But the report *refutes* using one global admittance
+> curve to explain excitation-spectrum roughness: that residual is per-note, not shared across notes at the same
+> frequency. Build the admittance filter for coupling and decay shaping; do not expect it to fix excitation spectra.
 
 **Physics.** A string terminates on a bridge with complex admittance `Y(f)`, not on a node. `Re Y` sets how fast each
 partial loses energy into the board, and because all strings share the board, partials of *different* notes that fall
