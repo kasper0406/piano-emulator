@@ -30,8 +30,7 @@
 //! spring the reflection is equivalent to once several round trips have passed.
 //! The two have the same static effect on the contact; only the ripple differs.
 
-use crate::string::{unison_count, StringParams};
-use crate::types::{interp_anchors, key_position, note_to_freq, SAMPLE_RATE};
+use crate::types::SAMPLE_RATE;
 
 /// Longest force pulse the scratch buffer can hold: 20 ms, far above the
 /// 0.4-6 ms a real contact lasts, so the integration can never overrun.
@@ -47,11 +46,6 @@ pub const MAX_SKEW_SAMPLES: usize = 15;
 /// the compass. A note-on costs 6-60 us of the audio thread's budget.
 const OVERSAMPLE: usize = 8;
 
-/// Velocity reflection coefficient of the agraffe end of the speaking length.
-/// Below one because the termination is not perfectly rigid and, more
-/// importantly, string stiffness disperses the returning pulse.
-const REFLECTION_GAIN: f32 = 0.85;
-
 /// Largest delayed-reflection loop gain `k_felt t_ref / 2Z` the contact model
 /// carries literally. The reflection is a delayed positive feedback path, and
 /// once its gain passes ~1 the lossless lumped model diverges — which is a
@@ -63,23 +57,6 @@ const MAX_REFLECTION_GAIN_MARGIN: f32 = 1.0;
 /// Ceiling on the Hunt-Crossley factor. The felt cannot stiffen without bound,
 /// and the returning reflection can make the compression rate jump.
 const MAX_HYSTERESIS_FACTOR: f32 = 2.0;
-
-/// Una corda softens the felt as the hammer meets the strings off its worn
-/// centre line.
-const UNA_CORDA_STIFFNESS: f32 = 0.7;
-
-/// Hammer velocity range mapped from MIDI velocity 1..127.
-const V_MIN: f32 = 0.2;
-const V_MAX: f32 = 6.0;
-
-/// Reference strike used to derive per-note stiffness (see [`HammerParams::for_key`]).
-const K_REF_VELOCITY: f32 = 3.0;
-
-/// Hunt-Crossley hysteresis coefficient, s/m: the felt is stiffer while being
-/// compressed than while relaxing, so it returns less energy than it stored.
-/// The loss grows with impact speed, which is the measured behaviour of felt
-/// (coefficient of restitution ~0.9 at 1 m/s falling to ~0.6 at 4 m/s).
-const FELT_HYSTERESIS: f32 = 0.15;
 
 #[derive(Clone, Copy, Debug)]
 pub struct HammerParams {
@@ -100,6 +77,20 @@ pub struct HammerParams {
     /// Round trip from the strike point to the agraffe and back, in seconds.
     /// Sets where the string stops looking resistive and starts looking stiff.
     pub reflection_seconds: f32,
+    /// Hunt-Crossley hysteresis coefficient, s/m: the felt is stiffer while
+    /// being compressed than while relaxing, so it returns less energy than it
+    /// stored. The loss grows with impact speed, which is the measured
+    /// behaviour of felt (restitution ~0.9 at 1 m/s falling to ~0.6 at 4 m/s).
+    pub hysteresis: f32,
+    /// Stiffness multiplier applied under una corda.
+    pub una_corda_stiffness: f32,
+    /// Velocity reflection coefficient of the agraffe end of the speaking
+    /// length. Below one because the termination is not perfectly rigid and,
+    /// more importantly, string stiffness disperses the returning pulse.
+    pub reflection_gain: f32,
+    /// Hammer speed at MIDI velocity 1 and at 127, m/s.
+    pub velocity_min: f32,
+    pub velocity_max: f32,
 }
 
 impl HammerParams {
@@ -109,48 +100,12 @@ impl HammerParams {
         steps.clamp(1, MAX_PULSE_SAMPLES * OVERSAMPLE)
     }
 
-    /// `impedance` is the struck string's wave impedance (see `StringParams`).
-    ///
-    /// K is not tabulated directly — it has units N/m^p and p varies across the
-    /// compass, so a raw table would be meaningless. Instead a target felt
-    /// compression `c_ref` at a reference strike is tabulated, and K follows
-    /// from energy balance `(1/2) m v^2 = K c^(p+1) / (p+1)`. The compressions
-    /// are chosen to land the contact durations on measured values: ~4 ms in
-    /// the bass, ~1.5 ms at C4, ~0.4 ms at the top.
-    pub fn for_key(key: u8, impedance: f32) -> Self {
-        let t = key_position(key);
-        let mass = interp_anchors(t, &[(0.0, 0.011), (1.0, 0.004)]);
-        let exponent = interp_anchors(t, &[(0.0, 2.3), (1.0, 3.0)]);
-        let c_ref = interp_anchors(
-            t,
-            &[
-                (0.0, 1.5e-3f32.ln()),
-                (0.28, 1.15e-3f32.ln()),
-                (0.59, 0.68e-3f32.ln()),
-                (1.0, 0.32e-3f32.ln()),
-            ],
-        )
-        .exp();
-        let stiffness = (exponent + 1.0) * mass * K_REF_VELOCITY * K_REF_VELOCITY
-            / (2.0 * c_ref.powf(exponent + 1.0));
-        // The wave reaches the agraffe in x_strike * L / c, and L / c = 1/(2 f0).
-        let strike_position = StringParams::for_key(key).strike_position;
-        HammerParams {
-            mass,
-            stiffness,
-            exponent,
-            impedance,
-            strings: unison_count(key) as f32,
-            reflection_seconds: strike_position / note_to_freq(key),
-        }
+    /// MIDI velocity 1..127 to hammer velocity in m/s. Exponential, so each
+    /// MIDI step is a constant ratio — the mapping the ear reads as even.
+    pub fn hammer_velocity(&self, vel: u8) -> f32 {
+        let v = vel.clamp(1, 127) as f32;
+        self.velocity_min * (self.velocity_max / self.velocity_min).powf((v - 1.0) / 126.0)
     }
-}
-
-/// MIDI velocity 1..127 to hammer velocity in m/s. Exponential, so each MIDI
-/// step is a constant ratio — the mapping the ear reads as even.
-pub fn velocity_from_midi(vel: u8) -> f32 {
-    let v = vel.clamp(1, 127) as f32;
-    V_MIN * (V_MAX / V_MIN).powf((v - 1.0) / 126.0)
 }
 
 pub struct Hammer {
@@ -188,6 +143,12 @@ impl Hammer {
         self.una_corda
     }
 
+    /// Integrates a strike at MIDI velocity `vel` through this hammer's own
+    /// velocity mapping.
+    pub fn strike_midi(&mut self, vel: u8) {
+        self.strike(self.params.hammer_velocity(vel));
+    }
+
     /// Integrates a strike at `velocity` m/s into the pulse buffer and rewinds
     /// the read cursor. Allocation-free: both buffers are sized at construction.
     pub fn strike(&mut self, velocity: f32) {
@@ -197,7 +158,7 @@ impl Hammer {
             return;
         }
         let k = if self.una_corda {
-            self.params.stiffness * UNA_CORDA_STIFFNESS
+            self.params.stiffness * self.params.una_corda_stiffness
         } else {
             self.params.stiffness
         };
@@ -212,9 +173,11 @@ impl Hammer {
         let c_max = ((p + 1.0) * m * velocity * velocity / (2.0 * k)).powf(1.0 / (p + 1.0));
         let felt_stiffness_max = p * k * c_max.powf(p - 1.0);
         let loop_gain = felt_stiffness_max * self.params.reflection_seconds / two_z;
-        let delayed = REFLECTION_GAIN * (MAX_REFLECTION_GAIN_MARGIN / loop_gain).min(1.0);
-        let string_stiffness = (1.0 - delayed / REFLECTION_GAIN) * two_z
-            / self.params.reflection_seconds;
+        // Fraction of the reflection the delay line may carry; the rest goes to
+        // the spring it is equivalent to once several round trips have passed.
+        let carried = (MAX_REFLECTION_GAIN_MARGIN / loop_gain).min(1.0);
+        let delayed = self.params.reflection_gain * carried;
+        let string_stiffness = (1.0 - carried) * two_z / self.params.reflection_seconds;
 
         // Hammer and contact-point displacement, both zero at first touch.
         let mut x = 0.0f32;
@@ -233,7 +196,8 @@ impl Hammer {
                 // Hysteresis may not pull the felt into tension, hence the max.
                 let f = if c > 0.0 {
                     let hysteresis =
-                        (1.0 + FELT_HYSTERESIS * compression_rate).clamp(0.0, MAX_HYSTERESIS_FACTOR);
+                        (1.0 + self.params.hysteresis * compression_rate)
+                            .clamp(0.0, MAX_HYSTERESIS_FACTOR);
                     k * c.powf(p) * hysteresis
                 } else {
                     0.0
@@ -310,18 +274,16 @@ impl Hammer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset::Preset;
     use crate::types::{HIGHEST_KEY, LOWEST_KEY};
 
     fn hammer_for(key: u8) -> Hammer {
-        Hammer::new(HammerParams::for_key(
-            key,
-            StringParams::for_key(key).impedance,
-        ))
+        Hammer::new(Preset::default().hammer_params(key))
     }
 
     fn struck(key: u8, vel: u8) -> Hammer {
         let mut h = hammer_for(key);
-        h.strike(velocity_from_midi(vel));
+        h.strike_midi(vel);
         h
     }
 
@@ -363,11 +325,12 @@ mod tests {
 
     #[test]
     fn velocity_mapping_is_monotonic_and_bounded() {
-        assert!((velocity_from_midi(1) - V_MIN).abs() < 1e-6);
-        assert!((velocity_from_midi(127) - V_MAX).abs() < 1e-4);
+        let params = Preset::default().hammer_params(60);
+        assert!((params.hammer_velocity(1) - params.velocity_min).abs() < 1e-6);
+        assert!((params.hammer_velocity(127) - params.velocity_max).abs() < 1e-4);
         let mut prev = 0.0;
         for vel in 1..=127u8 {
-            let v = velocity_from_midi(vel);
+            let v = params.hammer_velocity(vel);
             assert!(v > prev);
             prev = v;
         }
@@ -409,7 +372,7 @@ mod tests {
             for vel in [1u8, 20, 48, 80, 110, 127] {
                 let h = struck(key, vel);
                 let m = h.params().mass;
-                let v = velocity_from_midi(vel);
+                let v = h.params().hammer_velocity(vel);
                 let impulse: f32 =
                     h.pulse().iter().sum::<f32>() * h.params().strings / SAMPLE_RATE;
                 assert!(
@@ -472,7 +435,7 @@ mod tests {
         let mut h = hammer_for(60);
         let pulse_ptr = h.pulse.as_ptr();
         for vel in [1u8, 64, 127] {
-            h.strike(velocity_from_midi(vel));
+            h.strike_midi(vel);
             assert!(h.is_active());
         }
         assert_eq!(h.pulse.as_ptr(), pulse_ptr);

@@ -4,6 +4,7 @@
 //! across the compass at several velocities, long held notes for T60, pedal
 //! phrases for halo/decay comparisons, and dense chords for headroom checks.
 
+use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_wav, RenderEvent};
 use piano_emulator::types::{Event, PedalEvent};
 use std::path::PathBuf;
@@ -23,8 +24,9 @@ fn pedal(t: f32, p: PedalEvent) -> RenderEvent {
 fn main() {
     let dir = PathBuf::from("renders/analysis");
     std::fs::create_dir_all(&dir).expect("create output dir");
+    let preset = Preset::default();
     let save = |name: &str, events: &[RenderEvent], dur: f32| {
-        render_to_wav(&dir.join(name), events, dur).expect("render");
+        render_to_wav(&dir.join(name), &preset, events, dur).expect("render");
         println!("wrote {name}");
     };
 

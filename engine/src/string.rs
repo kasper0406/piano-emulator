@@ -5,40 +5,35 @@
 //! per polarization. The vertical polarization couples strongly to the bridge
 //! and decays fast, the horizontal one is excited ~12 dB less but outlives it by
 //! more than three times. Their sum is the double decay a piano is recognised by.
+//!
+//! Every number here comes from the [`Preset`](crate::preset::Preset): the
+//! per-note ones through [`StringParams`], the rest through
+//! [`Voicing`].
 
 use crate::modal::ModalBank;
-use crate::types::{
-    db_to_amp, interp_anchors, key_position, note_to_freq, BLOCK, MAX_PARTIALS, MAX_PARTIAL_RATIO,
-    MAX_UNISON, SAMPLE_RATE,
-};
+use crate::preset::Voicing;
+use crate::types::{db_to_amp, BLOCK, MAX_PARTIALS, MAX_PARTIAL_RATIO, SAMPLE_RATE};
 
-/// Horizontal polarization: quieter input, much slower decay, and a small
-/// frequency offset from the vertical one. The offset comes from the string's
-/// transverse stiffness differing between the two planes, which no two strings
-/// of a unison group share exactly — hence one value per string of the group.
-const HORIZONTAL_GAIN_DB: f32 = -12.0;
-const HORIZONTAL_DECAY_RATIO: f32 = 0.29;
-const HORIZONTAL_OFFSET_HZ: [f32; MAX_UNISON] = [0.35, 0.52, 0.27];
+/// Largest unison bridge coupling a preset may ask for.
+///
+/// The coupling passes a fraction of the neighbours' bridge force into a
+/// string one block later, so a group is a feedback loop: driven at one of its
+/// partials a modal bank answers with `sin(k pi x) / sigma_k` times the force
+/// it is given (the `output_scale` the coupling is divided by cancels), and a
+/// hop around the loop is that, summed over both polarizations and over the
+/// `n - 1` neighbours. The slowest partial in the instrument sets the worst
+/// case: at the bottom of the compass the vertical bank contributes ~1.4 and
+/// the horizontal one ~1.2 per neighbour, so a triple's loop gain is about
+/// `5 * coupling` for a bass note ringing 25 s and about `9 * coupling` for
+/// one ringing 40 s. Self-sustainment is therefore somewhere above 0.1, this
+/// is a factor of two below the closer of the two, and — unlike the resonance
+/// bus, which has a hard ceiling on its drive under it — nothing else bounds
+/// this loop.
+pub const MAX_UNISON_COUPLING: f32 = 0.05;
 
-/// Coefficient of the `(f/1000)^2` term in the per-partial decay rate. Air and
-/// internal friction losses grow with frequency, so high partials die first.
-const SIGMA_FREQ_COEFF: f32 = 0.5;
-
-/// Bridge coupling within a unison group, as a fraction of the string's wave
-/// impedance: the bridge is not a rigid termination, so each string feels a
-/// force proportional to its neighbours' velocity. This is what keeps the
-/// string the una corda hammer misses ringing, and it makes a unison group's
-/// decay uneven rather than a plain sum of three exponentials.
-const UNISON_COUPLING: f32 = 0.02;
-
-/// Turns the string's force on the bridge, in newtons, into the engine's
-/// internal signal unit. Purely gain staging: calibrated by rendering so a
-/// mezzo-forte C4 lands near -20 dBFS after `OUTPUT_GAIN`, leaving the safety
-/// limiter idle on a fortissimo chord.
-const EXCITATION_SCALE: f32 = 0.40;
-
-/// Note the per-note gains below are normalised against, so `EXCITATION_SCALE`
-/// stays a plain level control.
+/// Note the per-note output gains are normalised against, so the preset's
+/// `excitation_scale` stays a plain level control: mode k's force on the bridge
+/// is proportional to f0, and this is the f0 that scale was calibrated at (C4).
 const REFERENCE_F0: f32 = 261.6256;
 
 /// Per-note string parameters. Every field is a starting point that automated
@@ -72,61 +67,11 @@ pub struct StringParams {
     /// Extra decay rate applied by a fully engaged damper, 1/s.
     pub damper_sigma: f32,
     /// Fraction of this note's bridge force that becomes signal — the
-    /// soundboard's coupling to this part of the compass. See [`bridge_gain_for`].
+    /// soundboard's coupling to this part of the compass.
     pub bridge_gain: f32,
 }
 
 impl StringParams {
-    pub fn for_key(key: u8) -> Self {
-        let t = key_position(key);
-        let f0 = note_to_freq(key);
-
-        // Fundamental T60 anchors from the spec: 25 s at A0, 12 s at C4,
-        // 3 s at C6, 0.6 s at C8. Interpolated in log-T60 so the curve is smooth.
-        let t60 = interp_anchors(
-            t,
-            &[
-                (key_position(21), 25.0f32.ln()),
-                (key_position(60), 12.0f32.ln()),
-                (key_position(84), 3.0f32.ln()),
-                (key_position(108), 0.6f32.ln()),
-            ],
-        )
-        .exp();
-        let sigma_fundamental = 6.91 / t60;
-        let sigma1 = SIGMA_FREQ_COEFF;
-        let sigma0 = (sigma_fundamental - sigma1 * (f0 / 1000.0).powi(2)).max(0.01);
-
-        StringParams {
-            f0,
-            inharmonicity_b: inharmonicity_for(key),
-            strike_position: interp_anchors(t, &[(0.0, 0.12), (0.55, 0.115), (1.0, 0.14)]),
-            sigma0,
-            sigma1,
-            unison: unison_count(key),
-            // 0.28 Hz at C2 through 0.45 at C4 to 2.4 Hz at C8 — the spec's
-            // range, and a beat period of 3-6 s where a pianist would hear it.
-            detune_cents: interp_anchors(t, &[(0.0, 3.5), (1.0, 2.0)]),
-            // Z = mu c = T / c: the tension is roughly constant across the
-            // compass while the wave speed rises, so the impedance falls
-            // steeply out of the bass and then flattens out.
-            impedance: interp_anchors(
-                t,
-                &[
-                    (key_position(21), 6.5f32.ln()),
-                    (key_position(36), 4.5f32.ln()),
-                    (key_position(60), 2.2f32.ln()),
-                    (key_position(84), 1.8f32.ln()),
-                    (key_position(108), 1.7f32.ln()),
-                ],
-            )
-            .exp(),
-            // Release T60 0.3 s in the bass falling to 0.1 s in the treble.
-            damper_sigma: 6.91 / interp_anchors(t, &[(0.0, 0.3), (1.0, 0.1)]),
-            bridge_gain: bridge_gain_for(key),
-        }
-    }
-
     /// Frequency of partial `k` (1-based) including stiffness inharmonicity.
     pub fn partial_freq(&self, k: usize) -> f32 {
         let k = k as f32;
@@ -136,7 +81,8 @@ impl StringParams {
     /// Decay rate of partial `k` for the note as a whole, 1/s: `6.91 / sigma`
     /// is the time that partial takes to fall 60 dB counting both
     /// polarizations. The vertical bank decays faster than this and the
-    /// horizontal one slower — see [`vertical_decay_factor`].
+    /// horizontal one slower — see
+    /// [`Voicing::vertical_decay_factor`](crate::preset::Voicing::vertical_decay_factor).
     pub fn partial_sigma(&self, k: usize) -> f32 {
         self.sigma0 + self.sigma1 * (self.partial_freq(k) / 1000.0).powi(2)
     }
@@ -150,108 +96,6 @@ impl StringParams {
             .count()
             .max(1)
     }
-}
-
-/// Inharmonicity B: ~1e-4 for the wound bass strings, dipping around C3,
-/// then rising steeply through the short thick treble strings to ~1e-2 at C8.
-fn inharmonicity_for(key: u8) -> f32 {
-    let t = key_position(key);
-    interp_anchors(
-        t,
-        &[
-            (key_position(21), 1.0e-4f32.ln()),
-            (key_position(48), 3.0e-4f32.ln()),
-            (key_position(60), 4.0e-4f32.ln()),
-            (key_position(84), 1.2e-3f32.ln()),
-            (key_position(108), 1.0e-2f32.ln()),
-        ],
-    )
-    .exp()
-}
-
-/// Unison group size: single strings up to B1, pairs to E3, triples above.
-pub fn unison_count(key: u8) -> usize {
-    match key {
-        0..=35 => 1,     // .. B1
-        36..=52 => 2,    // C2 .. E3
-        _ => MAX_UNISON, // F3 ..
-    }
-}
-
-/// How much faster the vertical polarization decays than the note as a whole.
-///
-/// The horizontal polarization starts `HORIZONTAL_GAIN_DB` down but decays
-/// `HORIZONTAL_DECAY_RATIO` times as fast, so it is what is left at the end and
-/// it alone sets when the note reaches -60 dB. Solving
-/// `g_h exp(-rho sigma_v T60) = 1e-3 (1 + g_h)` for `sigma_v` gives the factor
-/// between the spec's T60 anchors and the vertical bank's decay rate.
-fn vertical_decay_factor() -> f32 {
-    let gain = db_to_amp(HORIZONTAL_GAIN_DB);
-    (gain / (1.0e-3 * (1.0 + gain))).ln() / (HORIZONTAL_DECAY_RATIO * 6.91)
-}
-
-/// How firmly the damper felt grips a partial at `f_hz`. Dampers hold the low
-/// partials tightly and the top ones barely at all, which is why a released
-/// note keeps a brief metallic zing.
-fn damper_weight(f_hz: f32) -> f32 {
-    interp_anchors(
-        f_hz.max(1.0).ln(),
-        &[
-            (500.0f32.ln(), 1.0),
-            (2000.0f32.ln(), 0.9),
-            (6000.0f32.ln(), 0.35),
-            (12000.0f32.ln(), 0.2),
-        ],
-    )
-}
-
-/// Fraction of a string's bridge force that becomes signal, in dB relative to
-/// C4. A real soundboard is not an equally good radiator at every frequency:
-/// its admittance peaks in the low-mid and falls away at both ends of the
-/// compass, and the bass bridge is loaded by the long bass strings. Without
-/// this the model's compass is tilted ~12 dB against the bass. Calibrated by
-/// rendering fortissimo single notes and flattening their peak level; it is a
-/// voicing table, and the obvious thing for automated tuning to replace.
-fn bridge_gain_for(key: u8) -> f32 {
-    db_to_amp(interp_anchors(
-        key_position(key),
-        &[
-            (key_position(21), 6.5),
-            (key_position(40), 3.0),
-            (key_position(52), 2.8),
-            (key_position(60), 2.6),
-            (key_position(72), 2.0),
-            (key_position(84), 0.4),
-            (key_position(96), 0.4),
-            (key_position(108), 2.0),
-        ],
-    ))
-}
-
-/// Frequency ratio of unison string `i` of `n` against nominal pitch, given the
-/// group's full spread in cents.
-///
-/// The three strings are deliberately *not* evenly spaced. Evenly spaced
-/// detunings make the three fundamentals coincide in antiphase at a fixed
-/// point of every beat cycle and cancel to nothing — the note is heard pumping
-/// to silence and back, which no piano does. With uneven spacing the two beat
-/// rates are incommensurate and the cancellation never lines up.
-fn detune_ratio(i: usize, n: usize, width_cents: f32) -> f32 {
-    const PATTERN: [&[f32]; MAX_UNISON] = [&[0.0], &[-0.47, 0.53], &[-0.5, 0.11, 0.5]];
-    let cents = width_cents * PATTERN[n.clamp(1, MAX_UNISON) - 1][i];
-    (cents / 1200.0 * std::f32::consts::LN_2).exp()
-}
-
-/// Share of the hammer's force that string `i` of `n` receives. The hammer is
-/// not perfectly square to the strings — the same fact that gives the group its
-/// timing skew — so the shares differ by a few percent, and the group's summed
-/// fundamental can no longer cancel exactly. Each row averages to 1, so the
-/// group's total excitation does not depend on how the shares are spread, and
-/// each is paired with a detuning pattern whose amplitude-weighted centre is
-/// nominal pitch, so the group as a whole is in tune.
-fn strike_share(i: usize, n: usize) -> f32 {
-    const PATTERN: [&[f32]; MAX_UNISON] = [&[1.0], &[1.06, 0.94], &[1.09, 1.0, 0.91]];
-    PATTERN[n.clamp(1, MAX_UNISON) - 1][i]
 }
 
 /// One physical string: two polarizations sharing an excitation input.
@@ -276,24 +120,31 @@ pub struct PianoString {
     group_previous: [f32; BLOCK],
     /// Force per unit of neighbour output for the bridge coupling.
     coupling: f32,
+    /// Share of the hammer's force each string of the group takes.
+    shares: Vec<f32>,
     partials: usize,
     damper: f32,
 }
 
 impl PianoString {
-    pub fn new(params: StringParams) -> Self {
+    pub fn new(params: StringParams, voicing: &Voicing) -> Self {
         let partials = params.partial_count();
         // Mode k's force on the bridge for a hammer impulse J is
         // `4 f0 J sin(k pi x_strike)`: the modal mass of the string is
         // Z / (2 f0), and turning the mode's displacement back into bridge
         // force cancels the wave impedance exactly.
-        let output_scale = EXCITATION_SCALE * params.bridge_gain * params.f0 / REFERENCE_F0;
-        let vertical_factor = vertical_decay_factor();
-        let horizontal_gain = db_to_amp(HORIZONTAL_GAIN_DB);
+        let output_scale =
+            voicing.excitation_scale * params.bridge_gain * params.f0 / REFERENCE_F0;
+        let vertical_factor = voicing.vertical_decay_factor();
+        let horizontal_gain = db_to_amp(voicing.horizontal_gain_db);
         let mut strings = Vec::with_capacity(params.unison);
-        for (i, &polarization_offset) in HORIZONTAL_OFFSET_HZ.iter().take(params.unison).enumerate()
+        for (i, &polarization_offset) in voicing
+            .horizontal_offset_hz
+            .iter()
+            .take(params.unison)
+            .enumerate()
         {
-            let detune = detune_ratio(i, params.unison, params.detune_cents);
+            let detune = voicing.detune_ratio(i, params.unison, params.detune_cents);
             let mut vertical = ModalBank::with_capacity(partials);
             let mut horizontal = ModalBank::with_capacity(partials);
             for k in 1..=partials {
@@ -309,7 +160,7 @@ impl PianoString {
                 vertical.push_mode(f, sigma, g);
                 horizontal.push_mode(
                     f + polarization_offset,
-                    sigma * HORIZONTAL_DECAY_RATIO,
+                    sigma * voicing.horizontal_decay_ratio,
                     g * horizontal_gain,
                 );
             }
@@ -321,7 +172,7 @@ impl PianoString {
             });
         }
         let damper_profile: Vec<f32> = (1..=partials)
-            .map(|k| params.damper_sigma * damper_weight(params.partial_freq(k)))
+            .map(|k| params.damper_sigma * voicing.damper_weight_at(params.partial_freq(k)))
             .collect();
         PianoString {
             strings,
@@ -330,7 +181,10 @@ impl PianoString {
             group_previous: [0.0; BLOCK],
             // Undo `output_scale` so the neighbour's output is a force in
             // newtons again before a fraction of it is passed on.
-            coupling: UNISON_COUPLING / output_scale,
+            coupling: voicing.unison_coupling / output_scale,
+            shares: (0..params.unison)
+                .map(|i| voicing.strike_share(i, params.unison))
+                .collect(),
             params,
             partials,
             damper: 0.0,
@@ -354,10 +208,12 @@ impl PianoString {
         self.strings[string].vertical.mode_freq(k - 1)
     }
 
-    /// Share of the hammer's force this string of the group takes; see
-    /// [`strike_share`].
+    /// Share of the hammer's force this string of the group takes. The hammer
+    /// is not perfectly square to the strings — the same fact that gives the
+    /// group its timing skew — so the shares differ by a few percent, which is
+    /// what stops the group's summed fundamental cancelling exactly.
     pub fn strike_share(&self, string: usize) -> f32 {
-        strike_share(string, self.strings.len())
+        self.shares[string]
     }
 
     /// Excitation buffer for one unison string, to be filled before `process`.
@@ -468,17 +324,22 @@ impl PianoString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hammer::{velocity_from_midi, Hammer, HammerParams};
+    use crate::hammer::Hammer;
+    use crate::preset::Preset;
+
+    fn preset() -> Preset {
+        Preset::default()
+    }
 
     /// Strikes a key for real — hammer pulse into every unison string — and
     /// returns `blocks` blocks of its output. Using the hammer rather than a
     /// unit impulse keeps the signal at the level the culling thresholds and
     /// the rest of the instrument are calibrated for.
     fn strike(key: u8, vel: u8, blocks: usize) -> Vec<f32> {
-        let params = StringParams::for_key(key);
-        let mut string = PianoString::new(params);
-        let mut hammer = Hammer::new(HammerParams::for_key(key, params.impedance));
-        hammer.strike(velocity_from_midi(vel));
+        let preset = preset();
+        let mut string = PianoString::new(preset.string_params(key), &preset.voicing);
+        let mut hammer = Hammer::new(preset.hammer_params(key));
+        hammer.strike_midi(vel);
         let mut out = vec![0.0f32; blocks * BLOCK];
         for chunk in out.chunks_mut(BLOCK) {
             for i in 0..string.string_count() {
@@ -496,24 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn unison_counts_follow_the_compass() {
-        assert_eq!(unison_count(35), 1); // B1
-        assert_eq!(unison_count(36), 2); // C2
-        assert_eq!(unison_count(52), 2); // E3
-        assert_eq!(unison_count(53), 3); // F3
-    }
-
-    #[test]
-    fn inharmonicity_rises_towards_the_treble() {
-        assert!(inharmonicity_for(108) > inharmonicity_for(60));
-        assert!(inharmonicity_for(60) > inharmonicity_for(21));
-        assert!(inharmonicity_for(21) > 0.0);
-    }
-
-    #[test]
     fn partial_layout_follows_the_inharmonicity_formula() {
         for key in [21u8, 48, 60, 84, 108] {
-            let p = StringParams::for_key(key);
+            let p = preset().string_params(key);
             let b = p.inharmonicity_b;
             for k in 1..=p.partial_count() {
                 let want = k as f32 * p.f0 * (1.0 + b * (k * k) as f32).sqrt();
@@ -535,8 +381,9 @@ mod tests {
 
     #[test]
     fn banks_are_laid_out_from_the_formula() {
-        let params = StringParams::for_key(60);
-        let s = PianoString::new(params);
+        let preset = preset();
+        let params = preset.string_params(60);
+        let s = PianoString::new(params, &preset.voicing);
         assert_eq!(s.partial_count(), params.partial_count());
         assert!(s.partial_count() > 40);
         for k in 1..=s.partial_count() {
@@ -549,9 +396,11 @@ mod tests {
     /// Composite envelope of one partial: the two polarizations summed, as a
     /// fraction of their value at the moment of the strike.
     fn composite_envelope(sigma: f32, t: f32) -> f32 {
-        let gain = db_to_amp(HORIZONTAL_GAIN_DB);
-        let sigma_v = sigma * vertical_decay_factor();
-        ((-sigma_v * t).exp() + gain * (-HORIZONTAL_DECAY_RATIO * sigma_v * t).exp()) / (1.0 + gain)
+        let v = preset().voicing;
+        let gain = db_to_amp(v.horizontal_gain_db);
+        let sigma_v = sigma * v.vertical_decay_factor();
+        ((-sigma_v * t).exp() + gain * (-v.horizontal_decay_ratio * sigma_v * t).exp())
+            / (1.0 + gain)
     }
 
     #[test]
@@ -560,7 +409,7 @@ mod tests {
         // polarization is what is still there at -60 dB, so it alone decides
         // when the note gets there.
         for (key, want) in [(21u8, 25.0f32), (60, 12.0), (84, 3.0), (108, 0.6)] {
-            let sigma = StringParams::for_key(key).partial_sigma(1);
+            let sigma = preset().string_params(key).partial_sigma(1);
             let (mut lo, mut hi) = (0.0f32, 10.0 * want);
             for _ in 0..50 {
                 let mid = 0.5 * (lo + hi);
@@ -583,13 +432,14 @@ mod tests {
         // stored energy is then a clean exponential at twice its polarization's
         // decay rate, measured late enough that only the fundamental is left.
         let key = 84u8;
-        let mut params = StringParams::for_key(key);
+        let preset = preset();
+        let mut params = preset.string_params(key);
         params.unison = 1;
-        let sigma_v = params.partial_sigma(1) * vertical_decay_factor();
+        let sigma_v = params.partial_sigma(1) * preset.voicing.vertical_decay_factor();
 
-        let mut string = PianoString::new(params);
-        let mut hammer = Hammer::new(HammerParams::for_key(key, params.impedance));
-        hammer.strike(velocity_from_midi(100));
+        let mut string = PianoString::new(params, &preset.voicing);
+        let mut hammer = Hammer::new(preset.hammer_params(key));
+        hammer.strike_midi(100);
         let mut out = [0.0f32; BLOCK];
         let mut samples: Vec<(f32, f32)> = Vec::new();
         let probes = [0.35f32, 0.6, 1.0, 2.0];
@@ -614,7 +464,7 @@ mod tests {
             (vertical / sigma_v - 1.0).abs() < 0.05,
             "vertical sigma {vertical}, expected {sigma_v}"
         );
-        let want = sigma_v * HORIZONTAL_DECAY_RATIO;
+        let want = sigma_v * preset.voicing.horizontal_decay_ratio;
         assert!(
             (horizontal / want - 1.0).abs() < 0.05,
             "horizontal sigma {horizontal}, expected {want}"
@@ -623,7 +473,7 @@ mod tests {
 
     #[test]
     fn high_partials_decay_faster_than_the_fundamental() {
-        let p = StringParams::for_key(60);
+        let p = preset().string_params(60);
         let mut previous = 0.0;
         for k in 1..=p.partial_count() {
             let sigma = p.partial_sigma(k);
@@ -635,7 +485,7 @@ mod tests {
     #[test]
     fn partials_stay_below_nyquist_and_the_cap() {
         for key in 21..=108u8 {
-            let p = StringParams::for_key(key);
+            let p = preset().string_params(key);
             let n = p.partial_count();
             assert!((1..=MAX_PARTIALS).contains(&n));
             assert!(p.partial_freq(n) < MAX_PARTIAL_RATIO * SAMPLE_RATE);
@@ -646,8 +496,9 @@ mod tests {
     fn strike_position_nulls_the_partial_it_sits_on() {
         // x_strike ~ 1/8 in the bass, so partial 8 must be far weaker than its
         // neighbours.
-        let params = StringParams::for_key(21);
-        let s = PianoString::new(params);
+        let preset = preset();
+        let params = preset.string_params(21);
+        let s = PianoString::new(params, &preset.voicing);
         let gain = |k: usize| {
             (k as f32 * std::f32::consts::PI * params.strike_position)
                 .sin()
@@ -660,45 +511,6 @@ mod tests {
         assert!(gain(node) < 0.4 * gain(node - 1));
         assert!((1..node).any(|k| gain(k) > 0.95));
         assert!(s.partial_count() > node);
-    }
-
-    /// Detuning in cents of string `i` of `n` for a group `width` cents wide.
-    fn detune_cents(i: usize, n: usize, width: f32) -> f32 {
-        1200.0 * detune_ratio(i, n, width).log2()
-    }
-
-    #[test]
-    fn detune_spans_the_width_unevenly() {
-        assert_eq!(detune_ratio(0, 1, 3.0), 1.0);
-        for n in 1..=MAX_UNISON {
-            let d: Vec<f32> = (0..n).map(|i| detune_cents(i, n, 3.0)).collect();
-            assert!(d.windows(2).all(|w| w[1] > w[0]), "{d:?} is not ordered");
-            let want = if n > 1 { 3.0 } else { 0.0 };
-            assert!((d[n - 1] - d[0] - want).abs() < 1e-3, "{d:?} spans wrong");
-        }
-        // Evenly spaced detunings cancel exactly; these must not be even.
-        let gaps = [
-            detune_cents(1, 3, 3.0) - detune_cents(0, 3, 3.0),
-            detune_cents(2, 3, 3.0) - detune_cents(1, 3, 3.0),
-        ];
-        assert!(gaps[0] / gaps[1] > 1.3 || gaps[1] / gaps[0] > 1.3, "{gaps:?}");
-    }
-
-    #[test]
-    fn a_unison_group_is_in_tune_as_a_whole() {
-        for n in 1..=MAX_UNISON {
-            let shares: Vec<f32> = (0..n).map(|i| strike_share(i, n)).collect();
-            let mean = shares.iter().sum::<f32>() / n as f32;
-            assert!((mean - 1.0).abs() < 1e-6, "{shares:?} averages {mean}");
-            if n > 1 {
-                // No two strings may share an amplitude, or that pair cancels
-                // exactly; and the loudness-weighted pitch must be nominal, or
-                // the group as a whole plays flat or sharp.
-                assert!(shares.windows(2).all(|w| (w[0] - w[1]).abs() > 0.02));
-                let centre: f32 = (0..n).map(|i| shares[i] * detune_cents(i, n, 3.0)).sum();
-                assert!(centre.abs() < 0.1, "group centre is {centre} cents off");
-            }
-        }
     }
 
     #[test]
@@ -719,10 +531,10 @@ mod tests {
 
     #[test]
     fn the_damper_kills_the_note() {
-        let params = StringParams::for_key(60);
-        let mut s = PianoString::new(params);
-        let mut hammer = Hammer::new(HammerParams::for_key(60, params.impedance));
-        hammer.strike(velocity_from_midi(100));
+        let preset = preset();
+        let mut s = PianoString::new(preset.string_params(60), &preset.voicing);
+        let mut hammer = Hammer::new(preset.hammer_params(60));
+        hammer.strike_midi(100);
         let mut warm = vec![0.0f32; 40 * BLOCK];
         for chunk in warm.chunks_mut(BLOCK) {
             for i in 0..s.string_count() {
@@ -744,8 +556,9 @@ mod tests {
 
     #[test]
     fn the_damper_grips_low_partials_hardest() {
-        let p = StringParams::for_key(48);
-        let s = PianoString::new(p);
+        let preset = preset();
+        let p = preset.string_params(48);
+        let s = PianoString::new(p, &preset.voicing);
         let first = s.damper_profile[0];
         let last = s.damper_profile[s.partials - 1];
         assert!(first > last * 2.0, "damper profile {first} .. {last}");
@@ -754,7 +567,8 @@ mod tests {
 
     #[test]
     fn bridge_coupling_rings_an_unstruck_sibling() {
-        let mut s = PianoString::new(StringParams::for_key(60));
+        let preset = preset();
+        let mut s = PianoString::new(preset.string_params(60), &preset.voicing);
         assert_eq!(s.string_count(), 3);
         let mut out = [0.0f32; BLOCK];
         s.excitation_mut(0)[0] = 1.0;
@@ -769,7 +583,8 @@ mod tests {
 
     #[test]
     fn excitation_produces_output_and_is_consumed() {
-        let mut s = PianoString::new(StringParams::for_key(60));
+        let preset = preset();
+        let mut s = PianoString::new(preset.string_params(60), &preset.voicing);
         s.excitation_mut(0)[0] = 1.0;
         let mut out = [0.0f32; BLOCK];
         s.process(&mut out);

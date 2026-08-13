@@ -1,0 +1,91 @@
+//! The estimators: pure functions from measured partial trajectories to the
+//! numbers a preset is made of.
+//!
+//! Each one inverts one part of the model `SPEC.md` describes, and each is
+//! unit-tested against synthetic trajectories with known parameters — see
+//! `TUNING.md`'s self-calibration gate for what that does and does not prove.
+//! The chain, and the order the estimators must run in, is:
+//!
+//! ```text
+//! trajectories ─┬─> inharmonic::fit  ──────────────> f0, B
+//!               ├─> decay::fit_decays ─────────────> sigma(f), polarization split
+//!               │        │
+//!               │        ├─> unison::estimate ─────> detune
+//!               │        └─> excitation spectrum
+//!               │                 ├─> strike::fit ─> strike position
+//!               │                 └─> hammer::fit ─> K, p, mass, velocity map
+//!               └─> (across notes) compass::interpolate -> all 88 keys
+//! ```
+//!
+//! Nothing here reads audio or does a transform; everything reads
+//! [`NoteTrajectories`](crate::trajectory::NoteTrajectories). That is what
+//! makes the estimators cheap to iterate on: the expensive STFT pass is cached
+//! to disk once and the fits run against it in milliseconds.
+
+pub mod compass;
+pub mod decay;
+pub mod hammer;
+pub mod inharmonic;
+pub mod strike;
+pub mod unison;
+
+pub use compass::{interpolate_keys, CompassCurve};
+pub use decay::{DecayConfig, DecayCurve, DecayFit, DecayReport, Exponential, PolarizationSplit};
+pub use hammer::{
+    contact_pulse, fit_hammer, fit_velocity_map, ContactConfig, FeltParams, ForcePulse, HammerConfig,
+    HammerFit, LayerSpectrum, SpectrumPoint, SpectrumWeighting, VelocityMap,
+};
+pub use inharmonic::{fit_inharmonic, InharmonicConfig, InharmonicFit};
+pub use strike::{fit_strike_position, StrikeConfig, StrikeFit};
+pub use unison::{estimate_unison, BeatEstimate, UnisonConfig, UnisonEstimate};
+
+use crate::trajectory::NoteTrajectories;
+
+/// The amplitude below which a track is not a partial of this note.
+///
+/// The tracker looks for a partial everywhere the seed model predicts one, all
+/// the way up to the Nyquist limit, but a real note runs out of partials long
+/// before that — and what the tracker finds above the last one is the noise
+/// floor's own peaks, which have frequencies and envelopes and would be fitted
+/// as if they were partials. Every estimator that reads a whole note therefore
+/// works `level_db` down from the loudest partial and no further.
+pub fn level_floor(trajectories: &NoteTrajectories, level_db: f64) -> f64 {
+    let loudest = trajectories
+        .tracks
+        .iter()
+        .filter_map(|track| track.peak())
+        .map(|peak| peak.amplitude)
+        .fold(0.0, f64::max);
+    loudest * 10f64.powf(-level_db / 20.0)
+}
+
+/// Which part of a recording an envelope fit is allowed to look at.
+///
+/// Two different instants matter and confusing them is a factor-of-two error in
+/// every amplitude the estimators extrapolate back to the strike:
+///
+/// * `onset_s` is the strike — the origin every fitted envelope is expressed
+///   against, so that `a(0)` is the excitation the hammer delivered.
+/// * `start_s` is the first measurement that may be used. A frame is
+///   timestamped at the centre of its window, so a frame centred less than half
+///   a window after the strike measured part of the silence before it and reads
+///   too low. Fitting starts at the first window that lies entirely after the
+///   strike.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FitSpan {
+    pub onset_s: f64,
+    pub start_s: f64,
+}
+
+impl FitSpan {
+    pub fn new(onset_s: f64, start_s: f64) -> Self {
+        Self { onset_s, start_s }
+    }
+
+    pub fn from_trajectories(trajectories: &NoteTrajectories) -> Self {
+        Self {
+            onset_s: trajectories.onset_s,
+            start_s: trajectories.onset_s + 0.5 * trajectories.window_s,
+        }
+    }
+}

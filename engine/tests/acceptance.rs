@@ -4,10 +4,34 @@
 //! the audio callback uses — so what is measured is what comes out of the
 //! device. `tests/smoke.rs` holds the coarser end-to-end invariants.
 
+use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::string::StringParams;
-use piano_emulator::types::{key_index, note_to_freq, Event, PedalEvent, SAMPLE_RATE};
+use piano_emulator::types::{key_index, Event, PedalEvent, SAMPLE_RATE};
 use rustfft::{num_complex::Complex32, FftPlanner};
+
+/// Every test runs the instrument as shipped — or, when `PIANO_PRESET` names a
+/// file, the instrument in that file.
+///
+/// The override exists for estimated presets: most of what is asserted below is
+/// a property of the *model* (nothing is NaN, nothing clips, a damped note
+/// stops, the halo needs the pedal, the worst case fits the budget) and has to
+/// hold for any preset the engine will play, while a few assertions are windows
+/// around numbers a particular piano was tuned to and may legitimately differ
+/// for another one. Running the suite against a candidate preset is how the two
+/// kinds get told apart; `TUNING.md`'s Phase D reports the second kind as
+/// measured-versus-window rather than moving the window.
+fn preset() -> Preset {
+    match std::env::var("PIANO_PRESET") {
+        Ok(path) if !path.is_empty() => Preset::load(std::path::Path::new(&path))
+            .unwrap_or_else(|e| panic!("PIANO_PRESET={path}: {e}")),
+        _ => Preset::default(),
+    }
+}
+
+fn string_params(key: u8) -> StringParams {
+    preset().string_params(key)
+}
 
 // ---------------------------------------------------------------- helpers
 
@@ -33,7 +57,7 @@ fn window(signal: &[f32], from_s: f32, to_s: f32) -> &[f32] {
 /// below measure energy and partial frequencies, neither of which the stereo
 /// image should change.
 fn render_mono(events: &[RenderEvent], duration_s: f32) -> Vec<f32> {
-    let (l, r) = render_to_buffer(events, duration_s);
+    let (l, r) = render_to_buffer(&preset(), events, duration_s);
     l.iter().zip(&r).map(|(a, b)| a + b).collect()
 }
 
@@ -149,7 +173,7 @@ fn partials_follow_the_inharmonic_series() {
         // Later in the note the merged lobe is lopsided and the peak wanders by
         // a cent or two — which is also why a tuner listens to the attack.
         let mag = spectrum(window(&y, 0.05, 0.65), FFT);
-        let params = StringParams::for_key(key);
+        let params = string_params(key);
 
         for k in 1..=8 {
             let expected = params.partial_freq(k);
@@ -164,7 +188,7 @@ fn partials_follow_the_inharmonic_series() {
         }
 
         // ... and the eighth partial is not where a harmonic series would put it.
-        let harmonic = 8.0 * note_to_freq(key);
+        let harmonic = 8.0 * params.f0;
         let stretch = cents(params.partial_freq(8), harmonic);
         assert!(
             stretch > 5.0,
@@ -183,14 +207,14 @@ fn partials_follow_the_inharmonic_series() {
 #[test]
 fn the_fundamental_decays_over_a_pianistic_time() {
     let c4 = strike(60, 90, 30.0, 25.0);
-    let measured = t60(&c4, StringParams::for_key(60).partial_freq(1), 1.5);
+    let measured = t60(&c4, string_params(60).partial_freq(1), 1.5);
     assert!(
         (8.0..20.0).contains(&measured),
         "C4 fundamental T60 {measured:.1} s, expected 8..20 s"
     );
 
     let c7 = strike(96, 90, 30.0, 4.0);
-    let measured = t60(&c7, StringParams::for_key(96).partial_freq(1), 0.3);
+    let measured = t60(&c7, string_params(96).partial_freq(1), 0.3);
     assert!(
         (0.3..2.0).contains(&measured),
         "C7 fundamental T60 {measured:.2} s, expected 0.3..2 s"
@@ -220,7 +244,7 @@ fn a_unison_group_beats() {
     const HOP_S: f32 = 0.02;
     let y = strike(60, 90, 30.0, 12.0);
     let hop = (HOP_S * SAMPLE_RATE) as usize;
-    let env = band_envelope(&y, StringParams::for_key(60).partial_freq(1), hop);
+    let env = band_envelope(&y, string_params(60).partial_freq(1), hop);
 
     // Beat troughs: a sample lower than both of its neighbours a quarter of a
     // second away, so the exponential decay itself cannot produce one.
@@ -323,7 +347,7 @@ fn undamped_strings_resonate_with_the_ones_being_played() {
     // C3 is never struck; G4 is struck hard and released. With the pedal down
     // C3's dampers are off its strings, so the bank must gain energy.
     let energy_of_c3 = |sustain: f32| {
-        let (mut engine, _tx) = Engine::new();
+        let (mut engine, _tx) = Engine::new(&preset());
         engine.handle_event(Event::Pedal(PedalEvent::Sustain(sustain)));
         engine.handle_event(Event::NoteOn { key: 67, vel: 120 });
         let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
@@ -391,7 +415,7 @@ fn thirty_seconds_of_dense_playing_stays_safe() {
             events.push(RenderEvent::new(t, Event::Pedal(PedalEvent::Sustain(pedal))));
         }
     }
-    let (l, r) = render_to_buffer(&events, 30.0);
+    let (l, r) = render_to_buffer(&preset(), &events, 30.0);
 
     assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()));
     assert!(peak(&l).max(peak(&r)) <= 1.0, "clipped past 0 dBFS");
@@ -401,7 +425,7 @@ fn thirty_seconds_of_dense_playing_stays_safe() {
     }
 
     // ... and an engine that was told nothing renders digital silence.
-    let (sl, sr) = render_to_buffer(&[], 2.0);
+    let (sl, sr) = render_to_buffer(&preset(), &[], 2.0);
     assert!(sl.iter().chain(sr.iter()).all(|&v| v == 0.0));
 }
 
@@ -428,11 +452,14 @@ fn the_worst_case_fits_the_performance_budget() {
     }
 
     let start = std::time::Instant::now();
-    let (l, r) = render_to_buffer(&events, AUDIO_S);
+    let (l, r) = render_to_buffer(&preset(), &events, AUDIO_S);
     let ratio = start.elapsed().as_secs_f32() / AUDIO_S;
 
     assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()));
     assert!(rms(&l) > 1.0e-3, "the glissando made no sound");
+    // Printed rather than only asserted: how much of the budget is left is the
+    // number that matters when a preset changes how long the notes ring.
+    println!("worst case: {:.1}% of one core", 100.0 * ratio);
     assert!(
         ratio < 0.8,
         "worst case took {:.1}% of one core (design goal 50%)",

@@ -5,6 +5,7 @@
 //! tests say something about what you actually hear.
 
 use crate::pedal::PedalState;
+use crate::preset::Preset;
 use crate::resonance::ResonanceBus;
 use crate::soundboard::Soundboard;
 use crate::types::{index_to_note, key_index, Event, PedalEvent, BLOCK, NUM_KEYS};
@@ -45,18 +46,19 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Builds the engine and its event queue. Everything the audio thread will
-    /// ever touch is allocated here.
-    pub fn new() -> (Engine, EventSender) {
+    /// Builds the engine and its event queue from a preset. Everything the
+    /// audio thread will ever touch is allocated here; the preset is read only
+    /// during construction and is not retained.
+    pub fn new(preset: &Preset) -> (Engine, EventSender) {
         let (producer, consumer) = rtrb::RingBuffer::new(EVENT_QUEUE_CAPACITY);
         let voices = (0..NUM_KEYS)
-            .map(|i| Voice::new(index_to_note(i)))
+            .map(|i| Voice::new(index_to_note(i), preset))
             .collect();
         let engine = Engine {
             voices,
             pedals: PedalState::new(),
-            resonance: ResonanceBus::new(),
-            soundboard: Soundboard::new(),
+            resonance: ResonanceBus::new(preset.voicing.resonance_coupling),
+            soundboard: Soundboard::new(&preset.soundboard),
             events: consumer,
             voice_out: [0.0; BLOCK],
             held: [false; NUM_KEYS],
@@ -194,9 +196,13 @@ impl Engine {
 mod tests {
     use super::*;
 
+    fn engine() -> (Engine, EventSender) {
+        Engine::new(&Preset::default())
+    }
+
     #[test]
     fn an_idle_engine_renders_exact_silence() {
-        let (mut engine, _tx) = Engine::new();
+        let (mut engine, _tx) = engine();
         let (mut l, mut r) = ([1.0f32; 1000], [1.0f32; 1000]);
         engine.process(&mut l, &mut r);
         assert!(l.iter().chain(r.iter()).all(|&v| v == 0.0));
@@ -205,7 +211,7 @@ mod tests {
 
     #[test]
     fn queued_events_reach_the_voices() {
-        let (mut engine, mut tx) = Engine::new();
+        let (mut engine, mut tx) = engine();
         assert!(tx.send(Event::NoteOn { key: 60, vel: 90 }));
         let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
         engine.process(&mut l, &mut r);
@@ -220,7 +226,7 @@ mod tests {
     #[test]
     fn the_output_does_not_depend_on_the_request_length() {
         let render = |chunk: usize| {
-            let (mut engine, _tx) = Engine::new();
+            let (mut engine, _tx) = engine();
             engine.handle_event(Event::NoteOn { key: 60, vel: 90 });
             let frames = 20 * BLOCK;
             let (mut l, mut r) = (vec![0.0f32; frames], vec![0.0f32; frames]);
@@ -243,7 +249,7 @@ mod tests {
 
     #[test]
     fn all_off_silences_everything() {
-        let (mut engine, _tx) = Engine::new();
+        let (mut engine, _tx) = engine();
         for key in [48u8, 55, 60, 64] {
             engine.handle_event(Event::NoteOn { key, vel: 100 });
         }
@@ -257,7 +263,7 @@ mod tests {
 
     #[test]
     fn sostenuto_captures_only_keys_held_at_pedal_down() {
-        let (mut engine, _tx) = Engine::new();
+        let (mut engine, _tx) = engine();
         engine.handle_event(Event::NoteOn { key: 48, vel: 80 });
         engine.handle_event(Event::Pedal(PedalEvent::Sostenuto(true)));
         engine.handle_event(Event::NoteOn { key: 60, vel: 80 });

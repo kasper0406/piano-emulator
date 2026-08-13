@@ -30,9 +30,6 @@
 
 use crate::types::{BLOCK, CULL_AMPLITUDE};
 
-/// Fraction of the bus injected into each undamped string.
-pub const DEFAULT_COUPLING: f32 = 0.012;
-
 /// Largest coupling [`ResonanceBus::set_coupling`] will accept. Well above the
 /// spec's 0.005-0.03 range and well below the loop gain analysed above.
 pub const MAX_COUPLING: f32 = 0.05;
@@ -60,22 +57,32 @@ pub struct ResonanceBus {
 }
 
 impl ResonanceBus {
-    pub fn new() -> Self {
-        ResonanceBus {
+    /// `coupling` is the preset's `resonance_coupling`, clamped to the stable
+    /// range like every later change to it.
+    pub fn new(coupling: f32) -> Self {
+        let mut bus = ResonanceBus {
             bus: [0.0; BLOCK],
             accum: [0.0; BLOCK],
-            coupling: DEFAULT_COUPLING,
+            coupling: 0.0,
             peak: 0.0,
-        }
+        };
+        bus.set_coupling(coupling);
+        bus
     }
 
     pub fn coupling(&self) -> f32 {
         self.coupling
     }
 
-    /// Sets the coupling, clamped to `0..=MAX_COUPLING`.
+    /// Sets the coupling, clamped to `0..=MAX_COUPLING`. A value that is not a
+    /// number silences the bus rather than passing through — `f32::clamp`
+    /// returns NaN for NaN, and a NaN here would reach every undamped string.
     pub fn set_coupling(&mut self, coupling: f32) {
-        self.coupling = coupling.clamp(0.0, MAX_COUPLING);
+        self.coupling = if coupling.is_finite() {
+            coupling.clamp(0.0, MAX_COUPLING)
+        } else {
+            0.0
+        };
     }
 
     /// Publishes the block that just finished as the bus the next block reads.
@@ -126,24 +133,23 @@ impl ResonanceBus {
     }
 }
 
-impl Default for ResonanceBus {
-    fn default() -> Self {
-        ResonanceBus::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bus coupled as the instrument really runs it.
+    fn bus() -> ResonanceBus {
+        ResonanceBus::new(Preset::default().voicing.resonance_coupling)
+    }
     use crate::modal::ModalBank;
-    use crate::string::StringParams;
+    use crate::preset::Preset;
     use crate::types::SAMPLE_RATE;
 
     /// A one-partial stand-in for a string: same pole and same input gain
     /// convention (`1/(2 Z f_s)`) as `string.rs` builds, so the loop gains in
     /// these tests are the ones the instrument really runs at.
     fn partial(key: u8, detune_hz: f32) -> ModalBank {
-        let p = StringParams::for_key(key);
+        let p = Preset::default().string_params(key);
         let mut bank = ModalBank::with_capacity(1);
         bank.push_mode(
             p.f0 + detune_hz,
@@ -159,7 +165,7 @@ mod tests {
 
     #[test]
     fn bus_lags_by_one_block() {
-        let mut r = ResonanceBus::new();
+        let mut r = bus();
         let mut a = [0.0f32; BLOCK];
         a[0] = 1.0;
         r.contribute(&a);
@@ -172,7 +178,7 @@ mod tests {
 
     #[test]
     fn a_lone_string_drives_itself_with_nothing() {
-        let mut r = ResonanceBus::new();
+        let mut r = bus();
         let mut own = [0.0f32; BLOCK];
         own[3] = 0.5;
         r.contribute(&own);
@@ -184,7 +190,7 @@ mod tests {
 
     #[test]
     fn coupling_is_clamped_to_the_stable_range() {
-        let mut r = ResonanceBus::new();
+        let mut r = bus();
         r.set_coupling(10.0);
         assert_eq!(r.coupling(), MAX_COUPLING);
         r.set_coupling(-1.0);
@@ -193,7 +199,7 @@ mod tests {
 
     #[test]
     fn drive_is_bounded_however_loud_the_bus_gets() {
-        let mut r = ResonanceBus::new();
+        let mut r = bus();
         let huge = [1.0e12f32; BLOCK];
         r.contribute(&huge);
         r.begin_block();
@@ -206,7 +212,7 @@ mod tests {
     /// the worst realistic case for the loop gain, run for ten seconds.
     #[test]
     fn coincident_strings_stay_bounded_for_ten_seconds() {
-        let mut r = ResonanceBus::new();
+        let mut r = bus();
         r.set_coupling(MAX_COUPLING);
         let mut banks = [partial(21, 0.0), partial(21, 0.0)];
         let mut previous = [[0.0f32; BLOCK]; 2];
@@ -249,7 +255,7 @@ mod tests {
     /// up energy from one that was.
     #[test]
     fn an_unstruck_string_picks_up_the_bus() {
-        let mut r = ResonanceBus::new();
+        let mut r = bus();
         // C4 and a second string a fifth of a Hz away — the unison-style near
         // coincidence that produces the strongest halo.
         let mut banks = [partial(60, 0.0), partial(60, 0.2)];

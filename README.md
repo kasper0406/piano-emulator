@@ -22,11 +22,17 @@ Full 88-key polyphony with the sustain pedal down runs at roughly a third of one
 ## Build & run
 
 ```sh
-cargo build --release
-cargo run --release -p piano-emulator
+cargo run -p piano-emulator
 ```
 
-Use `--release`: the DSP is far too slow in debug builds. The binary opens the default output device and drops you into a REPL:
+The repository is a cargo workspace: `engine/` is the instrument, `tuner/` is
+the offline analysis and parameter-estimation crate `TUNING.md` describes, and
+`presets/` holds the instrument's parameters as data. `cargo test --release` at
+the root runs both crates, including the self-calibration gate, which puts the
+tuner's whole estimation pipeline over notes the engine rendered from a known
+preset and checks that the parameters come back.
+
+The default (dev) profile is built with `opt-level = 3` — the DSP is unusable unoptimized — so plain `cargo run`/`cargo test` are real-time capable while keeping fast incremental builds. `--release` additionally enables thin LTO and disables debug assertions; it is the profile performance is measured on, and the performance acceptance test only runs there. The binary opens the default output device and drops you into a REPL:
 
 ```
 n C4 90            strike C4 at velocity 90 (names like F#3, Bb2; A4 = 440 Hz)
@@ -34,19 +40,50 @@ off C4             release the key
 chord C3 E3 G3 95  strike together
 ped sus 0.5        sustain pedal (0..1, continuous) — also: sos 0|1, uc 0|1
 demo               ~15 s musical demo
-render out.wav     render offline to WAV
+render out.wav     render offline to WAV — add `demo`, or a `.mid` file to replay
 panic              everything off
 quit
 ```
 
-Tests (including the spectral acceptance suite and the performance budget) run with:
+The same work can be done without an audio device at all:
+
+```sh
+cargo run -p piano-emulator -- render out.wav song.mid --preset presets/default.toml
+cargo run -p piano-emulator -- preset my-piano.toml   # write out a preset to edit
+```
+
+Tests run with plain `cargo test`; add `--release` to include the performance-budget test:
 
 ```sh
 cargo test --release
 ```
 
+## Presets
+
+Every number that voices the instrument — the per-note tables (tuning, inharmonicity, decay, unison detuning, strike position, impedance, damper and hammer parameters) and the global constants (polarization balance, couplings, hammer felt, soundboard) — lives in a preset file. `--preset <file.toml>` voices both the live engine and offline renders from it; without it the built-in default is used, which is exactly `presets/default.toml`.
+
+The `f0` table is the tuning, so a stretch-tuned (Railsback) instrument is a preset like any other. The default table is equal temperament.
+
+`presets/salamander-c5.toml` is the first preset *measured* rather than tuned by hand: the tuning, inharmonicity, damping and unison detuning of the Yamaha C5 recorded as the [Salamander Grand Piano](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html) (Alexander Holm, CC-BY 3.0), estimated from 480 recordings by the tuner. Everything those recordings cannot identify — strike position, felt, soundboard, coupling, dampers — is inherited from the default. To reproduce it:
+
+```sh
+data/fetch_salamander.sh                       # 707 MiB, checksummed, into the gitignored data/
+cargo run --release -p piano-tuner -- survey \
+    data/salamander/SalamanderGrandPiano-V3+20200602.sfz \
+    --preset presets/default.toml --cache data/cache/salamander \
+    --name salamander-c5 --out presets/salamander-c5.toml \
+    --credit 'Salamander Grand Piano V3 (Yamaha C5) by Alexander Holm, CC-BY 3.0'
+cargo run --release -p piano-tuner --example salamander_ab   # A/B renders into renders/
+```
+
+## MIDI replay
+
+`render` accepts a standard MIDI file: note on/off on every channel, CC 64 as a *continuous* sustain pedal (half-pedalling survives), CC 66 sostenuto, CC 67 una corda, and the file's tempo map. Events are scheduled against the same event path the keyboard uses, so a replay is a performance the instrument plays rather than a special mode.
+
 ## Documentation
 
 - `SPEC.md` — the model specification and acceptance tests.
 - `DECISIONS.md` — the running log of every design decision and deviation.
-- `TUNING.md` — the plan for estimating parameters automatically from recordings of real pianos (in progress).
+- `TUNING.md` — the plan for estimating parameters automatically from recordings of real pianos (in progress; stage 1, its self-calibration gate and the first measured preset are built, in `tuner/`).
+- `presets/default.toml` — the hand-tuned v1 instrument, written out in full.
+- `presets/salamander-c5.toml` — the same instrument with everything stage 1 could measure off a real Yamaha C5 written into it.

@@ -6,11 +6,12 @@
 //! is what happens physically and what makes repeated notes under the sustain
 //! pedal sound right.
 
-use crate::hammer::{velocity_from_midi, Hammer, HammerParams, MAX_SKEW_SAMPLES};
+use crate::hammer::{Hammer, MAX_SKEW_SAMPLES};
 use crate::pedal::PedalState;
+use crate::preset::Preset;
 use crate::resonance::ResonanceBus;
 use crate::soundboard::pan_for_key;
-use crate::string::{PianoString, StringParams};
+use crate::string::PianoString;
 use crate::types::{key_index, BLOCK};
 
 /// Time constant of the damper engage/release ramp. The felt takes a few
@@ -33,14 +34,13 @@ pub struct Voice {
 }
 
 impl Voice {
-    pub fn new(key: u8) -> Self {
-        let params = StringParams::for_key(key);
-        let hammer = Hammer::new(HammerParams::for_key(key, params.impedance));
+    pub fn new(key: u8, preset: &Preset) -> Self {
+        let hammer = Hammer::new(preset.hammer_params(key));
         let mut voice = Voice {
             key,
             index: key_index(key).expect("voice key must be within A0..C8"),
             pan: pan_for_key(key),
-            string: PianoString::new(params),
+            string: PianoString::new(preset.string_params(key), &preset.voicing),
             hammer,
             held: false,
             damper_current: 0.0,
@@ -85,7 +85,7 @@ impl Voice {
     pub fn note_on(&mut self, vel: u8, pedals: &PedalState) {
         self.held = true;
         self.hammer.set_una_corda(pedals.una_corda());
-        self.hammer.strike(velocity_from_midi(vel));
+        self.hammer.strike_midi(vel);
         self.update_dampers(pedals);
     }
 
@@ -175,13 +175,21 @@ impl Voice {
 mod tests {
     use super::*;
 
+    fn voice(key: u8) -> Voice {
+        Voice::new(key, &Preset::default())
+    }
+
+    fn bus() -> ResonanceBus {
+        ResonanceBus::new(Preset::default().voicing.resonance_coupling)
+    }
+
     fn rms(v: &[f32]) -> f32 {
         (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt()
     }
 
     /// Renders `blocks` blocks and returns the RMS of the last one.
     fn render(voice: &mut Voice, blocks: usize) -> f32 {
-        let bus = ResonanceBus::new();
+        let bus = bus();
         let mut out = [0.0f32; BLOCK];
         for _ in 0..blocks {
             if !voice.process(&mut out, &bus) {
@@ -193,7 +201,7 @@ mod tests {
 
     #[test]
     fn a_fresh_voice_is_idle_and_silent() {
-        let mut v = Voice::new(60);
+        let mut v = voice(60);
         assert!(v.is_idle());
         assert_eq!(render(&mut v, 10), 0.0);
     }
@@ -201,7 +209,7 @@ mod tests {
     #[test]
     fn note_on_makes_sound_and_note_off_stops_it() {
         let pedals = PedalState::new();
-        let mut v = Voice::new(60);
+        let mut v = voice(60);
         v.note_on(90, &pedals);
         let struck = render(&mut v, 200);
         assert!(struck > 0.0);
@@ -217,8 +225,8 @@ mod tests {
     #[test]
     fn harder_strikes_are_louder() {
         let pedals = PedalState::new();
-        let mut soft = Voice::new(60);
-        let mut hard = Voice::new(60);
+        let mut soft = voice(60);
+        let mut hard = voice(60);
         soft.note_on(40, &pedals);
         hard.note_on(110, &pedals);
         assert!(render(&mut hard, 100) > render(&mut soft, 100) * 2.0);
@@ -227,7 +235,7 @@ mod tests {
     #[test]
     fn undamped_treble_keeps_ringing_after_release() {
         let pedals = PedalState::new();
-        let mut v = Voice::new(96); // C7, above the damper break
+        let mut v = voice(96); // C7, above the damper break
         v.note_on(100, &pedals);
         render(&mut v, 50);
         v.note_off(&pedals);
@@ -240,15 +248,15 @@ mod tests {
     #[test]
     fn a_silent_voice_runs_only_when_the_bus_can_reach_it() {
         let mut pedals = PedalState::new();
-        let mut v = Voice::new(60);
+        let mut v = voice(60);
         let mut out = [0.0f32; BLOCK];
 
-        let mut quiet = ResonanceBus::new();
+        let mut quiet = bus();
         quiet.begin_block();
         assert!(!quiet.is_active());
         assert!(!v.process(&mut out, &quiet));
 
-        let mut loud = ResonanceBus::new();
+        let mut loud = bus();
         loud.contribute(&[0.01; BLOCK]);
         loud.begin_block();
         assert!(loud.is_active());
@@ -264,7 +272,7 @@ mod tests {
     #[test]
     fn restrike_does_not_reset_the_ringing_string() {
         let pedals = PedalState::new();
-        let mut v = Voice::new(60);
+        let mut v = voice(60);
         v.note_on(100, &pedals);
         render(&mut v, 100);
         let before = v.string().energy();

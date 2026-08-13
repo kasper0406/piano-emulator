@@ -1,0 +1,32 @@
+[package]
+name = "piano-tuner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Offline partial tracking and parameter estimation for piano-emulator"
+
+[lib]
+name = "piano_tuner"
+path = "src/lib.rs"
+
+[[bin]]
+name = "piano-tuner"
+path = "src/main.rs"
+
+[dependencies]
+hound = "3.5"
+claxon = "0.4"
+rubato = "0.15"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+# `float_roundtrip`: without it serde_json's fast float parser loses up to one
+# ULP, so a cached trajectory would not reload as the numbers that were
+# written. Estimators must give the same answer from cache as from a rerun.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+toml = "0.8"
+
+# The engine is a *dev*-dependency: the self-calibration gate renders its test
+# material through the real instrument, but the library itself analyses
+# recordings and must stay usable without an audio device on the link line.
+[dev-dependencies]
+piano-emulator = { path = "../engine" }

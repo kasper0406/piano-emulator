@@ -5,6 +5,8 @@
 //! own offline engine.
 
 use crate::engine::EventSender;
+use crate::midi;
+use crate::preset::Preset;
 use crate::render::{
     demo_sequence, default_sequence, render_to_wav, RenderEvent, DEFAULT_DURATION_S,
     DEMO_DURATION_S,
@@ -72,12 +74,46 @@ pub enum Command {
     Chord { keys: Vec<u8>, vel: u8 },
     Pedal(PedalEvent),
     Demo,
-    Render { path: PathBuf, demo: bool },
+    Render { path: PathBuf, source: RenderSource },
     Panic,
     Quit,
     Help,
     /// Blank line.
     Nothing,
+}
+
+/// What `render` should play.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RenderSource {
+    /// The compass sweep: what you want to hear when checking evenness.
+    Default,
+    /// The built-in musical demo.
+    Demo,
+    /// A standard MIDI file.
+    Midi(PathBuf),
+}
+
+impl RenderSource {
+    /// Reads the source into a timed event list and the length to render.
+    pub fn resolve(&self) -> Result<(Vec<RenderEvent>, f32), String> {
+        match self {
+            RenderSource::Default => Ok((default_sequence(), DEFAULT_DURATION_S)),
+            RenderSource::Demo => Ok((demo_sequence(), DEMO_DURATION_S)),
+            RenderSource::Midi(path) => match midi::load(path) {
+                Ok(performance) => {
+                    let duration = performance.duration_s();
+                    Ok((performance.events, duration))
+                }
+                Err(e) => Err(format!("could not read {}: {e}", path.display())),
+            },
+        }
+    }
+}
+
+/// Extensions `render` treats as a MIDI file rather than a keyword.
+fn is_midi_path(arg: &str) -> bool {
+    let lower = arg.to_ascii_lowercase();
+    lower.ends_with(".mid") || lower.ends_with(".midi")
 }
 
 const HELP: &str = "commands (notes are names like C4, F#3, Bb2; A4 = 440 Hz)
@@ -88,7 +124,8 @@ const HELP: &str = "commands (notes are names like C4, F#3, Bb2; A4 = 440 Hz)
   ped sos <0|1>            sostenuto: captures the keys held right now
   ped uc <0|1>             una corda
   demo                     play the built-in demo
-  render <file.wav> [demo] render the demo or a short default offline
+  render <out.wav> [what]  render offline: a compass sweep by default,
+                           'demo', or a standard MIDI file (*.mid)
   panic                    all notes and pedals off
   help                     this list
   quit                     exit";
@@ -145,17 +182,22 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         "ped" | "pedal" => parse_pedal(&args),
         "demo" => Ok(Command::Demo),
         "render" => {
+            const USAGE: &str = "usage: render <out.wav> [demo | <file.mid>]";
             let Some(path) = args.first() else {
-                return Err("usage: render <file.wav> [demo]".into());
+                return Err(USAGE.into());
             };
-            let demo = match args.get(1) {
-                None => false,
-                Some(a) if a.eq_ignore_ascii_case("demo") => true,
-                Some(_) => return Err("usage: render <file.wav> [demo]".into()),
+            if args.len() > 2 {
+                return Err(USAGE.into());
+            }
+            let source = match args.get(1) {
+                None => RenderSource::Default,
+                Some(a) if a.eq_ignore_ascii_case("demo") => RenderSource::Demo,
+                Some(a) if is_midi_path(a) => RenderSource::Midi(PathBuf::from(a)),
+                Some(_) => return Err(USAGE.into()),
             };
             Ok(Command::Render {
                 path: PathBuf::from(path),
-                demo,
+                source,
             })
         }
         "panic" => Ok(Command::Panic),
@@ -205,8 +247,10 @@ fn bool_arg(arg: &str) -> Result<bool, String> {
     }
 }
 
-/// Reads commands from stdin until `quit` or EOF. Returns when the user is done.
-pub fn run(mut sender: EventSender) -> io::Result<()> {
+/// Reads commands from stdin until `quit` or EOF. Returns when the user is
+/// done. `preset` is the one the live engine was built from, so an offline
+/// render started here sounds like what is coming out of the speakers.
+pub fn run(mut sender: EventSender, preset: &Preset) -> io::Result<()> {
     println!("piano-emulator — physical model piano");
     println!("{}", help_text());
 
@@ -222,7 +266,7 @@ pub fn run(mut sender: EventSender) -> io::Result<()> {
         }
         match parse_command(&line) {
             Ok(Command::Quit) => return Ok(()),
-            Ok(command) => execute(command, &mut sender),
+            Ok(command) => execute(command, &mut sender, preset),
             Err(message) => {
                 println!("{message}");
                 println!("type 'help' for the command list");
@@ -231,7 +275,7 @@ pub fn run(mut sender: EventSender) -> io::Result<()> {
     }
 }
 
-fn execute(command: Command, sender: &mut EventSender) {
+fn execute(command: Command, sender: &mut EventSender, preset: &Preset) {
     match command {
         Command::Nothing | Command::Quit => {}
         Command::Help => println!("{}", help_text()),
@@ -256,13 +300,15 @@ fn execute(command: Command, sender: &mut EventSender) {
             println!("playing demo ({DEMO_DURATION_S:.0} s)");
             play_live(&demo_sequence(), sender);
         }
-        Command::Render { path, demo } => {
-            let (events, duration) = if demo {
-                (demo_sequence(), DEMO_DURATION_S)
-            } else {
-                (default_sequence(), DEFAULT_DURATION_S)
+        Command::Render { path, source } => {
+            let (events, duration) = match source.resolve() {
+                Ok(resolved) => resolved,
+                Err(message) => {
+                    println!("{message}");
+                    return;
+                }
             };
-            match render_to_wav(&path, &events, duration) {
+            match render_to_wav(&path, preset, &events, duration) {
                 Ok(()) => println!("wrote {} ({duration:.1} s)", path.display()),
                 Err(e) => println!("could not write {}: {e}", path.display()),
             }
@@ -392,17 +438,26 @@ mod tests {
             parse_command("render out.wav demo"),
             Ok(Command::Render {
                 path: PathBuf::from("out.wav"),
-                demo: true
+                source: RenderSource::Demo
             })
         );
         assert_eq!(
             parse_command("render out.wav"),
             Ok(Command::Render {
                 path: PathBuf::from("out.wav"),
-                demo: false
+                source: RenderSource::Default
+            })
+        );
+        assert_eq!(
+            parse_command("render out.wav Song.MID"),
+            Ok(Command::Render {
+                path: PathBuf::from("out.wav"),
+                source: RenderSource::Midi(PathBuf::from("Song.MID"))
             })
         );
         assert!(parse_command("render").is_err());
+        assert!(parse_command("render out.wav song.wav").is_err());
+        assert!(parse_command("render out.wav demo extra").is_err());
         assert!(parse_command("wat").is_err());
     }
 }

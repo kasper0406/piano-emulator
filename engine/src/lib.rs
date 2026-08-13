@@ -15,14 +15,20 @@
 //!                          +-- Soundboard: pan, body, FDN, master -> stereo
 //! ```
 //!
+//! Every tuning number the instrument uses comes from a [`Preset`], loaded from
+//! a TOML file or built from [`Preset::default`]; the DSP modules hold no
+//! parameter tables of their own.
+//!
 //! `lib.rs` owns the module graph and the public surface; the DSP modules are
 //! edited independently and must not need changes here.
 
 pub mod audio;
 pub mod engine;
 pub mod hammer;
+pub mod midi;
 pub mod modal;
 pub mod pedal;
+pub mod preset;
 pub mod render;
 pub mod repl;
 pub mod resonance;
@@ -33,8 +39,10 @@ pub mod voice;
 
 pub use engine::{Engine, EventSender};
 pub use hammer::{Hammer, HammerParams};
+pub use midi::MidiPerformance;
 pub use modal::ModalBank;
 pub use pedal::PedalState;
+pub use preset::Preset;
 pub use render::{render_to_buffer, render_to_wav, RenderEvent};
 pub use resonance::ResonanceBus;
 pub use soundboard::Soundboard;

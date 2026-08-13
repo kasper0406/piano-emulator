@@ -22,10 +22,8 @@
 //! safety limiter that is bit-transparent below -1 dBFS.
 
 use crate::modal::ModalBank;
+use crate::preset::SoundboardVoicing;
 use crate::types::{db_to_amp, key_position, BLOCK, OUTPUT_GAIN, SAMPLE_RATE};
-
-/// Default direct/board balance from the spec.
-pub const DEFAULT_BOARD_MIX: f32 = 0.35;
 
 /// Maximum pan displacement; bass to the left, treble to the right.
 const MAX_PAN: f32 = 0.6;
@@ -33,48 +31,8 @@ const MAX_PAN: f32 = 0.6;
 /// DC blocker corner frequency, Hz.
 const DC_BLOCK_HZ: f32 = 10.0;
 
-/// Master high shelf: gentle treble roll-off standing in for the drop in
-/// soundboard radiation efficiency above a few kHz. First order, so the shelf
-/// gain is an asymptote — the audible attenuation at 10 kHz is about half of it.
-const SHELF_HZ: f32 = 4_000.0;
-const SHELF_GAIN_DB: f32 = -4.0;
-
 /// Level above which the safety limiter starts to bend the signal (-1 dBFS).
 const LIMIT_THRESHOLD: f32 = 0.891_251;
-
-/// Body modes: (frequency Hz, Q, peak gain relative to the drive). Frequencies
-/// are deliberately kept off the equal-tempered grid — a body mode sitting
-/// exactly on a note would make that one key jump out of the compass.
-const BODY_MODES: [(f32, f32, f32); 24] = [
-    (42.0, 12.0, 0.55),
-    (53.0, 13.0, 0.70),
-    (63.0, 14.0, 0.85),
-    (75.0, 15.0, 1.00),
-    (85.0, 16.0, 0.90),
-    (97.0, 17.0, 0.80),
-    (114.0, 18.0, 0.95),
-    (129.0, 19.0, 0.75),
-    (142.0, 20.0, 0.85),
-    (159.0, 21.0, 0.65),
-    (168.0, 22.0, 0.80),
-    (182.0, 22.0, 0.60),
-    (200.0, 23.0, 0.70),
-    (213.0, 24.0, 0.55),
-    (230.0, 24.0, 0.65),
-    (240.0, 25.0, 0.50),
-    (258.0, 25.0, 0.60),
-    (274.0, 26.0, 0.45),
-    (295.0, 26.0, 0.50),
-    (312.0, 27.0, 0.40),
-    (327.0, 27.0, 0.45),
-    (345.0, 28.0, 0.35),
-    (370.0, 28.0, 0.40),
-    (388.0, 28.0, 0.30),
-];
-
-/// Overall weight of the body bank in the board drive. Folded into the mode
-/// gains at construction, so the bank's output is added to the drive as is.
-const BODY_MIX: f32 = 0.7;
 
 /// Stereo position of a key: -1.0 hard left, +1.0 hard right.
 pub fn pan_for_key(key: u8) -> f32 {
@@ -92,6 +50,8 @@ pub struct Soundboard {
     body: ModalBank,
     fdn: Fdn,
     board_mix: f32,
+    /// Linear gain of the master high shelf's upper band.
+    shelf_gain: f32,
     dc_r_coeff: f32,
     dc_state: [(f32, f32); 2],
     shelf_b: f32,
@@ -99,15 +59,16 @@ pub struct Soundboard {
 }
 
 impl Soundboard {
-    pub fn new() -> Self {
-        let mut body = ModalBank::with_capacity(BODY_MODES.len());
-        for (freq, q, amp) in BODY_MODES {
+    pub fn new(voicing: &SoundboardVoicing) -> Self {
+        let mut body = ModalBank::with_capacity(voicing.body_modes.len());
+        for mode in &voicing.body_modes {
             // Q = f / bandwidth and this resonator's -3 dB bandwidth is sigma/pi.
-            let sigma = std::f32::consts::PI * freq / q;
+            let sigma = std::f32::consts::PI * mode.hz / mode.q;
             // A complex one-pole driven at its own frequency settles at
-            // |s| = g / (2 (1 - r)), so this normalises the mode's peak to `amp`.
+            // |s| = g / (2 (1 - r)), so this normalises the mode's peak to its
+            // tabulated gain.
             let r = (-sigma / SAMPLE_RATE).exp();
-            body.push_mode(freq, sigma, 2.0 * (1.0 - r) * amp * BODY_MIX);
+            body.push_mode(mode.hz, sigma, 2.0 * (1.0 - r) * mode.gain * voicing.body_mix);
         }
         Soundboard {
             direct_l: [0.0; BLOCK],
@@ -117,11 +78,12 @@ impl Soundboard {
             board_r: [0.0; BLOCK],
             drive: [0.0; BLOCK],
             body,
-            fdn: Fdn::new(),
-            board_mix: DEFAULT_BOARD_MIX,
+            fdn: Fdn::new(voicing),
+            board_mix: voicing.board_mix,
+            shelf_gain: db_to_amp(voicing.shelf_gain_db),
             dc_r_coeff: (-std::f32::consts::TAU * DC_BLOCK_HZ / SAMPLE_RATE).exp(),
             dc_state: [(0.0, 0.0); 2],
-            shelf_b: 1.0 - (-std::f32::consts::TAU * SHELF_HZ / SAMPLE_RATE).exp(),
+            shelf_b: 1.0 - (-std::f32::consts::TAU * voicing.shelf_hz / SAMPLE_RATE).exp(),
             shelf_state: [0.0; 2],
         }
     }
@@ -160,7 +122,7 @@ impl Soundboard {
         debug_assert_eq!(out_r.len(), BLOCK);
         let direct = 1.0 - self.board_mix;
         self.board();
-        let shelf_g = db_to_amp(SHELF_GAIN_DB);
+        let shelf_g = self.shelf_gain;
         for ch in 0..2 {
             let (out, dry, wet) = if ch == 0 {
                 (&mut *out_l, &self.direct_l, &self.board_l)
@@ -206,12 +168,6 @@ impl Soundboard {
     }
 }
 
-impl Default for Soundboard {
-    fn default() -> Self {
-        Soundboard::new()
-    }
-}
-
 /// Safety limiter: transparent below -1 dBFS, tanh-compressed above, and
 /// continuous in value and slope at the threshold so it cannot click.
 fn soft_clip(x: f32) -> f32 {
@@ -231,12 +187,6 @@ const FDN_LINES: usize = 8;
 /// period and the modal density of the network is maximal.
 const FDN_DELAYS: [usize; FDN_LINES] = [149, 211, 263, 331, 401, 461, 541, 683];
 
-/// Reverberation time of the diffuse field at low frequency and at
-/// [`FDN_HF_HZ`]. Short and dense: this is a soundboard, not a room.
-const FDN_T60_LF: f32 = 0.4;
-const FDN_T60_HF: f32 = 0.1;
-const FDN_HF_HZ: f32 = 8_000.0;
-
 /// Injection and tap sign patterns, three mutually orthogonal rows of the 8×8
 /// Hadamard matrix. Orthogonal taps are what makes the two output channels
 /// decorrelated.
@@ -246,11 +196,6 @@ const FDN_R_SIGN: [f32; FDN_LINES] = [1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0
 
 /// 1/sqrt(FDN_LINES): keeps injection and tapping unitary.
 const FDN_TAP_SCALE: f32 = 0.353_553_4;
-
-/// Broadband gain correction measured by driving the network with white noise
-/// quiet enough to keep the safety limiter out of the measurement, so that
-/// `board_mix` is a loudness-preserving crossfade.
-const BOARD_LEVEL: f32 = 1.44;
 
 /// Below this peak sample value the network is inaudible and, with no input,
 /// can only get quieter — flush it so decayed state cannot linger as denormals.
@@ -267,12 +212,15 @@ struct Fdn {
     loss_state: [f32; FDN_LINES],
     loss_a: [f32; FDN_LINES],
     loss_g: [f32; FDN_LINES],
+    /// Broadband gain correction that makes the whole board path unity, so
+    /// `board_mix` is a loudness-preserving crossfade.
+    level: f32,
     /// Largest sample written during the previous block.
     peak: f32,
 }
 
 impl Fdn {
-    fn new() -> Self {
+    fn new(voicing: &SoundboardVoicing) -> Self {
         let mut start = [0usize; FDN_LINES];
         let mut total = 0;
         for i in 0..FDN_LINES {
@@ -282,7 +230,7 @@ impl Fdn {
         let mut loss_a = [0.0f32; FDN_LINES];
         let mut loss_g = [0.0f32; FDN_LINES];
         for i in 0..FDN_LINES {
-            let (g, a) = line_loss(FDN_DELAYS[i]);
+            let (g, a) = line_loss(FDN_DELAYS[i], voicing);
             loss_g[i] = g;
             loss_a[i] = a;
         }
@@ -293,6 +241,7 @@ impl Fdn {
             loss_state: [0.0; FDN_LINES],
             loss_a,
             loss_g,
+            level: voicing.board_level,
             peak: 0.0,
         }
     }
@@ -342,23 +291,23 @@ impl Fdn {
                 l += FDN_L_SIGN[i] * tap[i];
                 r += FDN_R_SIGN[i] * tap[i];
             }
-            out_l[n] = BOARD_LEVEL * FDN_TAP_SCALE * l;
-            out_r[n] = BOARD_LEVEL * FDN_TAP_SCALE * r;
+            out_l[n] = self.level * FDN_TAP_SCALE * l;
+            out_r[n] = self.level * FDN_TAP_SCALE * r;
         }
         self.peak = peak;
     }
 }
 
-/// Per-pass loss for a line of `m` samples: the DC gain that yields
-/// [`FDN_T60_LF`] and the one-pole coefficient that bends the gain down to
-/// [`FDN_T60_HF`] at [`FDN_HF_HZ`].
-fn line_loss(m: usize) -> (f32, f32) {
+/// Per-pass loss for a line of `m` samples: the DC gain that yields the
+/// preset's low-frequency T60 and the one-pole coefficient that bends the gain
+/// down to its high-frequency T60 at `fdn_hf_hz`.
+fn line_loss(m: usize, voicing: &SoundboardVoicing) -> (f32, f32) {
     // T60 means -60 dB, i.e. a factor exp(-6.907) over T60 seconds.
     let passes = |t60: f32| (-6.907 * m as f32 / (t60 * SAMPLE_RATE)).exp();
-    let g_lf = passes(FDN_T60_LF);
-    let rho = passes(FDN_T60_HF) / g_lf;
+    let g_lf = passes(voicing.fdn_t60_lf);
+    let rho = passes(voicing.fdn_t60_hf) / g_lf;
     // Solve |(1-a) / (1 - a e^-jw)| = rho for a in (0, 1).
-    let cw = (std::f32::consts::TAU * FDN_HF_HZ / SAMPLE_RATE).cos();
+    let cw = (std::f32::consts::TAU * voicing.fdn_hf_hz / SAMPLE_RATE).cos();
     let d = 1.0 - rho * rho;
     let b = 1.0 - rho * rho * cw;
     (g_lf, (b - (b * b - d * d).sqrt()) / d)
@@ -385,6 +334,11 @@ fn hadamard8(v: &mut [f32; FDN_LINES]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset::Preset;
+
+    fn voicing() -> SoundboardVoicing {
+        Preset::default().soundboard
+    }
 
     fn rms(v: &[f32]) -> f32 {
         (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt()
@@ -423,7 +377,7 @@ mod tests {
     /// Drives the bare FDN with a Hann-windowed sine burst (windowed so the
     /// burst does not splatter energy across the spectrum) and returns the tail.
     fn fdn_burst_tail(freq: f32, burst: usize, tail_len: usize) -> Vec<f32> {
-        let mut fdn = Fdn::new();
+        let mut fdn = Fdn::new(&voicing());
         let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
         let mut tail = Vec::with_capacity(tail_len);
         let mut n = 0usize;
@@ -469,7 +423,7 @@ mod tests {
 
     #[test]
     fn silence_in_silence_out() {
-        let mut sb = Soundboard::new();
+        let mut sb = Soundboard::new(&voicing());
         let (mut l, mut r) = ([1.0f32; BLOCK], [1.0f32; BLOCK]);
         sb.begin_block();
         sb.process(&mut l, &mut r);
@@ -478,7 +432,7 @@ mod tests {
 
     #[test]
     fn dc_offset_is_removed() {
-        let mut sb = Soundboard::new();
+        let mut sb = Soundboard::new(&voicing());
         let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
         let dc = [0.001f32; BLOCK];
         for _ in 0..200 {
@@ -492,7 +446,7 @@ mod tests {
 
     #[test]
     fn board_decays_and_stays_bounded_over_ten_seconds() {
-        let mut sb = Soundboard::new();
+        let mut sb = Soundboard::new(&voicing());
         let mut impulse = [0.0f32; BLOCK];
         impulse[0] = 1.0;
         let early = render_peak(&mut sb, &impulse, 1);
@@ -521,7 +475,7 @@ mod tests {
         let burst = (0.2 * SAMPLE_RATE) as usize;
         let tail = (1.5 * SAMPLE_RATE) as usize;
         let lf = decay_samples(&fdn_burst_tail(100.0, burst, tail), 20.0);
-        let hf = decay_samples(&fdn_burst_tail(FDN_HF_HZ, burst, tail), 20.0);
+        let hf = decay_samples(&fdn_burst_tail(voicing().fdn_hf_hz, burst, tail), 20.0);
         assert!(
             lf > 2 * hf,
             "T20 at 100 Hz {lf} samples vs at 8 kHz {hf} samples"
@@ -532,23 +486,24 @@ mod tests {
     /// against the two T60 targets rather than only through the tail.
     #[test]
     fn line_loss_hits_both_t60_targets() {
+        let voicing = voicing();
         for m in FDN_DELAYS {
-            let (g, a) = line_loss(m);
+            let (g, a) = line_loss(m, &voicing);
             assert!((0.0..1.0).contains(&a), "line {m}: pole {a}");
             let round_trips = |t60: f32| SAMPLE_RATE * t60 / m as f32;
             // DC: unity through the filter, so g alone must give T60_LF.
-            let lf_db = 20.0 * g.log10() * round_trips(FDN_T60_LF);
+            let lf_db = 20.0 * g.log10() * round_trips(voicing.fdn_t60_lf);
             assert!((lf_db + 60.0).abs() < 0.5, "line {m}: {lf_db} dB over T60_LF");
-            let w = std::f32::consts::TAU * FDN_HF_HZ / SAMPLE_RATE;
+            let w = std::f32::consts::TAU * voicing.fdn_hf_hz / SAMPLE_RATE;
             let mag = g * (1.0 - a) / (1.0 - 2.0 * a * w.cos() + a * a).sqrt();
-            let hf_db = 20.0 * mag.log10() * round_trips(FDN_T60_HF);
+            let hf_db = 20.0 * mag.log10() * round_trips(voicing.fdn_t60_hf);
             assert!((hf_db + 60.0).abs() < 0.5, "line {m}: {hf_db} dB over T60_HF");
         }
     }
 
     #[test]
     fn board_output_channels_are_decorrelated() {
-        let mut sb = Soundboard::new();
+        let mut sb = Soundboard::new(&voicing());
         let mut impulse = [0.0f32; BLOCK];
         impulse[0] = 1.0;
         sb.set_board_mix(1.0);
@@ -571,9 +526,9 @@ mod tests {
     #[test]
     fn board_path_preserves_broadband_loudness() {
         // A pure crossfade only leaves the level alone if the board path has
-        // roughly unity broadband gain; BOARD_LEVEL is what pins that down.
-        let mut dry = Soundboard::new();
-        let mut wet = Soundboard::new();
+        // roughly unity broadband gain; `board_level` is what pins that down.
+        let mut dry = Soundboard::new(&voicing());
+        let mut wet = Soundboard::new(&voicing());
         dry.set_board_mix(0.0);
         wet.set_board_mix(1.0);
         let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
@@ -603,7 +558,7 @@ mod tests {
 
     /// Steady-state amplitude of the body bank alone at `freq`, unit sine in.
     fn body_response(freq: f32) -> f32 {
-        let mut body = Soundboard::new().body;
+        let mut body = Soundboard::new(&voicing()).body;
         let (mut y, mut peak) = ([0.0f32; BLOCK], 0.0f32);
         // The lowest mode has T60 ≈ 0.6 s; settle well past that before reading.
         let settle = 300;
@@ -627,23 +582,23 @@ mod tests {
         // Modal overlap must stay low enough that the table is audible as
         // resonances rather than as one broad low-frequency shelf: every
         // tabulated frequency has to be a local maximum.
-        for w in BODY_MODES.windows(2) {
-            let (lo, hi) = (body_response(w[0].0), body_response(w[1].0));
-            let mid = body_response(0.5 * (w[0].0 + w[1].0));
+        for w in voicing().body_modes.windows(2) {
+            let (lo, hi) = (body_response(w[0].hz), body_response(w[1].hz));
+            let mid = body_response(0.5 * (w[0].hz + w[1].hz));
             assert!(
                 mid < 0.9 * lo.min(hi),
                 "modes at {} and {} Hz merge: {lo}, {mid}, {hi}",
-                w[0].0,
-                w[1].0
+                w[0].hz,
+                w[1].hz
             );
         }
     }
 
     #[test]
     fn body_modes_stay_in_the_low_frequency_range() {
-        for &(freq, _, _) in &BODY_MODES {
+        for mode in &voicing().body_modes {
             // Bounded gain: the body colours the board, it must not boom.
-            assert!(body_response(freq) < 1.0);
+            assert!(body_response(mode.hz) < 1.0);
         }
         assert!(body_response(1_000.0) < 0.03, "body bank rings above its range");
     }
@@ -651,7 +606,7 @@ mod tests {
     #[test]
     fn master_shelf_tilts_the_treble_down() {
         let level = |freq: f32| {
-            let mut sb = Soundboard::new();
+            let mut sb = Soundboard::new(&voicing());
             sb.set_board_mix(0.0);
             let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
             let mut energy = 0.0f32;

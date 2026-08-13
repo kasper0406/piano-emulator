@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["engine", "tuner"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+
+# Profiles only take effect from the workspace root, so they live here rather
+# than in the member manifests.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# The DSP is unusable at opt-level 0, so the default (dev) profile is optimized
+# too: plain `cargo run` / `cargo test` produce real-time-capable code while
+# keeping incremental builds and debug assertions. Release still differs (thin
+# LTO, one codegen unit, assertions off) and stays the profile that perf is
+# measured on — the perf acceptance test remains release-only.
+[profile.dev]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3

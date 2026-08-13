@@ -73,8 +73,13 @@ pub fn key_position(note: u8) -> f32 {
 
 /// Linear interpolation of `y` over the sorted `x` anchor points, clamped at the ends.
 /// Used by the per-note parameter tables so they stay smooth and editable.
+///
+/// The anchors must be strictly ascending in `x`: a repeated `x` divides by a
+/// zero span. The tables written in this file are literals; the one that comes
+/// from a file is checked by `Preset::validate`.
 pub fn interp_anchors(x: f32, anchors: &[(f32, f32)]) -> f32 {
     debug_assert!(!anchors.is_empty());
+    debug_assert!(anchors.windows(2).all(|w| w[0].0 < w[1].0));
     if x <= anchors[0].0 {
         return anchors[0].1;
     }

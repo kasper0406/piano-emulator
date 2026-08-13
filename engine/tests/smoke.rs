@@ -6,9 +6,20 @@
 //! modules are completed; these are the invariants that must hold at every
 //! stage of that work.
 
+use piano_emulator::preset::Preset;
 use piano_emulator::render::{demo_sequence, render_to_buffer, RenderEvent, DEMO_DURATION_S};
-use piano_emulator::types::{note_to_freq, Event, PedalEvent, SAMPLE_RATE};
+use piano_emulator::types::{Event, PedalEvent, SAMPLE_RATE};
 use rustfft::{num_complex::Complex32, FftPlanner};
+
+/// The instrument as shipped, or the one `PIANO_PRESET` names — see
+/// `tests/acceptance.rs`, which uses the same override for the same reason.
+fn preset() -> Preset {
+    match std::env::var("PIANO_PRESET") {
+        Ok(path) if !path.is_empty() => Preset::load(std::path::Path::new(&path))
+            .unwrap_or_else(|e| panic!("PIANO_PRESET={path}: {e}")),
+        _ => Preset::default(),
+    }
+}
 
 fn peak(signal: &[f32]) -> f32 {
     signal.iter().fold(0.0f32, |m, &v| m.max(v.abs()))
@@ -26,7 +37,7 @@ fn window(signal: &[f32], from_s: f32, to_s: f32) -> &[f32] {
 
 #[test]
 fn an_engine_with_no_events_is_bit_exact_silent() {
-    let (l, r) = render_to_buffer(&[], 2.0);
+    let (l, r) = render_to_buffer(&preset(), &[], 2.0);
     assert!(l.iter().chain(r.iter()).all(|&v| v == 0.0));
 }
 
@@ -36,7 +47,7 @@ fn a_single_note_sounds_at_a_sane_level_and_decays() {
         RenderEvent::new(0.0, Event::NoteOn { key: 60, vel: 80 }),
         RenderEvent::new(1.0, Event::NoteOff { key: 60 }),
     ];
-    let (l, _r) = render_to_buffer(&events, 3.0);
+    let (l, _r) = render_to_buffer(&preset(), &events, 3.0);
 
     // One channel of a centre-panned note, so ~3 dB below the mono peak the
     // gain staging in `types::OUTPUT_GAIN` is calibrated against.
@@ -61,7 +72,7 @@ fn the_sustain_pedal_keeps_a_released_note_ringing() {
             RenderEvent::new(0.05, Event::NoteOn { key: 48, vel: 90 }),
             RenderEvent::new(1.0, Event::NoteOff { key: 48 }),
         ];
-        let (l, _r) = render_to_buffer(&events, 3.5);
+        let (l, _r) = render_to_buffer(&preset(), &events, 3.5);
         rms(window(&l, 3.0, 3.2))
     };
     let held = strike(1.0);
@@ -88,7 +99,7 @@ fn dense_playing_stays_finite_and_bounded() {
         events.push(RenderEvent::new(t, Event::NoteOn { key, vel }));
         events.push(RenderEvent::new(t + 0.4, Event::NoteOff { key }));
     }
-    let (l, r) = render_to_buffer(&events, 14.0);
+    let (l, r) = render_to_buffer(&preset(), &events, 14.0);
 
     assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()));
     assert!(peak(&l).max(peak(&r)) <= 1.0);
@@ -136,8 +147,8 @@ fn struck_notes_sound_at_the_right_pitch() {
     // detuning — a few cents at most.
     for key in [45u8, 60, 69] {
         let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })];
-        let (l, _r) = render_to_buffer(&events, 3.0);
-        let expected = note_to_freq(key);
+        let (l, _r) = render_to_buffer(&preset(), &events, 3.0);
+        let expected = preset().f0(key);
         let measured = peak_frequency_near(window(&l, 0.2, 1.5), 1 << 18, expected);
         let cents = 1200.0 * (measured / expected).log2();
         assert!(
@@ -149,7 +160,7 @@ fn struck_notes_sound_at_the_right_pitch() {
 
 #[test]
 fn the_demo_renders_without_clipping() {
-    let (l, r) = render_to_buffer(&demo_sequence(), DEMO_DURATION_S);
+    let (l, r) = render_to_buffer(&preset(), &demo_sequence(), DEMO_DURATION_S);
     assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()));
     assert!(peak(&l).max(peak(&r)) <= 1.0);
     assert!(rms(&l) > 1e-4, "the demo produced no sound");

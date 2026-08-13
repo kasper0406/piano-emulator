@@ -4,6 +4,7 @@
 //! callback uses, so a WAV rendered here is what the device would have played.
 
 use crate::engine::Engine;
+use crate::preset::Preset;
 use crate::types::{Event, PedalEvent, BLOCK, HIGHEST_KEY, LOWEST_KEY, SAMPLE_RATE};
 use std::path::Path;
 
@@ -19,25 +20,36 @@ impl RenderEvent {
     pub fn new(time_s: f32, event: Event) -> Self {
         RenderEvent { time_s, event }
     }
+
+    /// The sample this event belongs to, rounded to nearest.
+    pub fn frame(&self) -> usize {
+        (self.time_s.max(0.0) * SAMPLE_RATE).round() as usize
+    }
 }
 
-/// Renders `duration_s` of audio, applying each event at the block boundary
-/// that contains its timestamp.
-pub fn render_to_buffer(events: &[RenderEvent], duration_s: f32) -> (Vec<f32>, Vec<f32>) {
+/// Renders `duration_s` of audio through an engine built from `preset`.
+///
+/// An event takes effect at the start of the `BLOCK`-sized block that contains
+/// its sample: the engine's state can only advance a whole block at a time, so
+/// that is the finest grain any event can have, live or offline.
+pub fn render_to_buffer(
+    preset: &Preset,
+    events: &[RenderEvent],
+    duration_s: f32,
+) -> (Vec<f32>, Vec<f32>) {
     let mut schedule: Vec<RenderEvent> = events.to_vec();
-    schedule.sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+    schedule.sort_by_key(|e| e.frame());
 
     let frames = (duration_s * SAMPLE_RATE).max(0.0) as usize;
     let mut left = vec![0.0f32; frames];
     let mut right = vec![0.0f32; frames];
 
-    let (mut engine, _sender) = Engine::new();
+    let (mut engine, _sender) = Engine::new(preset);
     let mut next = 0usize;
     let mut start = 0usize;
     while start < frames {
         let end = (start + BLOCK).min(frames);
-        let block_end_s = end as f32 / SAMPLE_RATE;
-        while next < schedule.len() && schedule[next].time_s < block_end_s {
+        while next < schedule.len() && schedule[next].frame() < end {
             engine.handle_event(schedule[next].event);
             next += 1;
         }
@@ -50,10 +62,11 @@ pub fn render_to_buffer(events: &[RenderEvent], duration_s: f32) -> (Vec<f32>, V
 /// Renders to a 32-bit float stereo WAV at the engine's sample rate.
 pub fn render_to_wav(
     path: &Path,
+    preset: &Preset,
     events: &[RenderEvent],
     duration_s: f32,
 ) -> Result<(), hound::Error> {
-    let (left, right) = render_to_buffer(events, duration_s);
+    let (left, right) = render_to_buffer(preset, events, duration_s);
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: SAMPLE_RATE as u32,
@@ -219,7 +232,7 @@ mod tests {
 
     #[test]
     fn an_empty_sequence_renders_exact_silence() {
-        let (l, r) = render_to_buffer(&[], 0.5);
+        let (l, r) = render_to_buffer(&Preset::default(), &[], 0.5);
         assert_eq!(l.len(), (0.5 * SAMPLE_RATE) as usize);
         assert!(l.iter().chain(r.iter()).all(|&v| v == 0.0));
     }
@@ -227,7 +240,7 @@ mod tests {
     #[test]
     fn a_struck_note_produces_bounded_audio() {
         let events = [RenderEvent::new(0.0, Event::NoteOn { key: 60, vel: 90 })];
-        let (l, r) = render_to_buffer(&events, 1.0);
+        let (l, r) = render_to_buffer(&Preset::default(), &events, 1.0);
         let peak = l
             .iter()
             .chain(r.iter())
