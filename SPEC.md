@@ -2,6 +2,8 @@
 
 Physical-model piano synthesizer in Rust. Target: Apple Silicon (M-series) MacBooks, real-time latency, sound quality first. This spec defines the architecture, module boundaries, DSP math, and acceptance tests. Follow it; if you must deviate, note the deviation in your report and append to DECISIONS.md.
 
+> **Status (2026-08-13):** v1 is implemented and all acceptance tests pass; deviations from this document are logged in `DECISIONS.md` (the log wins where they disagree). The layout below predates the workspace split — the crate now lives under `engine/` (with the parameter-estimation crate under `tuner/`, per `TUNING.md`), but the module names and responsibilities are unchanged.
+
 ## Project layout
 
 Single cargo package `piano-emulator` (lib `piano_emulator` + bin `piano-emulator`) at the repo root.
