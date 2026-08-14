@@ -153,7 +153,7 @@ impl Engine {
             Event::NoteOn { key, vel } if vel > 0 => {
                 if let Some(i) = key_index(key) {
                     self.held[i] = true;
-                    self.voices[i].note_on(vel, &self.pedals);
+                    self.voices[i].note_on(vel, &self.pedals, self.frame);
                 }
             }
             Event::NoteOn { key, vel } => self.key_down(key, vel),

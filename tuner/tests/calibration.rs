@@ -1522,3 +1522,393 @@ fn a_known_per_key_spread_comes_back_key_by_key() {
         .collect();
     println!("the compass-wide line would have said {global:?} against {truth:?}");
 }
+
+// ---------------------------------------- the per-partial and attack fits
+
+/// The four fields of the per-partial milestone, recovered from the engine's own
+/// renders of a preset that carries them.
+///
+/// The shape of these tests is the gate's: put a number into the engine, render,
+/// and ask the estimator to give it back. What they add over
+/// `estimate::shaping`'s and `estimate::attack`'s own unit tests is that the
+/// signal is the *instrument* — the excitation reaches the microphone through
+/// the hammer's force spectrum, the bridge gain, both polarizations, the unison
+/// group, the output gain, the DC blocker and the master shelf, none of which
+/// the estimator is told about.
+mod per_partial {
+    use super::*;
+    use piano_tuner::estimate::attack::{residual_metrics, AttackConfig};
+    use piano_tuner::estimate::shaping::{
+        measured_deepest, partial_gains, partial_sigma_scale, CombLine, DecaySplit, EngineComb,
+        ShapingConfig,
+    };
+    use piano_tuner::estimate::DecayReport;
+    use piano_tuner::preset::NUM_KEYS;
+
+    /// The velocities a per-partial fit is given. Enough layers to pass the
+    /// estimators' own `min_layers`, spread over the whole dynamic range so that
+    /// anything velocity-dependent would show up as scatter rather than as a
+    /// value.
+    const LAYERS: [u8; 8] = [24, 40, 56, 72, 88, 100, 112, 124];
+
+    /// A pattern with a geometric mean of one and no low-order content in
+    /// `ln k`: ±3 dB, alternating. A fitted smooth envelope absorbs anything
+    /// smooth by construction, so a pattern that is *not* smooth is the only one
+    /// that tests the estimator rather than the polynomial.
+    fn alternating(count: usize, db: f64) -> Vec<f32> {
+        (0..count)
+            .map(|k| {
+                let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+                (10f64.powf(sign * db / 20.0)) as f32
+            })
+            .collect()
+    }
+
+    fn comb_of(preset: &EnginePreset, key: u8) -> EngineComb {
+        let i = key_index(key).expect("a key");
+        EngineComb::new(
+            f64::from(preset.notes.strike_position[i]),
+            f64::from(preset.notes.contact_width[i]),
+            f64::from(preset.notes.comb_floor[i]),
+        )
+    }
+
+    /// Every layer of one key, analysed.
+    fn layers(preset: &EnginePreset, key: u8, duration_s: f32) -> Vec<NoteAnalysis> {
+        LAYERS
+            .iter()
+            .map(|&vel| analyze(preset, key, vel, duration_s))
+            .collect()
+    }
+
+    /// Every layer's time-zero spectrum for one key.
+    fn spectra(analyses: &[NoteAnalysis]) -> Vec<Vec<(u32, f64)>> {
+        analyses
+            .iter()
+            .map(|a| {
+                a.decays
+                    .partials
+                    .iter()
+                    .filter(|fit| fit.k >= 1 && fit.initial_amplitude() > 0.0)
+                    .map(|fit| (fit.k, fit.initial_amplitude()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+    fn a_known_per_partial_gain_table_comes_back_within_a_decibel() {
+        // A1: one string per note. A three-string unison's partial is the
+        // modulus of a sum of six components at unrelated frequencies
+        // (`DECISIONS.md` 80-84), and what that does to the *time-zero*
+        // amplitude the whole excitation chain is read from is
+        // `TUNING_REPORT.md` §3's own control: 2-5 dB of estimator noise on
+        // synthetic material, concentrated at the low partials. Measured on C4
+        // this test's own pattern comes back 3-4 dB out at partials one and two
+        // for exactly that reason, and inside a decibel above them.
+        const KEY: u8 = 33;
+        let index = key_index(KEY).expect("a key");
+        let mut preset = gate_preset();
+        // The whole series, not a prefix: a block of scaled partials with
+        // unscaled ones above it leaves the fitted envelope somewhere to tilt
+        // into, and the tilt is then read as part of the pattern.
+        let count = preset.string_params(KEY).partial_count();
+        let truth = alternating(count, 3.0);
+        preset.notes.partial_gains = vec![Vec::new(); NUM_KEYS];
+        preset.notes.partial_gains[index] = truth.clone();
+        let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
+
+        let analyses = layers(&preset, KEY, 26.0);
+        let recovered = partial_gains(&spectra(&analyses), comb_of(&preset, KEY), &ShapingConfig::default());
+        println!(
+            "gains, dB from the truth: {:?}",
+            recovered
+                .iter()
+                .zip(&truth)
+                .map(|(&g, &t)| format!("{:+.2}", 20.0 * (f64::from(g) / f64::from(t)).log10()))
+                .collect::<Vec<_>>()
+        );
+        assert!(recovered.len() >= 12, "{} rows back", recovered.len());
+        let errors: Vec<f64> = recovered
+            .iter()
+            .zip(&truth)
+            .take(12)
+            .map(|(&g, &t)| 20.0 * (f64::from(g) / f64::from(t)).log10())
+            .collect();
+        // Within a decibel RMS over the twelve partials that carry the note, and
+        // no worse than 1.6 dB anywhere in them. What is left is a slow tilt: a
+        // degree-2 polynomial in `ln k` is the smooth reference by construction
+        // (`TUNING_REPORT.md` §3) and it cannot be exactly the instrument's own
+        // envelope, so the pattern comes back with the difference spread over
+        // it. §3's own control on synthetic material is 2-5 dB, which is what
+        // this is measured against.
+        let rms = (errors.iter().map(|e| e * e).sum::<f64>() / errors.len() as f64).sqrt();
+        let worst = errors.iter().fold(0.0f64, |m, &e| m.max(e.abs()));
+        assert!(rms < 1.0, "{rms:.2} dB RMS over the first twelve: {errors:?}");
+        assert!(worst < 1.6, "worst {worst:.2} dB: {errors:?}");
+        // The pattern itself — the thing no smooth envelope can be — comes back
+        // at its full contrast.
+        for pair in errors.windows(2) {
+            assert!(
+                (pair[0] - pair[1]).abs() < 1.6,
+                "the +-3 dB alternation lost contrast: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+    fn a_known_comb_floor_comes_back_off_the_line_the_engine_draws() {
+        // The other half of the split `estimate::shaping` documents. The floor
+        // is inverted on a line measured on the engine — four renders at known
+        // floors, each measured with the code the recording is measured with —
+        // and what has to come back is the floor that was put in.
+        const KEY: u8 = 33;
+        const TRUTH: f32 = 0.12;
+        const PROBES: [f32; 4] = [0.0, 0.06, 0.24, 0.40];
+        let index = key_index(KEY).expect("a key");
+        let config = ShapingConfig::default();
+
+        let depth_at = |floor: f32| -> f64 {
+            let mut preset = gate_preset();
+            preset.notes.comb_floor[index] = floor;
+            let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
+            let analyses = layers(&preset, KEY, 26.0);
+            measured_deepest(&spectra(&analyses), &config)
+                .expect("a deepest partial")
+                .0
+        };
+        let line = CombLine {
+            key: KEY,
+            probes: PROBES
+                .iter()
+                .map(|&floor| (f64::from(floor), depth_at(floor)))
+                .collect(),
+        };
+        let deepest = depth_at(TRUTH);
+        let recovered = line.floor_for(deepest).expect("a line");
+        println!(
+            "comb floor {TRUTH} -> {recovered:.3}; the line reads {:?} and the render {deepest:.2} dB",
+            line.probes
+        );
+        assert!(
+            (recovered - f64::from(TRUTH)).abs() < 0.05,
+            "a floor of {TRUTH} came back as {recovered:.3}"
+        );
+        assert!(!line.saturated(recovered));
+
+        // ... and with that floor in the reference the gains are one: nothing
+        // is left for them to fill. Against the *bare* comb the same render asks
+        // for far more, at exactly the partial the floor exists for — which is
+        // why the floor is fitted first and the gains against it.
+        let mut preset = gate_preset();
+        preset.notes.comb_floor[index] = TRUTH;
+        let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
+        let measured = spectra(&layers(&preset, KEY, 26.0));
+        let bare = EngineComb::new(
+            f64::from(preset.notes.strike_position[index]),
+            f64::from(preset.notes.contact_width[index]),
+            0.0,
+        );
+        let floored = EngineComb {
+            comb_floor: recovered,
+            ..bare
+        };
+        let with = partial_gains(&measured, floored, &config);
+        let without = partial_gains(&measured, bare, &config);
+        let worst = |gains: &[f32]| {
+            gains
+                .iter()
+                .fold(0.0f64, |m, &g| m.max((20.0 * f64::from(g).log10()).abs()))
+        };
+        println!(
+            "worst gain asked for: {:.1} dB against the fitted floor, {:.1} dB against the bare comb",
+            worst(&with),
+            worst(&without)
+        );
+        assert!(worst(&with) < worst(&without) - 3.0);
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+    fn a_known_per_partial_sigma_scale_comes_back_within_a_tenth() {
+        // A1: one string per note. A two- or three-string unison's partial is
+        // the modulus of a sum of four or six components at unrelated
+        // frequencies (`DECISIONS.md` 80-84), and this test is about a decay
+        // rate rather than about that.
+        const KEY: u8 = 33;
+        let index = key_index(KEY).expect("a key");
+        let mut preset = gate_preset();
+        let truth: Vec<f32> = vec![1.6, 0.7, 1.0, 1.35, 0.75, 1.25, 1.0, 0.8];
+        preset.notes.partial_sigma_scale = vec![Vec::new(); NUM_KEYS];
+        preset.notes.partial_sigma_scale[index] = truth.clone();
+        let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
+
+        let analyses = layers(&preset, KEY, 26.0);
+        let reports: Vec<&DecayReport> = analyses.iter().map(|a| &a.decays).collect();
+        let curve = piano_tuner::estimate::decay::DecayCurve {
+            sigma0: f64::from(preset.notes.sigma0[index]),
+            sigma1: f64::from(preset.notes.sigma1[index]),
+            residual: 0.0,
+        };
+        let split = DecaySplit {
+            horizontal_gain_db: f64::from(preset.voicing.horizontal_gain_db),
+            horizontal_decay_ratio: f64::from(preset.voicing.horizontal_decay_ratio),
+        };
+        let (recovered, trusted, offered) = partial_sigma_scale(
+            &reports,
+            curve,
+            split,
+            &analysis_config().decay,
+            &ShapingConfig::default(),
+        );
+        println!(
+            "sigma scale: {trusted} partials trusted of {offered} fits offered; {recovered:?}"
+        );
+        assert!(trusted >= truth.len(), "only {trusted} partials came back");
+        // The row is normalised to a geometric mean of one — it redistributes
+        // the note's damping rather than retuning it — so the comparison is
+        // against the truth normalised the same way. Every partial past the
+        // eight that were scaled is at 1.0 in the preset, so the mean the
+        // estimator divided by is over the whole measured row and is close to
+        // one; taking it from the recovery itself is what makes this a test of
+        // the *pattern* and not of the normalisation.
+        let mean: f64 = (recovered.iter().map(|&s| f64::from(s).ln()).sum::<f64>()
+            / recovered.len() as f64)
+            .exp();
+        assert!((mean - 1.0).abs() < 1e-3, "the row's geometric mean is {mean}");
+        let truth_mean: f64 = {
+            let mut logs: Vec<f64> = truth.iter().map(|&t| f64::from(t).ln()).collect();
+            logs.resize(recovered.len(), 0.0);
+            (logs.iter().sum::<f64>() / logs.len() as f64).exp()
+        };
+        for (k, (&got, &want)) in recovered.iter().zip(&truth).enumerate() {
+            let ratio = f64::from(got) / (f64::from(want) / truth_mean);
+            assert!(
+                (ratio - 1.0).abs() < 0.10,
+                "partial {}: {} came back as {got} ({:+.1} %)",
+                k + 1,
+                f64::from(want) / truth_mean,
+                100.0 * (ratio - 1.0)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+    fn a_known_strike_noise_level_comes_back_within_two_decibels() {
+        // What is recovered is the level the burst is **delivered** at, measured
+        // by rendering the same note with and without it and subtracting — not
+        // the number in the preset. The two differ by a documented amount
+        // (`DECISIONS.md` 145, 192: the peak of a filtered noise burst is a
+        // random variable that scatters several dB per draw, and the shape's
+        // normalisation is estimated from eight of them), and that is the
+        // engine's error rather than the estimator's. What this test is about is
+        // whether a residual measurement reads a burst that is there.
+        const KEY: u8 = 60;
+        const TRUTH_DB: f32 = -6.0;
+        let mut preset = gate_preset();
+        preset.noise.strike = piano_emulator::preset::StrikeNoise {
+            centroid_hz: 900.0,
+            decay_s: 0.25,
+            bandwidth_hz: 4_000.0,
+            // Flat in velocity, so the level the fit reads at any layer is the
+            // level the table asks for and this is not also a test of the
+            // velocity law.
+            velocity_db: 0.0,
+            level_db: vec![piano_emulator::preset::NoiseAnchor {
+                key: LOWEST_KEY_FOR_ANCHOR,
+                db: TRUTH_DB,
+            }],
+        };
+        let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
+        let quiet = gate_preset();
+        let config = AttackConfig::default();
+
+        let reference = render_note(&quiet, KEY, 90, 2.0)
+            .iter()
+            .fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+        // The reference is the burst **as this measurement can see it**: the
+        // burst alone, put through the same subtraction, the same band limit and
+        // the same window. Three things stand between a preset's `level_db` and
+        // that number, all of them properties of the measurement rather than of
+        // the estimator, and all of them present identically on a recording:
+        // the first half-window is not measured at all (`onset_residual`), the
+        // band outside 200 Hz - 8 kHz is not written, and the phase-locked
+        // projection absorbs whatever noise is coherent at a partial's own
+        // frequency. What this test asserts is that the *note* does not disturb
+        // the answer — which is the whole of what "recovering a level" means
+        // here.
+        let baseline = analyze(&quiet, KEY, 90, 2.0);
+        let baseline_hz: Vec<f64> = baseline
+            .decays
+            .partials
+            .iter()
+            .map(|fit| fit.frequency_hz)
+            .collect();
+        let (whole_db, delivered_db) = {
+            let a = render_note(&quiet, KEY, 90, 2.0);
+            let b = render_note(&preset, KEY, 90, 2.0);
+            let burst: Vec<f32> = a
+                .iter()
+                .zip(&b)
+                .map(|(&x, &y)| y - x)
+                .collect();
+            let whole = burst
+                .iter()
+                .fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let seen = residual_metrics(
+                KEY,
+                90,
+                &burst,
+                SAMPLE_RATE,
+                &baseline_hz,
+                f64::from(ONSET_S),
+                reference,
+                &config,
+            )
+            .expect("the burst alone is a residual of itself");
+            (20.0 * (whole / reference).log10(), seen.level_db)
+        };
+
+        let mut levels: Vec<f64> = Vec::new();
+        for vel in LAYERS {
+            let analysis = analyze(&quiet, KEY, vel, 2.0);
+            let partial_hz: Vec<f64> = analysis
+                .decays
+                .partials
+                .iter()
+                .map(|fit| fit.frequency_hz)
+                .collect();
+            let onset_s = analysis.trajectories.onset_s;
+            let signal = render_note(&preset, KEY, vel, 2.0);
+            let metrics = residual_metrics(
+                KEY,
+                vel,
+                &signal,
+                SAMPLE_RATE,
+                &partial_hz,
+                onset_s,
+                reference,
+                &config,
+            )
+            .expect("a residual");
+            levels.push(metrics.level_db);
+        }
+        levels.sort_by(f64::total_cmp);
+        let median = levels[levels.len() / 2];
+        println!(
+            "strike noise: {TRUTH_DB} dB asked, {whole_db:.2} dB delivered over the whole burst, \
+             {delivered_db:.2} dB as this measurement can see it, {median:.2} dB \
+             recovered (layers {levels:?})"
+        );
+        assert!(
+            (median - delivered_db).abs() < 2.0,
+            "a burst delivered at {delivered_db:.2} dB came back as {median:.2}"
+        );
+    }
+}
+
+/// The bottom of the keyboard, for a `[noise]` anchor that applies everywhere.
+const LOWEST_KEY_FOR_ANCHOR: u8 = 21;

@@ -654,7 +654,7 @@ fn modulation_of(mono: &[f64], k: u32, f: f64, f0: f64) -> Option<Modulation> {
         .collect();
 
     let peak = envelope.iter().cloned().fold(0.0f64, f64::max);
-    if !(peak > 0.0) {
+    if peak <= 0.0 {
         return None;
     }
     // A partial that has decayed into the noise carries no envelope; below
@@ -686,7 +686,7 @@ fn modulation_of(mono: &[f64], k: u32, f: f64, f0: f64) -> Option<Modulation> {
     let mut power = Vec::new();
     for (i, &p) in spectrum.iter().enumerate() {
         let nu = i as f64 * bin;
-        if nu < MOD_LO_HZ || nu > MOD_HI_HZ {
+        if !(MOD_LO_HZ..=MOD_HI_HZ).contains(&nu) {
             continue;
         }
         // The analysis window low-passes the envelope; undo it, but only where
@@ -703,7 +703,7 @@ fn modulation_of(mono: &[f64], k: u32, f: f64, f0: f64) -> Option<Modulation> {
     }
 
     let total: f64 = power.iter().sum();
-    if !(total > 0.0) {
+    if total <= 0.0 {
         return None;
     }
     // `hann_power_spectrum` is normalised so the sum over all bins is the mean
@@ -1031,11 +1031,11 @@ fn finite(values: &[f64]) -> Vec<f64> {
     values.iter().copied().filter(|v| v.is_finite()).collect()
 }
 
-fn layer_for<'a>(
-    library: &'a SampleLibrary,
+fn layer_for(
+    library: &SampleLibrary,
     key: u8,
     velocity: u8,
-) -> Result<&'a Sample, Box<dyn std::error::Error>> {
+) -> Result<&Sample, Box<dyn std::error::Error>> {
     library
         .layers(key)
         .iter()
@@ -1305,7 +1305,7 @@ fn key_section(md: &mut String, key: &KeyReport) {
             f2(rung.roughness_spline_db),
             f2(rung.roughness_median_db),
             f2(rung.roughness_poly_db),
-            format!("{} ({})", f2(rung.roughness_worst_db), rung.roughness_worst_k),
+            worst(rung.roughness_worst_db, rung.roughness_worst_k),
             f2(rung.width_median_cents),
             f2(rung.width_excess_cents),
             f3(rung.mod_energy_db),
@@ -1330,15 +1330,18 @@ fn key_section(md: &mut String, key: &KeyReport) {
         .filter(|&k| k <= MAX_REPORTED_PARTIAL)
         .collect();
     let _ = writeln!(md, "**Linewidth per partial, cents.**\n");
-    let header: String = reported.iter().map(|k| format!(" k={k} |")).collect();
-    let rule: String = reported.iter().map(|_| " --: |".to_string()).collect();
+    let mut header = String::new();
+    let mut rule = String::new();
+    for k in &reported {
+        let _ = write!(header, " k={k} |");
+        rule.push_str(" --: |");
+    }
     let _ = writeln!(md, "| rung |{header}\n|:--|{rule}");
     for rung in &key.rungs {
-        let cells: String = rung
-            .widths_cents
-            .iter()
-            .map(|&w| format!(" {} |", f2(w)))
-            .collect();
+        let mut cells = String::new();
+        for &w in &rung.widths_cents {
+            let _ = write!(cells, " {} |", f2(w));
+        }
         let _ = writeln!(md, "| `{}` |{cells}", rung.label);
     }
     let _ = writeln!(md);
@@ -1571,7 +1574,8 @@ fn diagnostic_section(md: &mut String, keys: &[KeyReport]) {
          deficit. `ratio` is |`07` − `00`| / |`01` − `00`|: how many times larger the engine's gap \
          is than the metric's own floor. It has to hold at all three keys to be worth anything.\n"
     );
-    let metrics: [(&str, fn(&RungReport) -> f64, &str); 10] = [
+    type Metric = (&'static str, fn(&RungReport) -> f64, &'static str);
+    let metrics: [Metric; 10] = [
         ("modulation lines to half", |r| r.mod_lines, "lines"),
         ("roughness (spline RMS)", |r| r.roughness_spline_db, "dB"),
         ("roughness (median)", |r| r.roughness_median_db, "dB"),
@@ -1868,6 +1872,11 @@ fn f1(v: f64) -> String {
         "—".into()
     }
 }
+/// The worst partial and where it was, as one cell.
+fn worst(db: f64, k: u32) -> String {
+    format!("{} ({k})", f2(db))
+}
+
 fn f2(v: f64) -> String {
     if v.is_finite() {
         format!("{v:.2}")

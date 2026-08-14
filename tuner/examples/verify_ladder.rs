@@ -254,15 +254,14 @@ fn check_resynth(
             .iter()
             .map(|p| p.amplitude)
             .fold(0.0f64, f64::max);
-        if !(peak > 0.0) {
+        if peak <= 0.0 {
             continue;
         }
         for point in &track.points {
             let t = point.time_s - span.onset_s;
             if point.time_s < span.start_s
-                || t < 0.15
-                || t > 3.5
-                || !(point.amplitude > peak * 1e-3)
+                || !(0.15..=3.5).contains(&t)
+                || point.amplitude <= peak * 1e-3
                 || !point.frequency_hz.is_finite()
             {
                 continue;
@@ -273,7 +272,7 @@ fn check_resynth(
             }
             let (re, im) = project(&mono, point.frequency_hz, centre, window_n);
             let measured = (re * re + im * im).sqrt();
-            if !(measured > 0.0) {
+            if measured <= 0.0 {
                 continue;
             }
             diffs.push(20.0 * (measured / point.amplitude).log10());
@@ -887,11 +886,11 @@ fn median(values: &mut [f64]) -> Option<f64> {
     })
 }
 
-fn layer_for<'a>(
-    library: &'a SampleLibrary,
+fn layer_for(
+    library: &SampleLibrary,
     key: u8,
     velocity: u8,
-) -> Result<&'a Sample, Box<dyn std::error::Error>> {
+) -> Result<&Sample, Box<dyn std::error::Error>> {
     library
         .layers(key)
         .iter()

@@ -18,7 +18,7 @@
 //!
 //! * the **output peak of a velocity-90 strike** at eight keys across the
 //!   compass, interpolated between them like every other per-note table;
-//! * the **board's peak gain** for each of the four event shapes, as the mean
+//! * the **board's peak gain** for each of the five event shapes, as the mean
 //!   output peak of eight noise realizations of a burst of that shape — the
 //!   statistic a level has to predict, since what a preset asks for is where
 //!   many events land rather than where one does.
@@ -73,8 +73,8 @@ pub struct MechanismCalibration {
     /// Output peak of a velocity-90 strike at each of [`ANCHOR_KEYS`].
     strike_peak: [f32; ANCHOR_KEYS.len()],
     /// The board's peak gain for each event shape, in the order
-    /// key-off, damper-lift, pedal-down, pedal-up.
-    board_gain: [f32; 4],
+    /// key-off, damper-lift, pedal-down, pedal-up, strike.
+    board_gain: [f32; 5],
 }
 
 impl MechanismCalibration {
@@ -89,6 +89,7 @@ impl MechanismCalibration {
             board_peak_gain(preset, shapes.damper_lift),
             board_peak_gain(preset, shapes.pedal_down),
             board_peak_gain(preset, shapes.pedal_up),
+            board_peak_gain(preset, shapes.strike),
         ];
         MechanismCalibration {
             strike_peak,
@@ -105,7 +106,7 @@ impl MechanismCalibration {
     pub fn silent() -> MechanismCalibration {
         MechanismCalibration {
             strike_peak: [0.0; ANCHOR_KEYS.len()],
-            board_gain: [1.0; 4],
+            board_gain: [1.0; 5],
         }
     }
 
@@ -138,6 +139,13 @@ impl MechanismCalibration {
     pub fn pedal_up(&self) -> f32 {
         self.reference(PEDAL_REFERENCE_KEY, 3)
     }
+
+    /// The hammer's own noise, which is quoted against a strike of the same key
+    /// exactly as the other four are — the difference being that this one plays
+    /// *during* that strike rather than beside it.
+    pub fn strike(&self, key: u8) -> f32 {
+        self.reference(key, 4)
+    }
 }
 
 /// Peak of the stereo magnitude `sqrt(l^2 + r^2)` of a velocity-90 strike of
@@ -154,7 +162,7 @@ fn strike_output_peak(preset: &Preset, shapes: &NoiseShapes, key: u8) -> f32 {
     // subtracts a string's own contribution), so an uncoupled bus renders
     // exactly what the instrument does to a single note.
     let bus = ResonanceBus::new(0.0);
-    voice.note_on(REFERENCE_VELOCITY, &PedalState::new());
+    voice.note_on(REFERENCE_VELOCITY, &PedalState::new(), 0);
     let mut out = [0.0f32; BLOCK];
     let (mut left, mut right) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
     let mut peak = 0.0f32;
@@ -292,6 +300,9 @@ mod tests {
         }
         assert_eq!(silent.pedal_down(), 0.0);
         assert_eq!(silent.pedal_up(), 0.0);
+        for key in [21u8, 60, 108] {
+            assert_eq!(silent.strike(key), 0.0);
+        }
     }
 
     /// A preset that is quieter overall must move its mechanism with it, which
@@ -316,3 +327,4 @@ mod tests {
         );
     }
 }
+

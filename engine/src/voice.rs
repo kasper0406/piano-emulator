@@ -48,11 +48,36 @@ const DAMPER_RAMP_RANGE: f32 = 5.0;
 /// down — so a half-pedal sits at the geometric mean, a quarter of the string's
 /// swing, which is deep enough to fold the waveform and not so deep that it
 /// gates the note.
+///
+/// The travel is *continuous through both of its ends*, and that is a
+/// correctness property rather than a refinement (`DECISIONS.md` 218). The
+/// damper's position advances once per block, so a threshold recomputed from it
+/// and held for the block is a staircase: at the nominal release the position
+/// moves 0.267 per block and the exponent turns that into a 13.3 dB jump in the
+/// threshold at each of the ramp's block boundaries, with a fourth and larger
+/// one where the old code stopped limiting at a seated damper and the output
+/// snapped back from `soft_limit(x, 0.01 · reference)` to `x` between two
+/// adjacent samples. [`Voice::felt_ramp`] walks the threshold geometrically
+/// *within* the block instead, and it retires the limit over the damper's own
+/// ramp once the damper has landed rather than switching it off — the
+/// interaction interval ends where Lehtonen's third one begins, and an interval
+/// that ends in 12 ms is a sound, where one that ends between two samples is a
+/// click.
 const FELT_CLEARANCE: f32 = 0.01;
 
 /// Time constant of the peak follower that remembers how loud the note was when
 /// the damper started to arrive.
 const FELT_FOLLOWER_S: f32 = 0.05;
+
+/// Mixed into the frame before the strike burst's seed is derived.
+///
+/// [`noise::seed_of`] answers "the event on this key at this frame", and a
+/// note-on and a note-off of one key *can* land on the same block — a repeated
+/// note under one MIDI file's quantisation does it routinely. Without a salt the
+/// two bursts would then run the same noise at two levels and sum as one louder
+/// event, which is the same failure the key half of `seed_of` exists to prevent
+/// between neighbouring keys.
+const STRIKE_SEED_SALT: u64 = 0x9e37_79b9_7f4a_7c15;
 
 pub struct Voice {
     key: u8,
@@ -80,13 +105,33 @@ pub struct Voice {
     /// limiting. The felt's limiting threshold is a fraction of this, which is
     /// what makes the interaction interval end by itself as the note dies away.
     felt_reference: f32,
-    /// This key's mechanism noise. One burst: a key can only make one sound at
-    /// a time, and a second event arriving while the first still rings
-    /// retriggers it rather than layering.
+    /// Where the felt stood at the *end* of the block this voice rendered last,
+    /// as the limiter sees it: 0 clear of the string, 1 seated on it. The
+    /// limiter's threshold starts every block from here and walks to where the
+    /// damper has moved to, so the waveshaper is continuous across the block
+    /// boundary instead of stepping at it.
+    felt_engage: f32,
+    /// True once the damper has finished arriving, which is when the felt's
+    /// limit starts to retire. Cleared the moment the damper moves off the
+    /// string again, so a re-strike or a pedal starts the cycle over.
+    felt_seated: bool,
+    /// This key's *action* noise — the key-off thump and the damper lift. One
+    /// burst: the key can only be in one place at a time, and a second event
+    /// arriving while the first still rings retriggers it rather than layering.
     noise: Burst,
     noise_out: [f32; BLOCK],
     key_off_noise: EventModel,
     damper_lift_noise: EventModel,
+    /// The hammer's own noise, on its own burst.
+    ///
+    /// Deliberately not the burst above. The action's events are alternatives —
+    /// a key is falling or its damper is lifting, never both — but a strike and
+    /// a release are not: a staccato is a note-off 80 ms after a note-on, and
+    /// sharing one burst would have the key-off cut the attack noise of the note
+    /// it belongs to. They mix rather than replace, at the same pan, into the
+    /// same block.
+    strike_noise: Burst,
+    strike_noise_model: EventModel,
     /// Horizontal polarization's own block, used only while `spread`.
     horizontal_out: [f32; BLOCK],
     /// This voice's output during the block the resonance bus was summed from.
@@ -122,7 +167,11 @@ impl Voice {
             pan_vertical: pan - spread,
             pan_horizontal: pan + spread,
             spread: spread != 0.0,
-            string: PianoString::new(preset.string_params(key), &preset.voicing),
+            string: PianoString::new(
+                preset.string_params(key),
+                &preset.voicing,
+                preset.partial_shaping(key),
+            ),
             duplex: DuplexBank::new(preset.duplex_modes(key)),
             duplex_out: [0.0; BLOCK],
             hammer,
@@ -131,6 +180,8 @@ impl Voice {
             damper_target: 0.0,
             damper_step: damper_step(DEFAULT_RELEASE_VELOCITY),
             felt_reference: 0.0,
+            felt_engage: 0.0,
+            felt_seated: false,
             noise: Burst::new(),
             noise_out: [0.0; BLOCK],
             key_off_noise: EventModel::new(
@@ -146,6 +197,15 @@ impl Voice {
                 key,
                 noise::NOMINAL_KEY_DRIVE,
                 calibration.damper_lift(key),
+            ),
+            strike_noise: Burst::new(),
+            strike_noise_model: EventModel::from_levels(
+                &preset.noise.strike.level_db,
+                preset.noise.strike.velocity_db,
+                shapes.strike,
+                key,
+                noise::NOMINAL_STRIKE_DRIVE,
+                calibration.strike(key),
             ),
             horizontal_out: [0.0; BLOCK],
             previous_out: [0.0; BLOCK],
@@ -204,18 +264,36 @@ impl Voice {
         &self.duplex
     }
 
-    /// A key press hard enough to reach escapement: the damper lifts and the
-    /// hammer is thrown.
+    /// A key press hard enough to reach escapement: the damper lifts, the
+    /// hammer is thrown, and the hammer's own noise sounds with it.
     ///
     /// No lift noise here, though the damper does lift: the felt leaving the
     /// string under a hammer blow is inaudible — which is why no sample library
     /// records one — and a broadband burst on every note-on that nobody can
     /// hear is something every later measurement of a render would have to fit
     /// around. It is modelled where it is the whole sound: [`Voice::key_down`].
-    pub fn note_on(&mut self, vel: u8, pedals: &PedalState) {
+    ///
+    /// The **strike** noise is the opposite case: it is inaudible only as a
+    /// separate event, because it arrives inside the attack of the note it
+    /// belongs to, and that is exactly what the measurements say is missing —
+    /// the engine's attacks read +5.2 dB more tonal than the recordings'
+    /// (`renders/realism/REALISM.md`) and its 30 ms residual 11–13 dB more
+    /// tonal at every key (`renders/timbre-ladder/ANALYSIS.md` §8.3). It is
+    /// triggered here, in the same block as the hammer pulse, so that the burst
+    /// and the blow start on the same sample.
+    pub fn note_on(&mut self, vel: u8, pedals: &PedalState, frame: u64) {
         self.press(pedals);
         self.hammer.set_una_corda(pedals.una_corda());
         self.hammer.strike_midi(vel);
+        // A re-strike into a burst that is still ringing keeps its filter state
+        // and restarts the envelope — the same "louder continuation" a trill
+        // gets from the action's own events, and the reason a repeated note
+        // cannot click.
+        self.strike_noise.trigger(
+            &self.strike_noise_model,
+            vel as f32 / 127.0,
+            noise::seed_of(self.key, frame ^ STRIKE_SEED_SALT),
+        );
     }
 
     /// A key press that does not reach escapement, so the damper lifts and
@@ -365,13 +443,19 @@ impl Voice {
                 self.string.add_excitation_all(&drive, gain);
             }
 
+            // Once per rendered block, after the damper has moved and before
+            // either polarization is limited: the ramp is this voice's felt
+            // travelling from where it was to where the damper has just put it,
+            // and computing it twice would advance it twice.
+            let felt = self.felt_ramp();
+
             if self.spread {
                 self.horizontal_out.fill(0.0);
                 self.string.process_split(out, &mut self.horizontal_out);
                 // The felt is one piece of cloth on one string: it sees the
                 // whole of it, both planes at once, so the limiter is computed
                 // from the sum and applied to the two halves as a common gain.
-                self.felt_limit_split(out);
+                self.felt_limit_split(out, felt);
                 board.add_voice(out, self.pan_vertical);
                 board.add_voice(&self.horizontal_out, self.pan_horizontal);
                 // ... and the mono sum, for the resonance bus and the next
@@ -381,12 +465,12 @@ impl Voice {
                 }
             } else {
                 self.string.process(out);
-                self.felt_limit(out);
+                self.felt_limit(out, felt);
                 board.add_voice(out, self.pan);
             }
             // Before the segments are added: what the felt limits against is
             // the speaking length's own swing, and the felt never touches them.
-            self.track_felt_reference(out);
+            self.track_felt_reference(out, felt);
         }
 
         if duplex_live {
@@ -425,11 +509,14 @@ impl Voice {
     /// from the mechanical noise alone, which is why it is panned per note
     /// rather than centred (`PHYSICS.md` §5).
     fn add_noise(&mut self, board: &mut Soundboard) {
-        if !self.noise.is_active() {
+        if !self.noise.is_active() && !self.strike_noise.is_active() {
             return;
         }
+        // One buffer and one `add_voice` for both bursts: they are the same
+        // key's mechanism and they radiate from the same place.
         self.noise_out.fill(0.0);
         self.noise.add(&mut self.noise_out);
+        self.strike_noise.add(&mut self.noise_out);
         board.add_voice(&self.noise_out, self.pan);
     }
 
@@ -448,35 +535,35 @@ impl Voice {
     /// magnitudes involved — a tenth of a signal that is already deep into a
     /// damped decay — a constant-gain injection is 40 dB below anything
     /// audible. See `DECISIONS.md`.
-    fn felt_limit(&mut self, mono: &mut [f32]) {
-        if !self.felt_is_limiting() {
+    fn felt_limit(&mut self, mono: &mut [f32], felt: Option<FeltRamp>) {
+        let Some(felt) = felt else { return };
+        let peak = mono.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+        if peak <= felt.lowest {
             return;
         }
-        let peak = mono.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
-        let Some(threshold) = self.felt_threshold_for(peak) else {
-            return;
-        };
+        let mut threshold = felt.start;
         for x in mono.iter_mut() {
             *x = soft_limit(*x, threshold);
+            threshold *= felt.step;
         }
     }
 
     /// The same limit computed from the two polarizations' sum and applied to
     /// both of them, for the voices whose polarizations are panned apart.
-    fn felt_limit_split(&mut self, vertical: &mut [f32]) {
-        if !self.felt_is_limiting() {
-            return;
-        }
+    fn felt_limit_split(&mut self, vertical: &mut [f32], felt: Option<FeltRamp>) {
+        let Some(felt) = felt else { return };
         let peak = vertical
             .iter()
             .zip(&self.horizontal_out)
             .fold(0.0f32, |m, (&v, &h)| m.max((v + h).abs()));
-        let Some(threshold) = self.felt_threshold_for(peak) else {
+        if peak <= felt.lowest {
             return;
-        };
+        }
+        let mut threshold = felt.start;
         for (v, h) in vertical.iter_mut().zip(&mut self.horizontal_out) {
             let x = *v + *h;
             let y = soft_limit(x, threshold);
+            threshold *= felt.step;
             // A common gain, so the note's stereo image is not moved by the
             // damper: `x` is only zero where both planes are, and there the
             // scale is 1 exactly.
@@ -486,42 +573,101 @@ impl Voice {
         }
     }
 
-    /// True while the felt is limiting the string: touching it without being
-    /// seated on it, *and* arriving rather than leaving. The state almost no
-    /// voice is in at almost any instant, and it is checked before the block's
-    /// peak is taken, so a voice that is not limiting costs one comparison.
+    /// Where the felt travels during the block about to be rendered, as the
+    /// limiter's threshold at the first sample and the per-sample factor that
+    /// walks it to the last — or `None` when the felt is clear of the string
+    /// for the whole of it, which is every voice on the instrument except the
+    /// handful being released, half-pedalled or damped at that instant.
     ///
-    /// The direction matters because the engine starts the damper's ramp and
-    /// the hammer's blow at the same instant, while the real action lifts the
-    /// damper early in the key's travel and has it clear before the hammer
-    /// arrives. Without the direction test every re-strike of a released key
-    /// spends its first ~10 ms — two blocks, the whole attack transient — being
-    /// limited against a threshold left over from the *previous* note, which
-    /// measured 27–68 dB of choke on the first two blocks of a fortissimo C4
-    /// re-strike and made the attack depend on how loud the note before it was.
-    /// Lehtonen's measurement is of a damper *arriving* (`DECISIONS.md` 116);
-    /// nothing in it describes one leaving under a hammer blow.
-    fn felt_is_limiting(&self) -> bool {
-        0.0 < self.damper_current
-            && self.damper_current < 1.0
-            && self.damper_target >= self.damper_current
-    }
-
-    /// Threshold of the felt limiter for a block whose peak is `peak`, or
-    /// `None` when the string never reaches the felt.
-    fn felt_threshold_for(&self, peak: f32) -> Option<f32> {
-        // The felt sits a fixed distance into the string's swing: the further
-        // the damper is down, the less room the string has. `felt_reference` is
-        // where the note was when the damper started to arrive, so the limit is
-        // an absolute level and the note stops meeting it as it decays — the
-        // third of Lehtonen's intervals, free vibration again, falls out
-        // instead of being scheduled.
-        let threshold = self.felt_reference * FELT_CLEARANCE.powf(self.damper_current);
-        if threshold <= 0.0 || peak <= threshold {
-            None
-        } else {
-            Some(threshold)
+    /// Advances [`Voice::felt_engage`], so it is called exactly once per
+    /// rendered block, after the damper has moved.
+    ///
+    /// Three properties, each of which is the answer to something measured:
+    ///
+    /// * **It is a ramp, not a value.** The damper moves once per block and the
+    ///   threshold is exponential in its position, so a per-block threshold
+    ///   steps by 13.3 dB at every boundary of a nominal release — audible as a
+    ///   click at −18 to -23 dB under the phrase's own peak on every note-off
+    ///   of every preset, the defect this shape exists to remove. The walk is
+    ///   geometric because the position enters through `powf`: one `powf` for
+    ///   the ratio, then a multiply per sample.
+    /// * **It retires at a seated damper instead of stopping there.** The felt
+    ///   is deepest into the string exactly when the damper lands, so switching
+    ///   the limiter off at that moment put a single-sample jump from
+    ///   `soft_limit(x, 0.01 · reference)` back to `x` — the largest of the four
+    ///   steps. Holding it there instead is worse than the click: an absolute
+    ///   limit anchored to the pre-release level clamps the whole tail to 2 % of
+    ///   it, which measured out as a release that no longer answers the release
+    ///   *velocity* at all (−80.8 / −81.0 / −81.6 dB at MIDI 1 / 64 / 127, where
+    ///   the acceptance test wants 2 dB between the first two). What ends is the
+    ///   *interaction*, and it ends over the damper's own ramp: engagement walks
+    ///   back to zero at `damper_step` per block, so the note is free again
+    ///   after the damper has been down for as long as it took to land, and
+    ///   every sample in between is on a continuous curve. A note that has
+    ///   already decayed under the limit leaves it earlier and for free, through
+    ///   the `lowest` test below — `PHYSICS.md` §6's third interval, unchanged.
+    /// * **It still tests the damper's direction.** The engine starts the
+    ///   damper's lift and the hammer's blow at the same instant, while the
+    ///   real action lifts the damper early in the key's travel and has it
+    ///   clear before the hammer arrives. Limiting a *leaving* damper spends
+    ///   the first ~10 ms of every re-strike — the whole attack transient —
+    ///   clamped against a threshold left over from the previous note, which
+    ///   measured 27–68 dB of choke on the first two blocks of a fortissimo C4
+    ///   re-strike and made the attack depend on how loud the note before it
+    ///   was. Lehtonen's measurement is of a damper *arriving*
+    ///   (`DECISIONS.md` 116); nothing in it describes one leaving under a
+    ///   hammer blow. A gesture that lifts a damper *during its own descent*
+    ///   therefore still releases the limit in one step rather than a ramp —
+    ///   the one discontinuity left on this path, and the one the alternative
+    ///   is worse than (`DECISIONS.md` 218).
+    fn felt_ramp(&mut self) -> Option<FeltRamp> {
+        if self.damper_target < self.damper_current {
+            // Leaving: the felt is clear of the string, and the block is not
+            // limited at all. See the third point above.
+            self.felt_seated = false;
+            self.felt_engage = 0.0;
+            return None;
         }
+        let to = if self.damper_current < 1.0 {
+            // Arriving, or held part way down by a half pedal: the felt is
+            // exactly where the damper is, and stays there for as long as the
+            // pedal holds it — which is the interaction interval this whole
+            // mechanism exists to render.
+            self.felt_seated = false;
+            self.damper_current
+        } else if !self.felt_seated {
+            // The block the damper lands on: the arrival finishes at the
+            // deepest the felt ever reaches.
+            self.felt_seated = true;
+            1.0
+        } else {
+            // Seated, and the interaction is over: the string is now decaying
+            // under the damper's full linear grip and an absolute limit
+            // anchored to the level the note had *before* the release has
+            // nothing left to say about it. It retires at the rate the damper
+            // arrived at — so a slow release keeps its felt as long as it keeps
+            // its ramp — and the note is free again by the time the damper has
+            // been down for as long as it took to land.
+            (self.felt_engage - self.damper_step).max(0.0)
+        };
+        let from = self.felt_engage;
+        self.felt_engage = to;
+        if from <= 0.0 && to <= 0.0 {
+            return None;
+        }
+        // `felt_reference` is where the note was when the damper started to
+        // arrive, so the limit is an absolute level and the note stops meeting
+        // it as it decays.
+        if self.felt_reference <= 0.0 {
+            return None;
+        }
+        let start = self.felt_reference * FELT_CLEARANCE.powf(from);
+        let end = self.felt_reference * FELT_CLEARANCE.powf(to);
+        Some(FeltRamp {
+            start,
+            step: FELT_CLEARANCE.powf((to - from) / (BLOCK - 1) as f32),
+            lowest: start.min(end),
+        })
     }
 
     /// Remembers how loud the note is while the felt is *not* limiting it, so
@@ -533,11 +679,18 @@ impl Voice {
     /// under a re-strike, or a pedal going down — is not limiting, and it is
     /// exactly then that the string's new free swing has to be picked up, so
     /// that a release arriving before the damper has finished lifting limits
-    /// against *this* note rather than against the one before it. It also means
-    /// the reference decays while a voice sits damped and idle instead of
-    /// standing at the last level it ever reached.
-    fn track_felt_reference(&mut self, mono: &[f32]) {
-        if self.felt_is_limiting() {
+    /// against *this* note rather than against the one before it.
+    ///
+    /// The gate is the block's own ramp rather than whether that ramp bit:
+    /// every block the felt was on the string for has to be excluded, including
+    /// the ones where the note was already under the limit, or the reference
+    /// would chase the threshold down and squeeze a note that had fallen clear
+    /// of the felt. The reference therefore holds from the moment the felt
+    /// arrives until it leaves again — which is what "the level the note had
+    /// when the damper arrived" means — instead of resuming its decay at a
+    /// seated damper, as it did while a seated damper was counted as clear.
+    fn track_felt_reference(&mut self, mono: &[f32], felt: Option<FeltRamp>) {
+        if felt.is_some() {
             return;
         }
         const RELEASE: f32 = 1.0 - BLOCK as f32 / (FELT_FOLLOWER_S * SAMPLE_RATE);
@@ -555,11 +708,14 @@ impl Voice {
         self.duplex.reset();
         self.duplex_out.fill(0.0);
         self.noise.reset();
+        self.strike_noise.reset();
         self.noise_out.fill(0.0);
         self.horizontal_out.fill(0.0);
         self.previous_out.fill(0.0);
         self.previous_silent = true;
         self.felt_reference = 0.0;
+        self.felt_engage = 0.0;
+        self.felt_seated = false;
         self.damper_step = damper_step(DEFAULT_RELEASE_VELOCITY);
         self.damper_current = if crate::pedal::has_damper(self.key) { 1.0 } else { 0.0 };
         self.damper_target = self.damper_current;
@@ -576,6 +732,25 @@ fn damper_step(vel: u8) -> f32 {
         (DEFAULT_RELEASE_VELOCITY as f32 - vel as f32) / (127 - DEFAULT_RELEASE_VELOCITY) as f32;
     let seconds = DAMPER_RAMP_SECONDS * DAMPER_RAMP_RANGE.powf(exponent);
     BLOCK as f32 / (seconds * SAMPLE_RATE)
+}
+
+/// One block of the felt limiter's threshold: where it starts, the factor that
+/// walks it from sample to sample, and the lower of its two ends.
+///
+/// Copied rather than borrowed so that one call to [`Voice::felt_ramp`] can
+/// serve both polarizations and the peak follower without re-deriving it, and
+/// so that the whole of the felt's per-block state is these three numbers.
+#[derive(Clone, Copy)]
+struct FeltRamp {
+    /// Threshold at the block's first sample.
+    start: f32,
+    /// Multiplied into the threshold after every sample.
+    step: f32,
+    /// The smaller of the thresholds at the two ends of the block: a block
+    /// whose peak is under it cannot reach the felt anywhere, which is the
+    /// early-out that keeps a decayed note free (`PHYSICS.md` §6's third
+    /// interval) and costs one block peak to find.
+    lowest: f32,
 }
 
 /// Soft limiter: transparent below `threshold`, tanh-compressed above it, and
@@ -645,7 +820,7 @@ mod tests {
     fn note_on_makes_sound_and_note_off_stops_it() {
         let pedals = PedalState::new();
         let mut v = voice(60);
-        v.note_on(90, &pedals);
+        v.note_on(90, &pedals, 0);
         let struck = render(&mut v, 200);
         assert!(struck > 0.0);
         v.note_off(DEFAULT_RELEASE_VELOCITY, &pedals, 0);
@@ -662,8 +837,8 @@ mod tests {
         let pedals = PedalState::new();
         let mut soft = voice(60);
         let mut hard = voice(60);
-        soft.note_on(40, &pedals);
-        hard.note_on(110, &pedals);
+        soft.note_on(40, &pedals, 0);
+        hard.note_on(110, &pedals, 0);
         assert!(render(&mut hard, 100) > render(&mut soft, 100) * 2.0);
     }
 
@@ -671,7 +846,7 @@ mod tests {
     fn undamped_treble_keeps_ringing_after_release() {
         let pedals = PedalState::new();
         let mut v = voice(96); // C7, above the damper break
-        v.note_on(100, &pedals);
+        v.note_on(100, &pedals, 0);
         render(&mut v, 50);
         v.note_off(DEFAULT_RELEASE_VELOCITY, &pedals, 0);
         assert!(render(&mut v, 10) > 0.0);
@@ -770,8 +945,8 @@ mod tests {
         let bus = bus();
         let mut plain = voice(60);
         let mut split = voice_from(60, &spread);
-        plain.note_on(100, &pedals);
-        split.note_on(100, &pedals);
+        plain.note_on(100, &pedals, 0);
+        split.note_on(100, &pedals, 0);
 
         let (mut a, mut b) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
         let mut peak = 0.0f32;
@@ -932,7 +1107,7 @@ mod tests {
             let bus = bus();
             let mut board = board();
             let mut out = [0.0f32; BLOCK];
-            v.note_on(110, &pedals);
+            v.note_on(110, &pedals, 0);
             let mut struck = 0.0f32;
             for _ in 0..20 {
                 // ~50 ms: a staccato.
@@ -990,7 +1165,7 @@ mod tests {
 
         let ring = |pedals: &PedalState| {
             let mut v = voice_from(DUPLEX_KEY, &preset);
-            v.note_on(110, pedals);
+            v.note_on(110, pedals, 0);
             render(&mut v, 20);
             v.note_off(100, pedals, 0);
             render(&mut v, (0.5 * SAMPLE_RATE / BLOCK as f32) as usize);
@@ -1006,7 +1181,7 @@ mod tests {
     fn all_off_stops_the_segments() {
         let pedals = PedalState::new();
         let mut v = voice_from(DUPLEX_KEY, &duplex_preset(MAX_DUPLEX_GAIN_DB));
-        v.note_on(110, &pedals);
+        v.note_on(110, &pedals, 0);
         render(&mut v, 20);
         assert!(!v.duplex.is_idle());
         v.reset();
@@ -1024,7 +1199,7 @@ mod tests {
     fn ringing_segments_do_not_keep_the_strings_awake_and_go_quiet_by_themselves() {
         let pedals = PedalState::new();
         let mut v = voice_from(DUPLEX_KEY, &duplex_preset(MAX_DUPLEX_GAIN_DB));
-        v.note_on(110, &pedals);
+        v.note_on(110, &pedals, 0);
         render(&mut v, 20);
         v.note_off(100, &pedals, 0);
         render(&mut v, (0.5 * SAMPLE_RATE / BLOCK as f32) as usize);
@@ -1098,14 +1273,169 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------- the strike's noise
+
+    /// The same preset with the hammer's noise at `db` relative to a strike.
+    /// Everything else — including the burst's colour, so the calibration's own
+    /// board measurement is unchanged — is held fixed, which is what lets the
+    /// two renders below be subtracted.
+    fn strike_noise_preset(db: f32) -> Preset {
+        let mut preset = Preset::default();
+        preset.noise.strike.centroid_hz = 1_500.0;
+        preset.noise.strike.bandwidth_hz = 6_000.0;
+        preset.noise.strike.decay_s = 0.06;
+        preset.noise.strike.level_db = vec![crate::preset::NoiseAnchor { key: 21, db }];
+        preset.validate().expect("a voiced strike is a legal preset");
+        preset
+    }
+
+    /// Renders `blocks` blocks of one key's note-on through the board, and
+    /// returns the stereo pair.
+    fn render_note(
+        preset: &Preset,
+        key: u8,
+        vel: u8,
+        blocks: usize,
+        frame: u64,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let shapes = NoiseShapes::new(&preset.noise);
+        let calibration = MechanismCalibration::new(preset, &shapes);
+        let mut voice = Voice::new(key, preset, &shapes, &calibration);
+        let mut board = Soundboard::new(&preset.soundboard);
+        let bus = ResonanceBus::new(0.0);
+        voice.note_on(vel, &PedalState::new(), frame);
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        let mut out = [0.0f32; BLOCK];
+        let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
+        for _ in 0..blocks {
+            board.begin_block();
+            voice.process(&mut out, &bus, &mut board);
+            board.process(&mut l, &mut r);
+            left.extend_from_slice(&l);
+            right.extend_from_slice(&r);
+        }
+        (left, right)
+    }
+
+    /// The hammer's noise plays at the note-on, in the same block as the blow,
+    /// at the level the preset asks for — and a preset that asks for silence
+    /// gets silence rather than a very quiet thump.
+    ///
+    /// Measured by subtraction: the two presets differ in nothing but
+    /// `[noise.strike].level_db`, so the strings render bit for bit alike and
+    /// the difference between the two outputs *is* the burst. Its peak against
+    /// the strike's own peak is the number the file states, which is the same
+    /// convention the other four events are quoted in
+    /// (`TUNING_REPORT.md` §5, `calibrate.rs`).
+    #[test]
+    fn a_note_on_sounds_the_hammers_noise_at_the_level_the_preset_asks_for() {
+        const WANT_DB: f32 = -20.0;
+        const KEY: u8 = 60;
+        let blocks = (0.3 * SAMPLE_RATE / BLOCK as f32) as usize;
+        let (quiet_l, quiet_r) = render_note(&strike_noise_preset(-200.0), KEY, 90, blocks, 0);
+
+        let magnitude_peak = |l: &[f32], r: &[f32]| {
+            l.iter()
+                .zip(r)
+                .fold(0.0f32, |m, (&a, &b)| m.max((a * a + b * b).sqrt()))
+        };
+        let difference = |a: &[f32], b: &[f32]| -> Vec<f32> {
+            a.iter().zip(b).map(|(x, y)| x - y).collect()
+        };
+        let strike_peak = magnitude_peak(&quiet_l, &quiet_r);
+        assert!(strike_peak > 0.0, "the note made no sound");
+
+        // Averaged over sixteen blows, and averaged in *amplitude*, which is
+        // the statistic `calibrate.rs` places the level with. The peak of one
+        // realization of a filtered noise burst is itself a random number that
+        // scatters by 5-7 dB (`DECISIONS.md` 114), so no single event lands on
+        // the table and none should: no two blows of a real hammer are
+        // identical. What the level fixes is where many of them land.
+        let voiced = strike_noise_preset(WANT_DB);
+        let mut total = 0.0f32;
+        let draws = 16u64;
+        let mut loud = (Vec::new(), Vec::new());
+        for draw in 0..draws {
+            loud = render_note(&voiced, KEY, 90, blocks, draw * 4096);
+            total += magnitude_peak(
+                &difference(&loud.0, &quiet_l),
+                &difference(&loud.1, &quiet_r),
+            );
+        }
+        let measured = crate::types::amp_to_db(total / draws as f32 / strike_peak);
+        println!("the hammer's noise renders {measured:.2} dB under the strike");
+        assert!(
+            (measured - WANT_DB).abs() < 3.0,
+            "the hammer's noise rendered {measured:.1} dB under the strike, \
+             expected {WANT_DB}"
+        );
+
+        // It arrives *with* the blow, not after it: the first block already
+        // carries it.
+        let first = difference(&loud.0[..BLOCK], &quiet_l[..BLOCK]);
+        assert!(
+            first.iter().any(|&x| x != 0.0),
+            "the strike noise did not start in the hammer's own block"
+        );
+    }
+
+    /// A −200 dB strike is bit-exact silence, and the burst is never even
+    /// started — which is what makes `presets/default.toml` the instrument it
+    /// has always been.
+    #[test]
+    fn a_silent_strike_leaves_the_note_bit_for_bit_what_it_was() {
+        let pedals = PedalState::new();
+        let mut v = voice(60);
+        v.note_on(100, &pedals, 0);
+        assert!(
+            !v.strike_noise.is_active(),
+            "the default preset started a strike burst"
+        );
+        let blocks = (0.3 * SAMPLE_RATE / BLOCK as f32) as usize;
+        let (a_l, a_r) = render_note(&Preset::default(), 60, 90, blocks, 0);
+        let (b_l, b_r) = render_note(&strike_noise_preset(-200.0), 60, 90, blocks, 0);
+        assert_eq!(a_l, b_l, "a silenced strike changed the left channel");
+        assert_eq!(a_r, b_r, "a silenced strike changed the right channel");
+    }
+
+    /// A re-strike into a burst that is still ringing retriggers it, and a
+    /// key-off in between does not take it away: the two bursts are separate
+    /// because a staccato is a release 80 ms into an attack.
+    #[test]
+    fn a_restrike_retriggers_the_strike_noise_and_a_release_does_not_cut_it() {
+        let pedals = PedalState::new();
+        let preset = strike_noise_preset(-20.0);
+        let mut v = voice_from(60, &preset);
+        v.note_on(90, &pedals, 0);
+        assert!(v.strike_noise.is_active());
+        render(&mut v, 2);
+
+        // A note-off starts the action's own burst and leaves the hammer's
+        // alone.
+        v.note_off(64, &pedals, 1024);
+        assert!(v.noise.is_active(), "the release made no sound");
+        assert!(
+            v.strike_noise.is_active(),
+            "the release cut the attack noise of the note it belongs to"
+        );
+
+        // ... and a re-strike restarts the envelope rather than layering a
+        // second burst.
+        render(&mut v, 40);
+        let before = v.strike_noise.is_active();
+        v.note_on(110, &pedals, 8192);
+        assert!(v.strike_noise.is_active());
+        assert!(before || v.strike_noise.is_active());
+    }
+
     #[test]
     fn restrike_does_not_reset_the_ringing_string() {
         let pedals = PedalState::new();
         let mut v = voice(60);
-        v.note_on(100, &pedals);
+        v.note_on(100, &pedals, 0);
         render(&mut v, 100);
         let before = v.string().energy();
-        v.note_on(1, &pedals);
+        v.note_on(1, &pedals, 0);
         assert!(v.string().energy() >= before * 0.5);
     }
 }

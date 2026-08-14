@@ -176,6 +176,11 @@ pub fn fit_noise(
         damper_lift,
         pedal_down,
         pedal_up,
+        // The hammer's own noise is not a mechanism recording: no library
+        // isolates a blow, so nothing here can measure it and `base`'s value —
+        // silence, unless something already fitted one — stands.
+        // `estimate::attack` is what fills it, from the struck notes themselves.
+        strike: base.strike.clone(),
     }
 }
 
@@ -221,7 +226,8 @@ fn fit_event(
         .filter(|c| c.is_finite())
         .unwrap_or(f64::from(base.centroid_hz))
         .clamp(MIN_CENTROID_HZ, MAX_CENTROID_HZ);
-    let level_db = compass_anchors(metrics, level_offset_db, config)
+    let levels: Vec<(Option<u8>, f64)> = metrics.iter().map(|m| (m.key, m.level_db)).collect();
+    let level_db = compass_anchors(&levels, level_offset_db, config)
         .unwrap_or_else(|| base.level_db.clone());
     EventNoise {
         centroid_hz: centroid_hz as f32,
@@ -239,18 +245,23 @@ fn fit_event(
 /// [`NoiseConfig::anchor_step`] keys, each the median of the keys nearest it,
 /// with the first and last measured keys always anchored so that the
 /// interpolation is never an extrapolation.
-fn compass_anchors(
-    metrics: &[EventMetrics],
+///
+/// `levels` is `(key, dB)` with `None` for a global event. Public because the
+/// hammer's own noise ([`estimate::attack`](crate::estimate::attack)) is
+/// measured from the struck notes rather than from a mechanism recording, and
+/// reduces its thirty measured keys to anchors by exactly this rule.
+pub fn compass_anchors(
+    levels: &[(Option<u8>, f64)],
     offset_db: f64,
     config: &NoiseConfig,
 ) -> Option<Vec<NoiseAnchor>> {
-    let keyed: Vec<(u8, f64)> = metrics
+    let keyed: Vec<(u8, f64)> = levels
         .iter()
-        .filter_map(|m| Some((m.key?, m.level_db)))
+        .filter_map(|&(key, db)| Some((key?, db)))
         .filter(|(_, db)| db.is_finite())
         .collect();
     if keyed.is_empty() {
-        let level = median(metrics.iter().map(|m| m.level_db).filter(|db| db.is_finite()))?;
+        let level = median(levels.iter().map(|&(_, db)| db).filter(|db| db.is_finite()))?;
         return Some(vec![NoiseAnchor {
             key: LOWEST_KEY,
             db: clamp_db(level + offset_db),

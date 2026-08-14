@@ -324,11 +324,11 @@ fn render_key(
 }
 
 /// The library layer of `key` that a strike at `velocity` would trigger.
-fn layer_for<'a>(
-    library: &'a SampleLibrary,
+fn layer_for(
+    library: &SampleLibrary,
     key: u8,
     velocity: u8,
-) -> Result<&'a Sample, Box<dyn std::error::Error>> {
+) -> Result<&Sample, Box<dyn std::error::Error>> {
     library
         .layers(key)
         .iter()
@@ -495,11 +495,13 @@ fn build_partials(
 /// The measurements of one track that an envelope may be built from: past the
 /// first window that lies wholly after the strike, positive, and on the clock
 /// the render uses.
-fn usable_points(track: &PartialTrack, onset: f64, start: f64) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+type Envelope = (Vec<(f64, f64)>, Vec<(f64, f64)>);
+
+fn usable_points(track: &PartialTrack, onset: f64, start: f64) -> Envelope {
     let mut envelope = Vec::new();
     let mut glide = Vec::new();
     for point in &track.points {
-        if point.time_s < start || !(point.amplitude > 0.0) || !point.frequency_hz.is_finite() {
+        if point.time_s < start || point.amplitude <= 0.0 || !point.frequency_hz.is_finite() {
             continue;
         }
         let t = point.time_s - onset;
@@ -615,14 +617,10 @@ fn attack_ramp(t: f64) -> f64 {
 
 // ------------------------------------------------- phase-locked analysis
 
-/// Complex amplitude of every partial at every hop: `c_k[h]` such that the
-/// signal near hop `h` is `sum_k Re(c_k e^{i 2 pi f_k t})`, with `t` measured
-/// from the strike.
-///
-/// A projection rather than an FFT: the frequencies wanted are known and are
-/// not on any bin grid, and there are a few dozen of them. The exponential is
-/// advanced by a complex rotation per sample, so the inner loop has no
-/// transcendental in it.
+/// The phase-locked projection and its resynthesis, both from
+/// [`piano_tuner::residual`]: they were written here and are now the estimator's
+/// as well, so the residual the ladder listens to and the one
+/// `estimate::attack` fits `[noise.strike]` from are the same subtraction.
 fn track_complex(
     signal: &[f32],
     freqs: &[f64],
@@ -630,46 +628,9 @@ fn track_complex(
     hop_n: usize,
     hops: usize,
 ) -> Vec<Vec<(f64, f64)>> {
-    let half = window_n / 2;
-    let window: Vec<f64> = (0..window_n)
-        .map(|i| {
-            0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / window_n as f64).cos()
-        })
-        .collect();
-    let weight: f64 = window.iter().sum();
-    freqs
-        .iter()
-        .map(|&f| {
-            let omega = std::f64::consts::TAU * f / SR;
-            let (rot_re, rot_im) = ((-omega).cos(), (-omega).sin());
-            (0..hops)
-                .map(|h| {
-                    let centre = h * hop_n;
-                    let start = centre as isize - half as isize;
-                    let phase = -omega * start as f64;
-                    let (mut re, mut im) = (phase.cos(), phase.sin());
-                    let (mut acc_re, mut acc_im) = (0.0f64, 0.0f64);
-                    for (i, &w) in window.iter().enumerate() {
-                        let index = start + i as isize;
-                        let x = if index < 0 {
-                            0.0
-                        } else {
-                            f64::from(signal.get(index as usize).copied().unwrap_or(0.0))
-                        };
-                        acc_re += w * x * re;
-                        acc_im += w * x * im;
-                        let next_re = re * rot_re - im * rot_im;
-                        im = re * rot_im + im * rot_re;
-                        re = next_re;
-                    }
-                    (2.0 * acc_re / weight, 2.0 * acc_im / weight)
-                })
-                .collect()
-        })
-        .collect()
+    piano_tuner::residual::track_complex(signal, SR, freqs, window_n, hop_n, hops)
 }
 
-/// Resynthesizes what [`track_complex`] measured, on the same clock.
 fn resynth_locked(
     freqs: &[f64],
     coefficients: &[Vec<(f64, f64)>],
@@ -677,27 +638,7 @@ fn resynth_locked(
     hops: usize,
     frames: usize,
 ) -> Vec<f64> {
-    let mut out = vec![0.0f64; frames];
-    for (f, hopped) in freqs.iter().zip(coefficients) {
-        let omega = std::f64::consts::TAU * f / SR;
-        let (rot_re, rot_im) = (omega.cos(), omega.sin());
-        let (mut re, mut im) = (1.0f64, 0.0f64);
-        for (n, o) in out.iter_mut().enumerate() {
-            let u = n as f64 / hop_n as f64;
-            let i = (u.floor() as usize).min(hops - 1);
-            let j = (i + 1).min(hops - 1);
-            let frac = u - i as f64;
-            let (c_re, c_im) = hopped[i];
-            let (d_re, d_im) = hopped[j];
-            let a_re = c_re * (1.0 - frac) + d_re * frac;
-            let a_im = c_im * (1.0 - frac) + d_im * frac;
-            *o += a_re * re - a_im * im;
-            let next_re = re * rot_re - im * rot_im;
-            im = re * rot_im + im * rot_re;
-            re = next_re;
-        }
-    }
-    out
+    piano_tuner::residual::resynth_locked(freqs, SR, coefficients, hop_n, hops, frames)
 }
 
 /// Per-partial stereo balance, as a pair of gains whose mean is 1.
@@ -773,11 +714,7 @@ fn attack_residual(
 /// short enough to see the attack: four periods of the lowest partial, held
 /// between 20 and 40 ms.
 fn analysis_window(freqs: &[f64]) -> usize {
-    let f0 = freqs.iter().cloned().fold(f64::INFINITY, f64::min).max(1.0);
-    let wanted = 4.0 / f0;
-    let seconds = wanted.clamp(0.020, 0.040);
-    let n = (seconds * SR).round() as usize;
-    n + n % 2
+    piano_tuner::residual::locked_window(freqs, SR)
 }
 
 // ------------------------------------------------- the engine, offline
@@ -1139,7 +1076,7 @@ fn rms_db(values: impl Iterator<Item = f64>) -> f64 {
 /// the match.
 fn write_matched(dir: &Path, rungs: &[(&str, Stereo)]) -> Result<(), Box<dyn std::error::Error>> {
     let reference = match_rms(&rungs[0].1);
-    if !(reference > 0.0) {
+    if reference <= 0.0 || !reference.is_finite() {
         return Err(format!("{}: the source is silent", dir.display()).into());
     }
     let gains: Vec<f64> = rungs

@@ -50,6 +50,34 @@ pub const MAX_CONTACT_WIDTH: f32 = 0.05;
 pub const MIN_SIGMA_SCALE: f32 = 0.5;
 pub const MAX_SIGMA_SCALE: f32 = 2.0;
 
+/// Bounds on a per-partial excitation gain (`notes.partial_gains`), ±20 dB.
+///
+/// The quantity is *measured* roughness, not a knob: `TUNING_REPORT.md` §3 puts
+/// the recordings' scatter around the fitted comb at 5–10 dB RMS with worst
+/// partials 12–29 dB out, and `renders/timbre-ladder/ANALYSIS.md` §4a puts the
+/// deepest partial anywhere at 9.3–17.7 dB below a smooth envelope. ±20 dB
+/// covers every one of those with room, and refuses a table that has stopped
+/// describing one hammer striking one string.
+pub const MIN_PARTIAL_GAIN: f32 = 0.1;
+pub const MAX_PARTIAL_GAIN: f32 = 10.0;
+
+/// Bounds on a per-partial decay-rate multiplier (`notes.partial_sigma_scale`).
+///
+/// Narrower than [`RADIATED_FACTOR_RANGE`] is wide for the same reason that one
+/// is clamped: `notes.sigma0`/`sigma1` are fitted to recorded decays, so this is
+/// a correction to a measurement and not a second decay law. A factor of four
+/// either way is already 12 dB of T60 either side of the fit.
+pub const MIN_PARTIAL_SIGMA_SCALE: f32 = 0.25;
+pub const MAX_PARTIAL_SIGMA_SCALE: f32 = 4.0;
+
+/// Deepest a preset may fill in the strike comb's nulls
+/// ([`StringParams::comb_floor`]).
+///
+/// A floor of 0.5 puts the null partial 6 dB under a partial at the comb's
+/// crest, which is not a comb at all; the measured instrument's deepest partial
+/// anywhere is 9.3–17.7 dB down, i.e. a floor of 0.13–0.34.
+pub const MAX_COMB_FLOOR: f32 = 0.5;
+
 /// Excitation taper of a hammer that touches a patch of the string rather than
 /// a point, for partial `k` and a contact width of `width` speaking lengths.
 ///
@@ -99,6 +127,22 @@ pub struct StringParams {
     /// speaking length. Zero is the point force the comb `sin(k pi x)` assumes;
     /// see [`contact_taper`].
     pub contact_width: f32,
+    /// Soft floor under the strike comb's nulls, as a fraction of the comb's
+    /// crest: the excitation magnitude of partial `k` becomes
+    /// `sqrt(sin^2(k pi x) + floor^2)`.
+    ///
+    /// `sin(k pi x)` has exact zeros and a real hammer on a real string does
+    /// not: the contact patch has width, the string has stiffness, and the
+    /// termination is not a node. Measured, the engine's worst partial is
+    /// exactly where the comb crosses zero — 42 dB down at A2's k = 17 and at
+    /// C6's k = 8 — while the recording's deepest partial anywhere is 9.3 to
+    /// 17.7 dB below a smooth envelope and never at those indices
+    /// (`renders/timbre-ladder/ANALYSIS.md` §4a). The contact taper cannot fill
+    /// a null: it is a low-pass in `k` and multiplies the zero by something
+    /// smaller.
+    ///
+    /// Zero — the default — is the bare comb, sign and all, bit for bit.
+    pub comb_floor: f32,
     /// Frequency-independent part of the decay rate, 1/s.
     pub sigma0: f32,
     /// Coefficient of `(f_k/1000)^2` in the decay rate, 1/s.
@@ -167,6 +211,59 @@ impl StringParams {
     }
 }
 
+/// The two per-partial tables of one key, as borrowed slices of the preset.
+///
+/// Both are *measurements* the smooth per-note laws cannot carry, and both are
+/// deliberately velocity-independent: the roughness of a note's excitation
+/// spectrum is not shared with the note beside it (`TUNING_REPORT.md` §3
+/// refutes a global admittance curve by measurement), and neither is the way its
+/// individual partials depart from the fitted decay law.
+///
+/// Either may be shorter than the key's partial count — the estimator measures
+/// as far up the series as it can track — and every partial past the end is
+/// exactly 1.0. [`PartialShaping::default`] is that everywhere, which is the
+/// instrument as it was built before these tables existed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PartialShaping<'a> {
+    /// Linear multiplier on partial `k`'s excitation gain, 1-based.
+    pub gains: &'a [f32],
+    /// Multiplier on partial `k`'s decay rate, 1-based.
+    pub sigma_scale: &'a [f32],
+}
+
+impl PartialShaping<'_> {
+    /// Excitation multiplier of partial `k` (1-based); 1.0 past the table.
+    #[inline]
+    pub fn gain_at(&self, k: usize) -> f32 {
+        self.gains.get(k - 1).copied().unwrap_or(1.0)
+    }
+
+    /// Decay-rate multiplier of partial `k` (1-based); 1.0 past the table.
+    #[inline]
+    pub fn sigma_scale_at(&self, k: usize) -> f32 {
+        self.sigma_scale.get(k - 1).copied().unwrap_or(1.0)
+    }
+}
+
+/// Excitation magnitude of partial `k` before the contact taper: the strike
+/// comb, with a soft floor under its nulls.
+///
+/// `sqrt(sin^2 + floor^2)` never reaches zero and is within `floor^2/2|sin|` of
+/// the bare comb wherever the comb is strong, so a floor lifts the nulls and
+/// leaves everything else where it was. The comb's **sign** is kept: it is the
+/// phase partial `k` starts at, and preserving it is what makes a zero floor the
+/// old instrument to the last bit rather than to a rounding.
+fn comb_magnitude(k: usize, strike_position: f32, floor: f32) -> f32 {
+    let comb = (k as f32 * std::f32::consts::PI * strike_position).sin();
+    if floor > 0.0 {
+        // `signum` of a zero comb is ±1, so a partial with an exact node gets
+        // the floor rather than nothing, which is the whole point.
+        comb.signum() * (comb * comb + floor * floor).sqrt()
+    } else {
+        comb
+    }
+}
+
 /// One physical string: two polarizations sharing an excitation input.
 struct Polarizations {
     vertical: ModalBank,
@@ -230,7 +327,12 @@ fn radiated_damping(params: &StringParams, voicing: &Voicing, partials: usize) -
 }
 
 impl PianoString {
-    pub fn new(params: StringParams, voicing: &Voicing) -> Self {
+    /// Builds the key's unison group.
+    ///
+    /// `shaping` carries the two per-partial tables (`notes.partial_gains` and
+    /// `notes.partial_sigma_scale`); [`PartialShaping::default`] is the
+    /// instrument as it was before they existed, to the bit.
+    pub fn new(params: StringParams, voicing: &Voicing, shaping: PartialShaping<'_>) -> Self {
         let partials = params.partial_count();
         // `Re Y` in the per-partial damping: a partial that sits on a board
         // mode loses energy into the board faster than the smooth fitted decay
@@ -265,16 +367,26 @@ impl PianoString {
             let mut horizontal = ModalBank::with_capacity(partials);
             for k in 1..=partials {
                 let f = params.partial_freq(k) * detune;
-                let sigma =
-                    params.partial_sigma(k) * vertical_factor * sigma_scale * radiated[k - 1];
+                // The per-partial scale is applied to the note's own fitted
+                // rate, before the polarization factor and before the per-string
+                // one, so both banks — and the damper profile below — follow it.
+                let sigma = params.partial_sigma(k)
+                    * shaping.sigma_scale_at(k)
+                    * vertical_factor
+                    * sigma_scale
+                    * radiated[k - 1];
                 // g_k ∝ sin(k pi x_strike) nulls the partials with a node at
-                // the strike point, and the contact taper is what a hammer wide
-                // enough to average over that comb does to the top of it; the
-                // 1/SAMPLE_RATE turns the per-sample accumulation of the
-                // excitation into an integral over the hammer's force pulse.
+                // the strike point, `comb_floor` is how far a real hammer on a
+                // real string misses that null, and the contact taper is what a
+                // hammer wide enough to average over the comb does to the top of
+                // it. `partial_gains` is the measured roughness the smooth comb
+                // cannot carry. The 1/SAMPLE_RATE turns the per-sample
+                // accumulation of the excitation into an integral over the
+                // hammer's force pulse.
                 let g = output_scale
-                    * (k as f32 * std::f32::consts::PI * params.strike_position).sin()
+                    * comb_magnitude(k, params.strike_position, params.comb_floor)
                     * contact_taper(k, params.contact_width)
+                    * shaping.gain_at(k)
                     / SAMPLE_RATE;
                 vertical.push_mode(f, sigma, g);
                 horizontal.push_mode(
@@ -290,8 +402,15 @@ impl PianoString {
                 previous: [0.0; BLOCK],
             });
         }
+        // The damper's grip follows the same per-partial scale: it is a decay
+        // rate on the same pole, and a partial the preset says is more lossy
+        // than the fitted law is more lossy with the felt on it too.
         let damper_profile: Vec<f32> = (1..=partials)
-            .map(|k| params.damper_sigma * voicing.damper_weight_at(params.partial_freq(k)))
+            .map(|k| {
+                params.damper_sigma
+                    * voicing.damper_weight_at(params.partial_freq(k))
+                    * shaping.sigma_scale_at(k)
+            })
             .collect();
         PianoString {
             strings,
@@ -507,7 +626,7 @@ mod tests {
     /// the rest of the instrument are calibrated for.
     fn strike(key: u8, vel: u8, blocks: usize) -> Vec<f32> {
         let preset = preset();
-        let mut string = PianoString::new(preset.string_params(key), &preset.voicing);
+        let mut string = PianoString::new(preset.string_params(key), &preset.voicing, PartialShaping::default());
         let mut hammer = Hammer::new(preset.hammer_params(key));
         hammer.strike_midi(vel);
         let mut out = vec![0.0f32; blocks * BLOCK];
@@ -625,7 +744,7 @@ mod tests {
         let plain = Preset::default().string_params(60);
         assert!(params.partial_count() < plain.partial_count());
 
-        let s = PianoString::new(params, &preset.voicing);
+        let s = PianoString::new(params, &preset.voicing, PartialShaping::default());
         assert_eq!(s.partial_count(), params.partial_count());
         for k in 1..=s.partial_count() {
             let want = params.partial_freq(k);
@@ -669,7 +788,7 @@ mod tests {
             assert!(preset.validate().is_ok(), "the probe preset is not legal");
             let mut params = preset.string_params(KEY);
             params.unison = 1;
-            let mut string = PianoString::new(params, &preset.voicing);
+            let mut string = PianoString::new(params, &preset.voicing, PartialShaping::default());
             let mut hammer = Hammer::new(preset.hammer_params(KEY));
             hammer.strike_midi(100);
             let mut out = [0.0f32; BLOCK];
@@ -714,7 +833,7 @@ mod tests {
     fn banks_are_laid_out_from_the_formula() {
         let preset = preset();
         let params = preset.string_params(60);
-        let s = PianoString::new(params, &preset.voicing);
+        let s = PianoString::new(params, &preset.voicing, PartialShaping::default());
         assert_eq!(s.partial_count(), params.partial_count());
         assert!(s.partial_count() > 40);
         for k in 1..=s.partial_count() {
@@ -768,7 +887,7 @@ mod tests {
         params.unison = 1;
         let sigma_v = params.partial_sigma(1) * preset.voicing.vertical_decay_factor();
 
-        let mut string = PianoString::new(params, &preset.voicing);
+        let mut string = PianoString::new(params, &preset.voicing, PartialShaping::default());
         let mut hammer = Hammer::new(preset.hammer_params(key));
         hammer.strike_midi(100);
         let mut out = [0.0f32; BLOCK];
@@ -808,7 +927,7 @@ mod tests {
     /// gone, so the fundamental alone is what the two probes see.
     fn per_string_vertical_sigma(preset: &Preset, key: u8, probes: [f32; 2]) -> Vec<f32> {
         let params = preset.string_params(key);
-        let mut string = PianoString::new(params, &preset.voicing);
+        let mut string = PianoString::new(params, &preset.voicing, PartialShaping::default());
         let mut hammer = Hammer::new(preset.hammer_params(key));
         hammer.strike_midi(100);
         let mut out = [0.0f32; BLOCK];
@@ -854,7 +973,7 @@ mod tests {
             let params = preset.string_params(key);
             assert_eq!(params.unison, 3);
             let designed = params.partial_sigma(1) * preset.voicing.vertical_decay_factor();
-            let string = PianoString::new(params, &preset.voicing);
+            let string = PianoString::new(params, &preset.voicing, PartialShaping::default());
             for (s, &scale) in scales.iter().enumerate() {
                 // The layout says it ...
                 assert!(
@@ -884,6 +1003,319 @@ mod tests {
                     "{scales:?}: string {s} decays at {measured}, expected {want}"
                 );
             }
+        }
+    }
+
+    // ------------------------------------------- the per-partial tables
+
+    /// Strikes one unison string of `key` and returns the output.
+    ///
+    /// One string, so nothing beats and nothing couples: the render is a plain
+    /// sum of decaying sinusoids at the partials the bank was built with, which
+    /// is what makes projecting onto one of them mean something.
+    fn strike_single(preset: &Preset, key: u8, shaping: PartialShaping<'_>, blocks: usize) -> Vec<f32> {
+        let mut params = preset.string_params(key);
+        params.unison = 1;
+        let mut string = PianoString::new(params, &preset.voicing, shaping);
+        let mut hammer = Hammer::new(preset.hammer_params(key));
+        hammer.strike_midi(100);
+        let mut out = vec![0.0f32; blocks * BLOCK];
+        for chunk in out.chunks_mut(BLOCK) {
+            hammer.add_pulse(string.excitation_mut(0), 0, 1.0);
+            hammer.advance(BLOCK);
+            string.process(chunk);
+        }
+        out
+    }
+
+    /// Magnitude of `y` at `hz`, over a Hann-windowed span — enough to separate
+    /// one partial of a single string from its neighbours.
+    fn partial_magnitude(y: &[f32], hz: f32, from: usize, len: usize) -> f64 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (i, &v) in y[from..(from + len).min(y.len())].iter().enumerate() {
+            let w = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / len as f64).cos();
+            let phase = std::f64::consts::TAU * hz as f64 * i as f64 / SAMPLE_RATE as f64;
+            re += w * v as f64 * phase.cos();
+            im -= w * v as f64 * phase.sin();
+        }
+        (re * re + im * im).sqrt() * 2.0 / len as f64
+    }
+
+    /// `notes.partial_gains` is a gain on one partial's excitation and on
+    /// nothing else: doubling entry `k` doubles what partial `k` contributes to
+    /// the rendered note, and leaves every other partial where it was.
+    ///
+    /// Measured on the render by subtraction rather than on the coefficient: the
+    /// difference between the two renders is, by linearity, exactly the extra
+    /// copy of partial `k`, so it must project to that partial's own amplitude
+    /// at its own frequency and to nothing anywhere else.
+    #[test]
+    fn a_doubled_partial_gain_doubles_that_partials_output_amplitude() {
+        const KEY: u8 = 60;
+        const K: usize = 5;
+        let preset = preset();
+        let params = preset.string_params(KEY);
+        let mut gains = vec![1.0f32; params.partial_count()];
+        gains[K - 1] = 2.0;
+        let shaping = PartialShaping {
+            gains: &gains,
+            sigma_scale: &[],
+        };
+
+        // The layout first: exactly doubled there, exactly untouched elsewhere.
+        let mut plain_params = params;
+        plain_params.unison = 1;
+        let plain_string = PianoString::new(plain_params, &preset.voicing, PartialShaping::default());
+        let loud = PianoString::new(plain_params, &preset.voicing, shaping);
+        for k in 0..plain_string.partial_count() {
+            let want = if k + 1 == K { 2.0 } else { 1.0 } * plain_string.strings[0].vertical.mode_gain(k);
+            assert_eq!(loud.strings[0].vertical.mode_gain(k), want, "partial {}", k + 1);
+            let want_h = if k + 1 == K { 2.0 } else { 1.0 } * plain_string.strings[0].horizontal.mode_gain(k);
+            assert_eq!(loud.strings[0].horizontal.mode_gain(k), want_h);
+        }
+
+        // ... and the sound. 0.1 s from 0.1 s in, past the hammer pulse.
+        let blocks = (0.4 * SAMPLE_RATE / BLOCK as f32) as usize;
+        let base = strike_single(&preset, KEY, PartialShaping::default(), blocks);
+        let doubled = strike_single(&preset, KEY, shaping, blocks);
+        let difference: Vec<f32> = doubled.iter().zip(&base).map(|(a, b)| a - b).collect();
+        let (from, len) = ((0.1 * SAMPLE_RATE) as usize, (0.1 * SAMPLE_RATE) as usize);
+        let at = |y: &[f32], k: usize| partial_magnitude(y, params.partial_freq(k), from, len);
+
+        let extra = at(&difference, K);
+        let original = at(&base, K);
+        assert!(original > 0.0, "the probe partial never sounded");
+        assert!(
+            (extra / original - 1.0).abs() < 0.02,
+            "the extra copy of partial {K} is {:.4} of the partial itself",
+            extra / original
+        );
+        // Nothing else moved: the difference is silent at the neighbours.
+        for k in [K - 1, K + 1, K + 3] {
+            let leak = at(&difference, k) / at(&base, k);
+            assert!(
+                leak < 0.01,
+                "doubling partial {K} moved partial {k} by a factor of {leak:e}"
+            );
+        }
+    }
+
+    /// `notes.partial_sigma_scale` reaches both polarizations, the damper
+    /// profile, and the decay the note actually renders at.
+    #[test]
+    fn a_partial_sigma_scale_changes_that_partials_decay_and_its_damper() {
+        const KEY: u8 = 84;
+        let preset = preset();
+        let params = preset.string_params(KEY);
+        // Half the fitted rate on the fundamental and twice it on the second
+        // partial: both directions, and the fundamental is the one the render
+        // below can see on its own.
+        let mut scale = vec![1.0f32; params.partial_count()];
+        scale[0] = 0.5;
+        scale[1] = 2.0;
+        let shaping = PartialShaping {
+            gains: &[],
+            sigma_scale: &scale,
+        };
+
+        let mut single = params;
+        single.unison = 1;
+        let plain = PianoString::new(single, &preset.voicing, PartialShaping::default());
+        let scaled = PianoString::new(single, &preset.voicing, shaping);
+        for (k, &want) in scale.iter().enumerate().take(plain.partial_count()) {
+            for bank in 0..2 {
+                let (a, b) = if bank == 0 {
+                    (
+                        plain.strings[0].vertical.mode_sigma(k),
+                        scaled.strings[0].vertical.mode_sigma(k),
+                    )
+                } else {
+                    (
+                        plain.strings[0].horizontal.mode_sigma(k),
+                        scaled.strings[0].horizontal.mode_sigma(k),
+                    )
+                };
+                assert!(
+                    (b / (a * want) - 1.0).abs() < 1e-6,
+                    "partial {} of bank {bank}: {b} against {}",
+                    k + 1,
+                    a * want
+                );
+            }
+            // The damper is a decay rate on the same pole and follows too.
+            assert!(
+                (scaled.damper_profile[k] / (plain.damper_profile[k] * want) - 1.0).abs()
+                    < 1e-6,
+                "damper profile of partial {}",
+                k + 1
+            );
+        }
+
+        // And the note it renders: the vertical bank's stored energy decays at
+        // twice its polarization's rate once only the fundamental is left, and
+        // a fundamental told to lose energy half as fast has to take twice as
+        // long to get there.
+        let designed = single.partial_sigma(1) * preset.voicing.vertical_decay_factor();
+        let measured = |shaping: PartialShaping<'_>| {
+            let mut string = PianoString::new(single, &preset.voicing, shaping);
+            let mut hammer = Hammer::new(preset.hammer_params(KEY));
+            hammer.strike_midi(100);
+            let mut out = [0.0f32; BLOCK];
+            let probes = [0.35f32, 0.6];
+            let mut energy = Vec::new();
+            for block in 0..(0.7 * SAMPLE_RATE / BLOCK as f32) as usize {
+                let t = (block * BLOCK) as f32 / SAMPLE_RATE;
+                if probes.iter().any(|p| (t - p).abs() < BLOCK as f32 / SAMPLE_RATE * 0.5) {
+                    energy.push(string.strings[0].vertical.energy());
+                }
+                hammer.add_pulse(string.excitation_mut(0), 0, 1.0);
+                hammer.advance(BLOCK);
+                string.process(&mut out);
+            }
+            assert_eq!(energy.len(), probes.len());
+            (energy[0] / energy[1]).ln() / (2.0 * (probes[1] - probes[0]))
+        };
+        let plain_rate = measured(PartialShaping::default());
+        let slow_rate = measured(shaping);
+        assert!(
+            (plain_rate / designed - 1.0).abs() < 0.05,
+            "the control decayed at {plain_rate} against the designed {designed}"
+        );
+        assert!(
+            (slow_rate / (designed * 0.5) - 1.0).abs() < 0.05,
+            "a fundamental scaled by 0.5 decayed at {slow_rate}, expected {}",
+            designed * 0.5
+        );
+    }
+
+    /// `notes.comb_floor` lifts the partials the strike comb nulls and leaves
+    /// every other partial where it was — which is the whole difference between
+    /// a hammer with width and a hammer that is a point.
+    ///
+    /// A2 is the key `renders/timbre-ladder/ANALYSIS.md` §4a measures: the
+    /// engine's worst partial there is k = 17, exactly where `sin(k pi x)`
+    /// crosses zero, 42 dB down, while the recording's deepest partial anywhere
+    /// is 9.3–17.7 dB down and never at that index.
+    #[test]
+    fn the_comb_floor_lifts_the_null_partials_and_leaves_the_others_alone() {
+        const KEY: u8 = 45; // A2
+        const FLOOR: f32 = 0.05;
+        let preset = preset();
+        let params = preset.string_params(KEY);
+        let comb = |k: usize| (k as f32 * std::f32::consts::PI * params.strike_position).sin();
+        // The null the strike position puts in this key's series, found rather
+        // than written down: whichever partial the comb is quietest at.
+        let null = (1..=params.partial_count())
+            .min_by(|&a, &b| comb(a).abs().partial_cmp(&comb(b).abs()).unwrap())
+            .expect("the key has partials");
+        assert!(comb(null).abs() < 0.02, "A2's comb has no null to fill");
+
+        let mut floored_params = params;
+        floored_params.comb_floor = FLOOR;
+        let plain = PianoString::new(params, &preset.voicing, PartialShaping::default());
+        let floored = PianoString::new(floored_params, &preset.voicing, PartialShaping::default());
+
+        // A zero floor is the bare comb to the last bit, on every string of the
+        // group and both of its planes.
+        let mut zero_params = params;
+        zero_params.comb_floor = 0.0;
+        let zero = PianoString::new(zero_params, &preset.voicing, PartialShaping::default());
+        for s in 0..plain.string_count() {
+            for k in 0..plain.partial_count() {
+                assert_eq!(
+                    zero.strings[s].vertical.mode_gain(k),
+                    plain.strings[s].vertical.mode_gain(k)
+                );
+                assert_eq!(
+                    zero.strings[s].horizontal.mode_gain(k),
+                    plain.strings[s].horizontal.mode_gain(k)
+                );
+            }
+        }
+
+        for k in 1..=plain.partial_count() {
+            let before = plain.strings[0].vertical.mode_gain(k - 1);
+            let after = floored.strings[0].vertical.mode_gain(k - 1);
+            // The sign is the partial's starting phase and does not move.
+            if before != 0.0 {
+                assert_eq!(after.signum(), before.signum(), "partial {k} changed sign");
+            }
+            // The magnitude is exactly the formula.
+            let c = comb(k);
+            let want = (c * c + FLOOR * FLOOR).sqrt() / c.abs();
+            let ratio = after.abs() / before.abs();
+            assert!(
+                (ratio / want - 1.0).abs() < 1e-4,
+                "partial {k} moved by {ratio}, expected {want}"
+            );
+            let db = 20.0 * ratio.log10();
+            if k == null {
+                assert!(db > 12.0, "the null at {k} only rose {db:.1} dB");
+            } else if c.abs() > 0.3 {
+                // Everything the comb actually excites moves by `floor^2/2c^2`,
+                // which at a third of the crest is already a tenth of a decibel
+                // and at the crest is a hundredth: the same floor is 12 dB at
+                // the null and inaudible everywhere else, which is the whole
+                // claim.
+                assert!(db < 0.1, "partial {k} rose {db:.3} dB and is not a null");
+                if c.abs() > 0.9 {
+                    assert!(db < 0.02, "partial {k} rose {db:.3} dB at the comb's crest");
+                }
+            }
+        }
+
+        // Stated as the fault it fixes: the deepest partial in the comb goes
+        // from far below the ladder's measured floor to inside it.
+        let depth = |s: &PianoString, k: usize| {
+            20.0 * (s.strings[0].vertical.mode_gain(k - 1).abs()
+                / s.strings[0].vertical.mode_gain(0).abs())
+            .log10()
+        };
+        assert!(depth(&plain, null) < -30.0, "the control's null is not deep");
+        assert!(
+            depth(&floored, null) > -30.0,
+            "the floor left the null at {:.1} dB",
+            depth(&floored, null)
+        );
+    }
+
+    /// A key whose row runs out — or has none at all — is the string the engine
+    /// built before either table existed, to the bit.
+    #[test]
+    fn a_short_or_missing_per_partial_row_is_the_unshaped_string() {
+        let preset = preset();
+        for key in [21u8, 45, 60, 96] {
+            let params = preset.string_params(key);
+            let plain = PianoString::new(params, &preset.voicing, PartialShaping::default());
+            // Three entries of ones and nothing else: the rest of the series
+            // has to fall back to 1.0 rather than to 0.0.
+            let short = PianoString::new(
+                params,
+                &preset.voicing,
+                PartialShaping {
+                    gains: &[1.0, 1.0, 1.0],
+                    sigma_scale: &[1.0],
+                },
+            );
+            for s in 0..plain.string_count() {
+                for k in 0..plain.partial_count() {
+                    assert_eq!(
+                        short.strings[s].vertical.mode_gain(k),
+                        plain.strings[s].vertical.mode_gain(k),
+                        "key {key} partial {}",
+                        k + 1
+                    );
+                    assert_eq!(
+                        short.strings[s].vertical.mode_sigma(k),
+                        plain.strings[s].vertical.mode_sigma(k)
+                    );
+                    assert_eq!(
+                        short.strings[s].horizontal.mode_sigma(k),
+                        plain.strings[s].horizontal.mode_sigma(k)
+                    );
+                }
+            }
+            assert_eq!(short.damper_profile, plain.damper_profile);
         }
     }
 
@@ -930,8 +1362,8 @@ mod tests {
         assert!(preset.validate().is_ok());
         let key = 96u8; // C7, where the contact is the largest fraction of a string
         let stock = Preset::default();
-        let plain = PianoString::new(stock.string_params(key), &stock.voicing);
-        let tapered = PianoString::new(preset.string_params(key), &preset.voicing);
+        let plain = PianoString::new(stock.string_params(key), &stock.voicing, PartialShaping::default());
+        let tapered = PianoString::new(preset.string_params(key), &preset.voicing, PartialShaping::default());
         for k in 0..tapered.partial_count() {
             let want = plain.strings[0].vertical.mode_gain(k) * contact_taper(k + 1, width);
             let got = tapered.strings[0].vertical.mode_gain(k);
@@ -970,7 +1402,7 @@ mod tests {
         // neighbours.
         let preset = preset();
         let params = preset.string_params(21);
-        let s = PianoString::new(params, &preset.voicing);
+        let s = PianoString::new(params, &preset.voicing, PartialShaping::default());
         let gain = |k: usize| {
             (k as f32 * std::f32::consts::PI * params.strike_position)
                 .sin()
@@ -1004,7 +1436,7 @@ mod tests {
     #[test]
     fn the_damper_kills_the_note() {
         let preset = preset();
-        let mut s = PianoString::new(preset.string_params(60), &preset.voicing);
+        let mut s = PianoString::new(preset.string_params(60), &preset.voicing, PartialShaping::default());
         let mut hammer = Hammer::new(preset.hammer_params(60));
         hammer.strike_midi(100);
         let mut warm = vec![0.0f32; 40 * BLOCK];
@@ -1030,7 +1462,7 @@ mod tests {
     fn the_damper_grips_low_partials_hardest() {
         let preset = preset();
         let p = preset.string_params(48);
-        let s = PianoString::new(p, &preset.voicing);
+        let s = PianoString::new(p, &preset.voicing, PartialShaping::default());
         let first = s.damper_profile[0];
         let last = s.damper_profile[s.partials - 1];
         assert!(first > last * 2.0, "damper profile {first} .. {last}");
@@ -1040,7 +1472,7 @@ mod tests {
     #[test]
     fn bridge_coupling_rings_an_unstruck_sibling() {
         let preset = preset();
-        let mut s = PianoString::new(preset.string_params(60), &preset.voicing);
+        let mut s = PianoString::new(preset.string_params(60), &preset.voicing, PartialShaping::default());
         assert_eq!(s.string_count(), 3);
         let mut out = [0.0f32; BLOCK];
         s.excitation_mut(0)[0] = 1.0;
@@ -1058,8 +1490,8 @@ mod tests {
     #[test]
     fn splitting_the_polarizations_renders_the_same_string() {
         let (key, preset) = (60u8, preset());
-        let mut summed = PianoString::new(preset.string_params(key), &preset.voicing);
-        let mut split = PianoString::new(preset.string_params(key), &preset.voicing);
+        let mut summed = PianoString::new(preset.string_params(key), &preset.voicing, PartialShaping::default());
+        let mut split = PianoString::new(preset.string_params(key), &preset.voicing, PartialShaping::default());
         let mut hammer = Hammer::new(preset.hammer_params(key));
         let mut hammer_split = Hammer::new(preset.hammer_params(key));
         hammer.strike_midi(100);
@@ -1094,7 +1526,7 @@ mod tests {
     #[test]
     fn excitation_produces_output_and_is_consumed() {
         let preset = preset();
-        let mut s = PianoString::new(preset.string_params(60), &preset.voicing);
+        let mut s = PianoString::new(preset.string_params(60), &preset.voicing, PartialShaping::default());
         s.excitation_mut(0)[0] = 1.0;
         let mut out = [0.0f32; BLOCK];
         s.process(&mut out);

@@ -30,7 +30,9 @@
 //! is what makes the estimators cheap to iterate on: the expensive STFT pass is
 //! cached to disk once and the fits run against it in milliseconds.
 
+pub mod attack;
 pub mod compass;
+pub mod damper;
 pub mod decay;
 pub mod directivity;
 pub mod duplex;
@@ -38,11 +40,14 @@ pub mod halo;
 pub mod hammer;
 pub mod inharmonic;
 pub mod noise;
+pub mod shaping;
 pub mod spread;
 pub mod strike;
 pub mod unison;
 
+pub use attack::{fit_strike, residual_metrics, AttackConfig, AttackResidual, StrikeFitReport};
 pub use compass::{interpolate_keys, CompassCurve};
+pub use damper::{band_release, tail_decay_s, DamperConfig, DamperLine};
 pub use directivity::{
     balance_drift, pan_spread_for_drift, pan_spread_table, BalanceDrift, DirectivityConfig,
     KeyDriftLine,
@@ -59,6 +64,10 @@ pub use hammer::{
 };
 pub use inharmonic::{fit_inharmonic, BandRatio, InharmonicConfig, InharmonicFit};
 pub use noise::{fit_noise, EventMetrics, MechanismMeasurements, NoiseConfig};
+pub use shaping::{
+    fit_note as fit_shaping, measured_deepest, partial_gains, partial_sigma_scale, CombLine,
+    DecaySplit, EngineComb, NoteShaping, ShapingConfig,
+};
 pub use spread::{note_spread, spread_from_drift, NoteSpread, SigmaSpread, SpreadConfig};
 pub use strike::{contact_taper, fit_strike_position, StrikeConfig, StrikeFit};
 pub use unison::{estimate_unison, BeatEstimate, UnisonConfig, UnisonEstimate};

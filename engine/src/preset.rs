@@ -34,7 +34,10 @@
 //! `voicing.unison_sigma_scale` at one, `voicing.polarization_pan_spread` at
 //! zero, `[voicing.bridge]` absent (the flat sympathetic bus), `notes.duplex`
 //! absent (no aliquot segments), `notes.pan_spread` absent (the one global
-//! spread applies to the whole compass).
+//! spread applies to the whole compass), `notes.comb_floor` at zero (the bare
+//! strike comb, nulls and all), `notes.partial_gains` and
+//! `notes.partial_sigma_scale` absent (one on every partial of every key), and
+//! `[noise.strike]` at its default (the hammer makes no noise of its own).
 //! Those are `#[serde(default)]` on the way in and skipped on the way out
 //! while they hold the neutral value, so a file that predates the field keeps
 //! playing the instrument it always described and the engine keeps writing that
@@ -51,14 +54,19 @@
 //! table — for the same reason the others are: the file is the interface to the
 //! tuner, and the engine emitting a section the tuner's copy of the schema does
 //! not know would break every preset already written. Silence is available, and
-//! has to be asked for, by writing the section with `level_db` far down.
+//! has to be asked for, by writing the section with `level_db` far down. The
+//! *fifth* event in that section, `[noise.strike]`, is the other way round: its
+//! default is silence, because no recording in the library isolates a hammer
+//! and a level nobody measured has no business being on by default.
 
 use crate::duplex::MAX_DUPLEX_LOOP_GAIN;
 use crate::hammer::HammerParams;
 use crate::resonance::{BridgeFilter, MAX_BRIDGE_LOOP_GAIN, MAX_COUPLING};
 use crate::soundboard::MAX_PAN_SPREAD;
 use crate::string::{
-    StringParams, MAX_CONTACT_WIDTH, MAX_SIGMA_SCALE, MAX_UNISON_COUPLING, MIN_SIGMA_SCALE,
+    PartialShaping, StringParams, MAX_COMB_FLOOR, MAX_CONTACT_WIDTH, MAX_PARTIAL_GAIN,
+    MAX_PARTIAL_SIGMA_SCALE, MAX_SIGMA_SCALE, MAX_UNISON_COUPLING, MIN_PARTIAL_GAIN,
+    MIN_PARTIAL_SIGMA_SCALE, MIN_SIGMA_SCALE,
 };
 use crate::types::{
     amp_to_db, db_to_amp, index_to_note, interp_anchors, key_index, key_position, note_to_freq,
@@ -472,6 +480,114 @@ pub struct NoiseTables {
     pub pedal_down: EventNoise,
     /// The same rail landing again.
     pub pedal_up: EventNoise,
+    /// The hammer arriving, and the key and the action with it: the one
+    /// mechanism event that happens *under* a note rather than beside one.
+    ///
+    /// Absent — the default — is silence, and silence is the neutral value here
+    /// where it is not for the other four: the strike's level was never measured
+    /// on its own (a `rel*` recording isolates a release, and no library
+    /// isolates a blow), so the honest default is an event the engine does not
+    /// play until a preset says what it sounds like. See [`StrikeNoise`].
+    #[serde(default, skip_serializing_if = "is_silent_strike")]
+    pub strike: StrikeNoise,
+}
+
+/// The hammer's own noise, which is the only mechanism event that is broadband
+/// well past the action's 2 kHz ceiling — hence its own [`StrikeNoise::bandwidth_hz`].
+///
+/// Two measurements ask for it, from opposite ends. The realism benchmark finds
+/// the engine's attacks **+5.2 dB more tonal** than the recordings' across six
+/// phrases, worst on `staccato` (+11.3 dB) and `chords_pedal` (+9.1 dB)
+/// (`renders/realism/REALISM.md`). The timbre ladder finds the first 30 ms with
+/// every tracked partial subtracted 11.1 to 12.7 dB more tonal in the engine
+/// than in the recording, at all three keys, and — the part that makes it a
+/// missing *sound* rather than a missing partial — mixing the recording's own
+/// residual back in closes it at every key and on both hosts
+/// (`renders/timbre-ladder/ANALYSIS.md` §8.3). That residual sits at −20 dB
+/// (C4), −16 (A2) and −10 (C6) relative to the source over the first 150 ms.
+///
+/// It is *not* the transient `TUNING_REPORT.md` §4 refuted: that measurement was
+/// broadband energy between the partials over the first 85 ms, and found the
+/// engine within ~7 dB. What is missing is the residual's **spectrum** — its
+/// flatness — which is compatible with that refutation and is what a burst
+/// reaching 8 kHz supplies.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrikeNoise {
+    /// Spectral centre of the burst, Hz.
+    #[serde(serialize_with = "short::scalar")]
+    pub centroid_hz: f32,
+    /// Time to fall 40 dB, seconds. Short: the residual the ladder measures is
+    /// an attack, and the window it is measured in is 30 to 150 ms.
+    #[serde(serialize_with = "short::scalar")]
+    pub decay_s: f32,
+    /// Upper band limit of the burst, Hz — the field the other four events do
+    /// not have.
+    ///
+    /// Askenfelt's dummy-mass measurement puts the *structure-borne* spectrum of
+    /// the action below about 2 kHz, and that is what a key-off or a pedal tray
+    /// reaches the ear as ([`crate::noise::BANDWIDTH_HZ`], fixed for those four).
+    /// A hammer striking a string is not structure-borne: the felt's contact
+    /// noise and the string's own broadband onset radiate directly, and the
+    /// residual the ladder measures at C6 is centred *above* 2 kHz. So this one
+    /// event carries its own ceiling.
+    #[serde(serialize_with = "short::scalar")]
+    pub bandwidth_hz: f32,
+    /// How far the level travels, in dB, over the full velocity range, through
+    /// the tabulated level at velocity [`NOMINAL_STRIKE_VELOCITY`].
+    #[serde(serialize_with = "short::scalar")]
+    pub velocity_db: f32,
+    /// Peak level, in dB relative to a velocity-90 strike of the same key,
+    /// anchored at the keys it was measured at and interpolated across the
+    /// compass — the same convention, and the same output-referenced
+    /// calibration, as the other four events ([`crate::calibrate`]).
+    pub level_db: Vec<NoiseAnchor>,
+}
+
+/// Velocity at which `[noise.strike]`'s tabulated level is the level played:
+/// the same velocity-90 strike every mechanism level in `TUNING_REPORT.md` §5 is
+/// quoted against, so a level of −20 dB means −20 dB under *that* note.
+pub const NOMINAL_STRIKE_VELOCITY: u8 = 90;
+
+/// Bounds on `[noise.strike]`. The bandwidth's ceiling is where the felt's own
+/// contact noise has stopped and the master shelf has taken over; the decay's
+/// range is the attack window the ladder measures the residual in (30–150 ms),
+/// a little either side.
+pub const MAX_STRIKE_BANDWIDTH_HZ: f32 = 8_000.0;
+pub const MIN_STRIKE_BANDWIDTH_HZ: f32 = 200.0;
+pub const MIN_STRIKE_DECAY_S: f32 = 0.02;
+pub const MAX_STRIKE_DECAY_S: f32 = 0.3;
+
+/// Silence, which is what a preset that does not describe the hammer's noise
+/// asks for. −200 dB is 190 dB under the quietest event anything else in this
+/// file plays and is refused by nothing; the engine's own gate
+/// (`noise::SILENT_AMPLITUDE`) stops the burst from being rendered at all, so
+/// the neutral value is *bit-exact* silence and not a very quiet thump.
+impl Default for StrikeNoise {
+    fn default() -> StrikeNoise {
+        StrikeNoise {
+            // A plausible shape, so that a preset which only writes `level_db`
+            // gets a hammer rather than a sine: the ladder's attack residual is
+            // broadband and centred well above the action's events.
+            centroid_hz: 1_200.0,
+            decay_s: 0.05,
+            bandwidth_hz: 6_000.0,
+            velocity_db: 24.0,
+            level_db: vec![NoiseAnchor {
+                key: LOWEST_KEY,
+                db: SILENT_LEVEL_DB,
+            }],
+        }
+    }
+}
+
+/// The level at which an event is not played at all. Not a threshold — the
+/// engine's own is 160 dB below a strike — but the value a preset writes to mean
+/// "this instrument does not have this sound".
+pub const SILENT_LEVEL_DB: f32 = -200.0;
+
+fn is_silent_strike(strike: &StrikeNoise) -> bool {
+    *strike == StrikeNoise::default()
 }
 
 /// One mechanism event: how loud, how long, and what colour.
@@ -544,6 +660,62 @@ pub struct NoteTables {
         serialize_with = "short::list"
     )]
     pub contact_width: Vec<f32>,
+    /// Soft floor under the strike comb's nulls, one per key, as a fraction of
+    /// the comb's crest: the excitation magnitude of partial `k` becomes
+    /// `sqrt(sin^2(k pi x) + floor^2)` before the contact taper and the
+    /// per-partial gain.
+    ///
+    /// `sin(k pi x)` has exact zeros; a hammer with width striking a stiff
+    /// string terminated on a bridge does not. The engine's worst partial is
+    /// measurably *at* those zeros — 42 dB down where the recording's deepest
+    /// partial anywhere is 9.3 to 17.7 dB down and never at that index
+    /// (`renders/timbre-ladder/ANALYSIS.md` §4a). Absent means zero, which is
+    /// the bare comb.
+    #[serde(
+        default = "zero_table",
+        skip_serializing_if = "is_zero_table",
+        serialize_with = "short::list"
+    )]
+    pub comb_floor: Vec<f32>,
+    /// Per-partial linear gain multipliers on the excitation comb, one row per
+    /// key, 1-based in the partial index.
+    ///
+    /// The measured excitation spectrum is 5–10 dB rougher than any smooth
+    /// envelope times `sin(k pi x)` (engine control 2–5 dB) and the roughness is
+    /// **not** shared between notes at the same frequency, so it cannot be a
+    /// bridge curve and has to be per note, per partial (`TUNING_REPORT.md` §3,
+    /// backlog item 6). It is a property of the excitation and not of the blow:
+    /// velocity-independent by design, so a fit cannot smuggle a second velocity
+    /// law in here.
+    ///
+    /// Absent — the default — is one everywhere. A row may be shorter than that
+    /// key's partial count (the estimator tracks as far as it can) or empty, and
+    /// every partial past its end is exactly 1.0; a row *longer* than the key's
+    /// partial count is refused, because it is a table written for a different
+    /// instrument.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "short::table"
+    )]
+    pub partial_gains: Vec<Vec<f32>>,
+    /// Per-partial multipliers on `partial_sigma(k)`, one row per key, with the
+    /// same shape rules as [`NoteTables::partial_gains`].
+    ///
+    /// The two-exponential-plus-two-beats envelope law describes a real
+    /// partial's decay to about 4 dB whatever produced it (`TUNING_REPORT.md`
+    /// §2), and the residual is per partial rather than per note: three strings
+    /// and two polarizations make six components and fifteen beat rates, and the
+    /// model fits two. This is the per-partial correction to the *rate*.
+    ///
+    /// Applied before the polarization split, so the vertical bank, the
+    /// horizontal bank and the damper profile all follow it.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "short::table"
+    )]
+    pub partial_sigma_scale: Vec<Vec<f32>>,
     /// Frequency-independent part of the partial decay rate, 1/s.
     #[serde(serialize_with = "short::list")]
     pub sigma0: Vec<f32>,
@@ -693,6 +865,12 @@ impl Preset {
                 MAX_CONTACT_WIDTH,
             )?;
         }
+        // Checked here rather than with the per-partial tables below, because
+        // `string_params` reads it and the radicand loop calls `string_params`.
+        table_length("comb_floor", n.comb_floor.len())?;
+        for (i, &floor) in n.comb_floor.iter().enumerate() {
+            within(&format!("notes.comb_floor[{i}]"), floor, 0.0, MAX_COMB_FLOOR)?;
+        }
         // The per-key stereo spread is either absent — the global scalar
         // applies — or a whole compass of them, each inside the same range the
         // scalar is held to, because each one reaches `Soundboard::add_voice`
@@ -756,6 +934,10 @@ impl Preset {
                 previous = f;
             }
         }
+        // After the series check, so that the partial counts the row lengths
+        // are measured against are counts of a bank the engine will really
+        // build.
+        self.validate_partial_tables()?;
 
         let v = &self.voicing;
         // `excitation_scale` divides the unison bridge coupling, and the
@@ -924,51 +1106,93 @@ impl Preset {
         // outside the unit circle, and a decay at zero is an event that never
         // ends.
         for (name, event) in self.noise.events() {
-            positive(&format!("noise.{name}.centroid_hz"), event.centroid_hz)?;
-            within(
-                &format!("noise.{name}.centroid_hz"),
+            validate_event(
+                name,
                 event.centroid_hz,
-                1.0,
-                0.45 * crate::types::SAMPLE_RATE,
-            )?;
-            within(
-                &format!("noise.{name}.decay_s"),
                 event.decay_s,
-                MIN_NOISE_DECAY_S,
-                MAX_NOISE_DECAY_S,
+                (MIN_NOISE_DECAY_S, MAX_NOISE_DECAY_S),
+                event.velocity_db,
+                &event.level_db,
             )?;
-            finite(&format!("noise.{name}.velocity_db"), event.velocity_db)?;
-            if event.level_db.is_empty() {
+        }
+        // The strike is the fifth event and the only one with a band limit of
+        // its own, so it is checked here rather than in the loop above.
+        let strike = &self.noise.strike;
+        validate_event(
+            "strike",
+            strike.centroid_hz,
+            strike.decay_s,
+            (MIN_STRIKE_DECAY_S, MAX_STRIKE_DECAY_S),
+            strike.velocity_db,
+            &strike.level_db,
+        )?;
+        within(
+            "noise.strike.bandwidth_hz",
+            strike.bandwidth_hz,
+            MIN_STRIKE_BANDWIDTH_HZ,
+            MAX_STRIKE_BANDWIDTH_HZ,
+        )?;
+        // A band limit under the centroid is a burst whose energy is outside
+        // its own band, and the two are then both describing the same thing
+        // badly.
+        if strike.centroid_hz > strike.bandwidth_hz {
+            return Err(PresetError::invalid(format!(
+                "noise.strike.centroid_hz is {} but its bandwidth_hz is {}, so the burst is \
+                 centred outside its own band",
+                strike.centroid_hz, strike.bandwidth_hz
+            )));
+        }
+        Ok(())
+    }
+
+    /// Checks the two ragged per-partial tables.
+    ///
+    /// Both are all-or-nothing across the compass — a preset either has one or
+    /// does not — and inside a key both are allowed to be *short*: an estimator
+    /// tracks as far up the series as the recording lets it, and every partial
+    /// past the end of a row is 1.0. What is refused is a row that is **longer**
+    /// than the key's partial count, with the key named, because a row that
+    /// overruns the bank is a table measured on a different instrument (a
+    /// different tuning, a different sample rate, or a different partial cap)
+    /// and the entries the engine would silently drop are exactly the ones that
+    /// say so.
+    fn validate_partial_tables(&self) -> Result<(), PresetError> {
+        for (name, table, low, high) in [
+            (
+                "partial_gains",
+                &self.notes.partial_gains,
+                MIN_PARTIAL_GAIN,
+                MAX_PARTIAL_GAIN,
+            ),
+            (
+                "partial_sigma_scale",
+                &self.notes.partial_sigma_scale,
+                MIN_PARTIAL_SIGMA_SCALE,
+                MAX_PARTIAL_SIGMA_SCALE,
+            ),
+        ] {
+            if table.is_empty() {
+                continue;
+            }
+            if table.len() != NUM_KEYS {
                 return Err(PresetError::invalid(format!(
-                    "noise.{name}.level_db is empty"
+                    "notes.{name} has {} rows, expected {NUM_KEYS} (or none at all)",
+                    table.len()
                 )));
             }
-            for (i, anchor) in event.level_db.iter().enumerate() {
-                if key_index(anchor.key).is_none() {
+            for (i, row) in table.iter().enumerate() {
+                let key = index_to_note(i);
+                let partials = self.string_params(key).partial_count();
+                if row.len() > partials {
                     return Err(PresetError::invalid(format!(
-                        "noise.{name}.level_db[{i}].key is {}, which is not on the keyboard",
-                        anchor.key
+                        "notes.{name}[{i}] (key {key}) has {} entries, but that key has only \
+                         {partials} partials",
+                        row.len()
                     )));
                 }
-                // A mechanism event louder than the note it belongs to is not a
-                // mechanism event; the measured range is -25 to -45 dB.
-                if !anchor.db.is_finite() || anchor.db > 0.0 {
-                    return Err(PresetError::invalid(format!(
-                        "noise.{name}.level_db[{i}].db is {}, expected a finite level at or \
-                         below 0 dB relative to a strike",
-                        anchor.db
-                    )));
+                for (k, &value) in row.iter().enumerate() {
+                    within(&format!("notes.{name}[{i}][{k}]"), value, low, high)?;
                 }
-            }
-            // The level is interpolated across the compass by `interp_anchors`,
-            // which walks the anchors in order.
-            if let Some(i) = event.level_db.windows(2).position(|w| w[0].key >= w[1].key) {
-                return Err(PresetError::invalid(format!(
-                    "noise.{name}.level_db[{}] is at key {}, not above the key {} before it",
-                    i + 1,
-                    event.level_db[i + 1].key,
-                    event.level_db[i].key
-                )));
             }
         }
         Ok(())
@@ -1264,6 +1488,7 @@ impl Preset {
             inharmonicity_b4: n.inharmonicity_b4[i],
             strike_position: n.strike_position[i],
             contact_width: n.contact_width[i],
+            comb_floor: n.comb_floor[i],
             sigma0: n.sigma0[i],
             sigma1: n.sigma1[i],
             unison: n.unison[i] as usize,
@@ -1271,6 +1496,21 @@ impl Preset {
             impedance: n.impedance[i],
             damper_sigma: n.damper_sigma[i],
             bridge_gain: n.bridge_gain[i],
+        }
+    }
+
+    /// This key's per-partial excitation and decay tables, empty where the
+    /// preset has none.
+    ///
+    /// A preset with no table at all, one whose table has an empty row for this
+    /// key, and one whose row stops short of the key's partial count are the
+    /// same instrument from here up: everything past the end of a row is 1.0
+    /// ([`PartialShaping`]).
+    pub fn partial_shaping(&self, key: u8) -> PartialShaping<'_> {
+        let i = self.index(key);
+        PartialShaping {
+            gains: row(&self.notes.partial_gains, i),
+            sigma_scale: row(&self.notes.partial_sigma_scale, i),
         }
     }
 
@@ -1423,7 +1663,19 @@ impl Default for NoiseTables {
                     db: -42.4,
                 }],
             },
+            // Silent, and the only one of the five that is: nothing in
+            // `TUNING_REPORT.md` §5 measured a hammer on its own, so the level
+            // belongs in the preset that was fitted with one.
+            strike: StrikeNoise::default(),
         }
+    }
+}
+
+/// One key's row of a ragged per-partial table, empty when the table is absent.
+fn row(table: &[Vec<f32>], i: usize) -> &[f32] {
+    match table.get(i) {
+        Some(row) => row,
+        None => &[],
     }
 }
 
@@ -1456,6 +1708,67 @@ fn is_unity_sigma_scale(rows: &[UnisonSigmaScale]) -> bool {
             .iter()
             .enumerate()
             .all(|(i, row)| row.scale.len() == i + 1 && row.scale.iter().all(|&s| s == 1.0))
+}
+
+/// The checks every mechanism event shares, whatever struct it lives in.
+///
+/// All of it reaches a biquad's coefficients and an exponential envelope on the
+/// audio path: a centroid at or past Nyquist is a pole outside the unit circle,
+/// a decay at zero is an event that never ends, and an unordered anchor list is
+/// read by `interp_anchors` in the wrong pairs.
+fn validate_event(
+    name: &str,
+    centroid_hz: f32,
+    decay_s: f32,
+    decay_range: (f32, f32),
+    velocity_db: f32,
+    level_db: &[NoiseAnchor],
+) -> Result<(), PresetError> {
+    positive(&format!("noise.{name}.centroid_hz"), centroid_hz)?;
+    within(
+        &format!("noise.{name}.centroid_hz"),
+        centroid_hz,
+        1.0,
+        0.45 * crate::types::SAMPLE_RATE,
+    )?;
+    within(
+        &format!("noise.{name}.decay_s"),
+        decay_s,
+        decay_range.0,
+        decay_range.1,
+    )?;
+    finite(&format!("noise.{name}.velocity_db"), velocity_db)?;
+    if level_db.is_empty() {
+        return Err(PresetError::invalid(format!(
+            "noise.{name}.level_db is empty"
+        )));
+    }
+    for (i, anchor) in level_db.iter().enumerate() {
+        if key_index(anchor.key).is_none() {
+            return Err(PresetError::invalid(format!(
+                "noise.{name}.level_db[{i}].key is {}, which is not on the keyboard",
+                anchor.key
+            )));
+        }
+        // A mechanism event louder than the note it belongs to is not a
+        // mechanism event; the measured range is -25 to -45 dB.
+        if !anchor.db.is_finite() || anchor.db > 0.0 {
+            return Err(PresetError::invalid(format!(
+                "noise.{name}.level_db[{i}].db is {}, expected a finite level at or \
+                 below 0 dB relative to a strike",
+                anchor.db
+            )));
+        }
+    }
+    if let Some(i) = level_db.windows(2).position(|w| w[0].key >= w[1].key) {
+        return Err(PresetError::invalid(format!(
+            "noise.{name}.level_db[{}] is at key {}, not above the key {} before it",
+            i + 1,
+            level_db[i + 1].key,
+            level_db[i].key
+        )));
+    }
+    Ok(())
 }
 
 /// Field checks used by [`Preset::validate`].
@@ -1713,6 +2026,9 @@ impl Default for Preset {
                 inharmonicity_b4: zero_table(),
                 strike_position,
                 contact_width: zero_table(),
+                comb_floor: zero_table(),
+                partial_gains: Vec::new(),
+                partial_sigma_scale: Vec::new(),
                 sigma0,
                 sigma1,
                 unison: keys.iter().map(|&k| default_unison_count(k)).collect(),
@@ -1870,6 +2186,16 @@ mod short {
         seq.end()
     }
 
+    /// The same, one row per key: the per-partial tables are ragged, so they
+    /// are a list of lists rather than a list.
+    pub fn table<S: Serializer>(rows: &[Vec<f32>], s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(rows.len()))?;
+        for row in rows {
+            let widened: Vec<f64> = row.iter().map(|&x| widen(x)).collect();
+            seq.serialize_element(&widened)?;
+        }
+        seq.end()
+    }
 }
 
 #[cfg(test)]
@@ -2040,7 +2366,7 @@ mod tests {
 
         // Every one of these would reach the DSP as a divide by zero, a NaN,
         // or a resonator pole outside the unit circle.
-        let breakages: [fn(&mut Preset); 88] = [
+        let breakages: [fn(&mut Preset); 117] = [
             |p: &mut Preset| p.notes.f0_hz[3] = 0.0,
             |p: &mut Preset| p.notes.sigma0[3] = -1.0,
             |p: &mut Preset| p.notes.inharmonicity_b[3] = -1e-4,
@@ -2244,6 +2570,80 @@ mod tests {
                 p.notes.pan_spread = vec![0.1; NUM_KEYS];
                 p.notes.pan_spread[9] = f32::NAN;
             },
+            // The comb's floor is a fraction of its own crest, and it reaches
+            // every excitation gain in the bank.
+            |p: &mut Preset| p.notes.comb_floor[3] = MAX_COMB_FLOOR + 0.01,
+            |p: &mut Preset| p.notes.comb_floor[3] = -0.01,
+            |p: &mut Preset| p.notes.comb_floor[3] = f32::NAN,
+            |p: &mut Preset| {
+                p.notes.comb_floor.pop();
+            },
+            // The two ragged per-partial tables. All or nothing across the
+            // compass, in range entry by entry, and never longer than the bank
+            // they are describing.
+            |p: &mut Preset| p.notes.partial_gains = vec![Vec::new(); NUM_KEYS - 1],
+            |p: &mut Preset| p.notes.partial_gains = vec![vec![1.0]; NUM_KEYS + 1],
+            |p: &mut Preset| {
+                p.notes.partial_gains = vec![Vec::new(); NUM_KEYS];
+                // C8 has two partials; a row of eight was measured somewhere
+                // else.
+                p.notes.partial_gains[NUM_KEYS - 1] = vec![1.0; 8];
+            },
+            |p: &mut Preset| {
+                p.notes.partial_gains = vec![Vec::new(); NUM_KEYS];
+                p.notes.partial_gains[9] = vec![1.0, MAX_PARTIAL_GAIN + 1.0];
+            },
+            |p: &mut Preset| {
+                p.notes.partial_gains = vec![Vec::new(); NUM_KEYS];
+                p.notes.partial_gains[9] = vec![1.0, MIN_PARTIAL_GAIN * 0.5];
+            },
+            |p: &mut Preset| {
+                p.notes.partial_gains = vec![Vec::new(); NUM_KEYS];
+                p.notes.partial_gains[9] = vec![f32::NAN];
+            },
+            |p: &mut Preset| p.notes.partial_sigma_scale = vec![Vec::new(); NUM_KEYS - 1],
+            |p: &mut Preset| {
+                p.notes.partial_sigma_scale = vec![Vec::new(); NUM_KEYS];
+                p.notes.partial_sigma_scale[NUM_KEYS - 1] = vec![1.0; 8];
+            },
+            |p: &mut Preset| {
+                p.notes.partial_sigma_scale = vec![Vec::new(); NUM_KEYS];
+                p.notes.partial_sigma_scale[9] = vec![MAX_PARTIAL_SIGMA_SCALE + 1.0];
+            },
+            |p: &mut Preset| {
+                p.notes.partial_sigma_scale = vec![Vec::new(); NUM_KEYS];
+                // Zero is a pole on the unit circle: a partial that never stops.
+                p.notes.partial_sigma_scale[9] = vec![0.0];
+            },
+            |p: &mut Preset| {
+                p.notes.partial_sigma_scale = vec![Vec::new(); NUM_KEYS];
+                p.notes.partial_sigma_scale[9] = vec![f32::NAN];
+            },
+            // The fifth mechanism event is checked exactly as the other four
+            // are, plus the band limit only it has.
+            |p: &mut Preset| p.notes.comb_floor[0] = f32::INFINITY,
+            |p: &mut Preset| p.noise.strike.bandwidth_hz = MAX_STRIKE_BANDWIDTH_HZ + 1.0,
+            |p: &mut Preset| p.noise.strike.bandwidth_hz = MIN_STRIKE_BANDWIDTH_HZ - 1.0,
+            |p: &mut Preset| p.noise.strike.bandwidth_hz = f32::NAN,
+            // A burst centred outside its own band.
+            |p: &mut Preset| {
+                p.noise.strike.centroid_hz = 4_000.0;
+                p.noise.strike.bandwidth_hz = 2_000.0;
+            },
+            |p: &mut Preset| p.noise.strike.centroid_hz = 0.0,
+            |p: &mut Preset| p.noise.strike.centroid_hz = f32::NAN,
+            |p: &mut Preset| p.noise.strike.decay_s = MAX_STRIKE_DECAY_S + 0.1,
+            |p: &mut Preset| p.noise.strike.decay_s = MIN_STRIKE_DECAY_S * 0.5,
+            |p: &mut Preset| p.noise.strike.velocity_db = f32::NAN,
+            |p: &mut Preset| p.noise.strike.level_db.clear(),
+            |p: &mut Preset| p.noise.strike.level_db[0].db = 1.0,
+            |p: &mut Preset| p.noise.strike.level_db[0].key = 120,
+            |p: &mut Preset| {
+                p.noise.strike.level_db = vec![
+                    NoiseAnchor { key: 72, db: -20.0 },
+                    NoiseAnchor { key: 60, db: -20.0 },
+                ]
+            },
         ];
         for break_it in breakages {
             let mut p = Preset::default();
@@ -2270,6 +2670,10 @@ mod tests {
             "voicing.bridge",
             "duplex",
             "pan_spread",
+            "comb_floor",
+            "partial_gains",
+            "partial_sigma_scale",
+            "[noise.strike]",
             // The mechanism's default is the measured table rather than
             // silence, but it is skipped on the same terms and for the same
             // reason: the file is the tuner's interface.
@@ -2288,6 +2692,22 @@ mod tests {
         }
         assert!(back.notes.inharmonicity_b4.iter().all(|&b| b == 0.0));
         assert!(back.notes.contact_width.iter().all(|&w| w == 0.0));
+        assert!(back.notes.comb_floor.iter().all(|&f| f == 0.0));
+        assert!(back.notes.partial_gains.is_empty());
+        assert!(back.notes.partial_sigma_scale.is_empty());
+        // ... and every key reads the neutral shaping, whatever it asks for.
+        for key in LOWEST_KEY..=HIGHEST_KEY {
+            let shaping = back.partial_shaping(key);
+            assert!(shaping.gains.is_empty() && shaping.sigma_scale.is_empty());
+            for k in 1..=back.string_params(key).partial_count() {
+                assert_eq!(shaping.gain_at(k), 1.0);
+                assert_eq!(shaping.sigma_scale_at(k), 1.0);
+            }
+        }
+        // The hammer's noise is the one event whose default is silence, and
+        // silence is what a preset that does not describe it plays.
+        assert_eq!(back.noise.strike, StrikeNoise::default());
+        assert_eq!(back.noise.strike.level_db[0].db, SILENT_LEVEL_DB);
         assert_eq!(back.voicing.polarization_pan_spread, 0.0);
         for n in 1..=MAX_UNISON {
             for i in 0..n {
@@ -2346,6 +2766,92 @@ mod tests {
         assert!(text.contains("0.0125"));
         // Bit-exact, like every other number in a preset.
         assert_eq!(Preset::from_toml(&text).expect("round trip parses"), preset);
+    }
+
+    /// The measured per-partial tables and the hammer's own noise write in
+    /// full, read back bit for bit, and reach the string and the event they
+    /// describe.
+    #[test]
+    fn the_per_partial_tables_and_the_hammers_noise_round_trip() {
+        let mut preset = Preset::default();
+        // A2's comb null is k = 17 and its measured roughness is the fault
+        // `renders/timbre-ladder/ANALYSIS.md` §4a and `TUNING_REPORT.md` §3
+        // report; this is the shape of the table that answers them, on one key.
+        let a2 = key_index(45).unwrap();
+        let c8 = NUM_KEYS - 1;
+        preset.notes.comb_floor[a2] = 0.08;
+        preset.notes.comb_floor[c8] = 0.5;
+        preset.notes.partial_gains = vec![Vec::new(); NUM_KEYS];
+        preset.notes.partial_gains[a2] = vec![1.0, 0.75, 1.4, 0.5, 2.0];
+        // A row exactly as long as the key's bank is legal; one entry longer is
+        // not, which `malformed_presets_are_rejected` pins.
+        let c8_partials = preset.string_params(HIGHEST_KEY).partial_count();
+        preset.notes.partial_gains[c8] = vec![1.1; c8_partials];
+        preset.notes.partial_sigma_scale = vec![Vec::new(); NUM_KEYS];
+        preset.notes.partial_sigma_scale[a2] = vec![0.6, 1.0, 1.9];
+        preset.noise.strike = StrikeNoise {
+            centroid_hz: 1_800.0,
+            decay_s: 0.045,
+            bandwidth_hz: 7_000.0,
+            velocity_db: 18.0,
+            level_db: vec![
+                NoiseAnchor { key: 21, db: -24.0 },
+                NoiseAnchor { key: 60, db: -20.0 },
+                NoiseAnchor { key: 96, db: -14.0 },
+            ],
+        };
+        assert!(
+            preset.validate().is_ok(),
+            "a measured shaping did not validate: {:?}",
+            preset.validate().err()
+        );
+
+        let text = preset.to_toml();
+        assert!(text.contains("comb_floor = ["));
+        assert!(text.contains("partial_gains = ["));
+        assert!(text.contains("partial_sigma_scale = ["));
+        assert!(text.contains("[noise.strike]"));
+        assert!(text.contains("bandwidth_hz = 7000"));
+        assert_eq!(text.matches("[[noise.strike.level_db]]").count(), 3);
+        assert_eq!(Preset::from_toml(&text).expect("round trip parses"), preset);
+
+        // The tables reach the key they were written for, and nothing else.
+        let shaping = preset.partial_shaping(45);
+        assert_eq!(shaping.gain_at(2), 0.75);
+        assert_eq!(shaping.sigma_scale_at(3), 1.9);
+        // Past the end of the row, and on a key with no row at all.
+        assert_eq!(shaping.gain_at(6), 1.0);
+        assert_eq!(shaping.sigma_scale_at(4), 1.0);
+        let untouched = preset.partial_shaping(60);
+        assert!(untouched.gains.is_empty() && untouched.sigma_scale.is_empty());
+        assert_eq!(preset.string_params(45).comb_floor, 0.08);
+        assert_eq!(preset.string_params(60).comb_floor, 0.0);
+    }
+
+    /// A row longer than the bank it describes is refused with the key in the
+    /// message, because a table measured on a different instrument is exactly
+    /// what that looks like and the entries the engine would drop are the ones
+    /// that say so.
+    #[test]
+    fn an_over_long_per_partial_row_names_the_key_it_refuses() {
+        for field in ["partial_gains", "partial_sigma_scale"] {
+            let mut preset = Preset::default();
+            let table = vec![Vec::new(); NUM_KEYS];
+            if field == "partial_gains" {
+                preset.notes.partial_gains = table;
+                preset.notes.partial_gains[NUM_KEYS - 1] = vec![1.0; 9];
+            } else {
+                preset.notes.partial_sigma_scale = table;
+                preset.notes.partial_sigma_scale[NUM_KEYS - 1] = vec![1.0; 9];
+            }
+            let message = preset.validate().expect_err("an over-long row is refused");
+            let message = message.to_string();
+            assert!(message.contains(field), "{message}");
+            assert!(
+                message.contains(&format!("key {HIGHEST_KEY}")),
+                "the message does not name the key: {message}"
+            );
+        }
     }
 
     /// A voiced bridge is written in full, reads back bit for bit, and — the

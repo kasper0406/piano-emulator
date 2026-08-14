@@ -693,6 +693,180 @@ pub fn transient_metrics(signal: &[f32], sample_rate: f64) -> Option<TransientMe
     })
 }
 
+// ------------------------------------------------- phase-locked analysis
+
+/// Complex amplitude of every partial at every hop: `c_k[h]` such that the
+/// signal near hop `h` is `sum_k Re(c_k e^{i 2 pi f_k t})`, with `t` measured
+/// from the first sample of `signal`.
+///
+/// A projection rather than a transform: the frequencies wanted are known, are
+/// not on any bin grid, and there are a few dozen of them. The exponential is
+/// advanced by a complex rotation per sample, so the inner loop has no
+/// transcendental in it. Samples before the start of the signal read as zero.
+///
+/// This is the machinery `renders/timbre-ladder/ANALYSIS.md`'s attack residual
+/// is built from, promoted out of the example that first wrote it so that
+/// [`estimate::attack`](crate::estimate::attack) can fit a preset from the same
+/// subtraction the ladder listened to.
+///
+pub fn track_complex(
+    signal: &[f32],
+    sample_rate: f64,
+    freqs: &[f64],
+    window_n: usize,
+    hop_n: usize,
+    hops: usize,
+) -> Vec<Vec<(f64, f64)>> {
+    let half = window_n / 2;
+    let window: Vec<f64> = (0..window_n)
+        .map(|i| 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / window_n as f64).cos())
+        .collect();
+    let weight: f64 = window.iter().sum();
+    freqs
+        .iter()
+        .map(|&f| {
+            let omega = std::f64::consts::TAU * f / sample_rate;
+            let (rot_re, rot_im) = ((-omega).cos(), (-omega).sin());
+            (0..hops)
+                .map(|h| {
+                    let centre = h * hop_n;
+                    let start = centre as isize - half as isize;
+                    let phase = -omega * start as f64;
+                    let (mut re, mut im) = (phase.cos(), phase.sin());
+                    let (mut acc_re, mut acc_im) = (0.0f64, 0.0f64);
+                    for (i, &w) in window.iter().enumerate() {
+                        let index = start + i as isize;
+                        let x = if index < 0 {
+                            0.0
+                        } else {
+                            f64::from(signal.get(index as usize).copied().unwrap_or(0.0))
+                        };
+                        acc_re += w * x * re;
+                        acc_im += w * x * im;
+                        let next_re = re * rot_re - im * rot_im;
+                        im = re * rot_im + im * rot_re;
+                        re = next_re;
+                    }
+                    (2.0 * acc_re / weight, 2.0 * acc_im / weight)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Resynthesizes what [`track_complex`] measured, on the same clock.
+pub fn resynth_locked(
+    freqs: &[f64],
+    sample_rate: f64,
+    coefficients: &[Vec<(f64, f64)>],
+    hop_n: usize,
+    hops: usize,
+    frames: usize,
+) -> Vec<f64> {
+    let mut out = vec![0.0f64; frames];
+    if hops == 0 || hop_n == 0 {
+        return out;
+    }
+    for (f, hopped) in freqs.iter().zip(coefficients) {
+        let omega = std::f64::consts::TAU * f / sample_rate;
+        let (rot_re, rot_im) = (omega.cos(), omega.sin());
+        let (mut re, mut im) = (1.0f64, 0.0f64);
+        for (n, o) in out.iter_mut().enumerate() {
+            let u = n as f64 / hop_n as f64;
+            let i = (u.floor() as usize).min(hops - 1);
+            let j = (i + 1).min(hops - 1);
+            let frac = u - i as f64;
+            let (c_re, c_im) = hopped[i];
+            let (d_re, d_im) = hopped[j];
+            let a_re = c_re * (1.0 - frac) + d_re * frac;
+            let a_im = c_im * (1.0 - frac) + d_im * frac;
+            *o += a_re * re - a_im * im;
+            let next_re = re * rot_re - im * rot_im;
+            im = re * rot_im + im * rot_re;
+            re = next_re;
+        }
+    }
+    out
+}
+
+/// A window long enough to separate the lowest partial from its neighbour and
+/// short enough to see an attack: four periods of the lowest frequency, held
+/// between `min_s` and `max_s`, and even so that it has an exact centre.
+///
+/// Four periods is not a preference: a Hann main lobe is `4/T` wide and
+/// neighbouring partials are `f0` apart, so anything shorter has the partials
+/// sharing a lobe and the subtraction double-counting them.
+pub fn locked_window_bounded(freqs: &[f64], sample_rate: f64, min_s: f64, max_s: f64) -> usize {
+    let f0 = freqs.iter().copied().fold(f64::INFINITY, f64::min).max(1.0);
+    let seconds = (4.0 / f0).clamp(min_s, max_s);
+    let n = (seconds * sample_rate).round() as usize;
+    n + n % 2
+}
+
+/// The ladder's own bounds: 20 to 40 ms.
+pub fn locked_window(freqs: &[f64], sample_rate: f64) -> usize {
+    locked_window_bounded(freqs, sample_rate, 0.020, 0.040)
+}
+
+/// The recording minus its own tracked partials over `span_s` from the strike:
+/// what the engine's per-partial model does not contain.
+///
+/// `freqs` are the partial frequencies to subtract — the ones the decay stage
+/// fitted, so what is left is what no partial of this note explains.
+///
+/// # Where the answer starts, and why not at the strike
+///
+/// **Half a window in.** A hopped projection has nothing to say about a signal
+/// it has not yet seen a whole window of: at the strike, half of the first
+/// window is the silence before it, the partials are measured at about half
+/// their real amplitude, and a resynthesis from that leaves the other half
+/// behind as "residual". It is a large artefact and it is not the hammer —
+/// measured on the engine's own renders of C4, where the model is exactly true
+/// and the residual should be nothing, it stands at **−5 dB** under the note
+/// from the strike and at **−16 dB** from half a window later. The same rule is
+/// already `FitSpan`'s, one measurement upstream: a frame is timestamped at the
+/// centre of its window, so the first usable one is the first that lies wholly
+/// after the strike.
+///
+/// The cost is small and one-sided: an event decaying at the 0.24 s the fitted
+/// bursts run at has lost 1.3 dB by 7.6 ms, which is where C4's half-window
+/// falls.
+pub fn onset_residual(
+    signal: &[f32],
+    sample_rate: f64,
+    freqs: &[f64],
+    onset_s: f64,
+    span_s: f64,
+) -> Option<Vec<f64>> {
+    if freqs.is_empty() || sample_rate <= 0.0 || span_s <= 0.0 {
+        return None;
+    }
+    let onset = (onset_s.max(0.0) * sample_rate).round() as usize;
+    if onset >= signal.len() {
+        return None;
+    }
+    let tail = &signal[onset..];
+    let frames = ((span_s * sample_rate) as usize).min(tail.len());
+    if frames < 16 {
+        return None;
+    }
+    // A shorter floor than the ladder's 20 ms: this measurement lives entirely
+    // inside the attack, and at C4 four periods is 15 ms — the resolution the
+    // partials need and no more, since every millisecond past it is a
+    // millisecond of the rise the model cannot follow.
+    let window_n = locked_window_bounded(freqs, sample_rate, 0.010, 0.040);
+    let hop_n = (window_n / 8).max(1);
+    let hops = frames / hop_n + 2;
+    let locked = track_complex(tail, sample_rate, freqs, window_n, hop_n, hops);
+    let modelled = resynth_locked(freqs, sample_rate, &locked, hop_n, hops, frames);
+    let start = (window_n / 2).min(frames);
+    Some(
+        (start..frames)
+            .map(|n| f64::from(tail[n]) - modelled[n])
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,3 +1081,4 @@ mod tests {
         assert!(scatter.worst_db > 5.0, "{scatter:?}");
     }
 }
+

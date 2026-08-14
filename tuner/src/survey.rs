@@ -435,6 +435,13 @@ impl NoteSurvey {
             // what the fit returns on library material is right to divide out
             // of an excitation spectrum and wrong to write into a preset.
             contact_width: None,
+            // Both are fitted by their own estimators against material a single
+            // note's trajectories do not carry — the comb floor needs the
+            // deepest partial of the whole layer set, the damper needs the
+            // release recordings — and are written through
+            // `PresetBuilder::note` by `examples/fit_partials`.
+            comb_floor: None,
+            damper_sigma: None,
             sigma0: curve.map(|c| c.sigma0),
             sigma1: curve.map(|c| c.sigma1),
             detune_cents: self.detune_cents(),

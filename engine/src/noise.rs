@@ -10,13 +10,24 @@
 //! event on every release and every pedal move — the most obviously missing
 //! sound in playing, and the cheapest thing on the report's backlog.
 //!
+//! A fifth event was added later and is not an action sound at all: the
+//! **strike** — the hammer, the felt and the string's own onset, which
+//! `renders/realism/REALISM.md` and `renders/timbre-ladder/ANALYSIS.md` §8.3
+//! both convict the engine of missing (attacks +5.2 dB too tonal over six
+//! phrases; the first 30 ms 11-13 dB too tonal at all three ladder keys). It is
+//! silent by default, because nothing in the library isolates a blow.
+//!
 //! # The model
 //!
-//! One [`Burst`] per event: white noise through a band-pass pair and a fixed
-//! ~2 kHz band limit, under an exponential envelope. Askenfelt's dummy-mass
-//! measurements (`PHYSICS.md` §5) are the justification for the band limit —
-//! the structure-borne spectrum of the action *ends* around 2 kHz — and the
-//! preset's per-event `centroid_hz` places the burst inside it.
+//! One [`Burst`] per event: white noise through a band-pass pair and a band
+//! limit, under an exponential envelope. Askenfelt's dummy-mass measurements
+//! (`PHYSICS.md` §5) are the justification for the four action events' limit —
+//! the structure-borne spectrum of the action *ends* around 2 kHz
+//! ([`BANDWIDTH_HZ`]) — and the preset's per-event `centroid_hz` places the
+//! burst inside it. The band limit is a property of the [`EventShape`] rather
+//! than of the module because the strike does not obey it: a hammer on a string
+//! radiates directly instead of through the keybed, so `[noise.strike]` states
+//! its own `bandwidth_hz` and reaches to 8 kHz.
 //!
 //! Nothing here allocates, locks or branches on time: a burst is a fixed struct
 //! with a handful of floats, and a voice that has no burst running does not
@@ -31,17 +42,21 @@
 //! 32-bit word — which is also what makes two voices sounding at once
 //! independent rather than correlated.
 
-use crate::preset::{EventNoise, NoiseTables};
+use crate::preset::{EventNoise, NoiseAnchor, NoiseTables};
 use crate::types::{db_to_amp, interp_anchors, key_position, SAMPLE_RATE};
 
-/// Upper edge of the mechanism's spectrum, Hz.
+/// Upper edge of the **action's** spectrum, Hz.
 ///
 /// Askenfelt removed C4's strings, replaced them with a 4 kg dummy mass and
 /// measured what the action alone puts into the bridge: the structure-borne
 /// spectrum extends only to about 2 kHz (`PHYSICS.md` §5). Fixed rather than
-/// tabulated — it is a property of the instrument's structure, not of the
-/// individual event, and every measured centroid in `TUNING_REPORT.md` §5 sits
-/// an octave or more below it.
+/// tabulated for the four events it describes — it is a property of the
+/// instrument's structure, not of the individual event, and every measured
+/// centroid in `TUNING_REPORT.md` §5 sits an octave or more below it.
+///
+/// The strike is not one of those four: a hammer meeting a string radiates
+/// directly rather than through the keybed, so `[noise.strike]` carries its own
+/// `bandwidth_hz` and this constant does not apply to it.
 pub const BANDWIDTH_HZ: f32 = 2_000.0;
 
 /// Q of each of the two band-pass sections.
@@ -87,6 +102,14 @@ pub const NOMINAL_KEY_DRIVE: f32 = 64.0 / 127.0;
 /// Drive at which a pedal event plays at its tabulated level: the whole damper
 /// rail moving at once, which is what the `pedalD1`/`pedalU1` recordings are.
 pub const NOMINAL_PEDAL_DRIVE: f32 = 1.0;
+
+/// Drive at which the hammer's own noise plays at its tabulated level: MIDI
+/// velocity 90, the strike every mechanism level in `TUNING_REPORT.md` §5 — and
+/// therefore every level in `[noise]` — is quoted against. So a `[noise.strike]`
+/// level of −20 dB means −20 dB under the note it is part of, at the velocity
+/// that note was measured at.
+pub const NOMINAL_STRIKE_DRIVE: f32 =
+    crate::preset::NOMINAL_STRIKE_VELOCITY as f32 / 127.0;
 
 /// Seed for the event on `key` at `frame`.
 ///
@@ -183,9 +206,12 @@ pub struct EventShape {
 }
 
 impl EventShape {
-    pub fn new(centroid_hz: f32, decay_s: f32) -> EventShape {
+    /// `bandwidth_hz` is the burst's own upper band limit: [`BANDWIDTH_HZ`] for
+    /// the four structure-borne action events, and whatever `[noise.strike]`
+    /// asks for for the hammer.
+    pub fn new(centroid_hz: f32, decay_s: f32, bandwidth_hz: f32) -> EventShape {
         let band = Biquad::band_pass(centroid_hz * CENTROID_WARP, BAND_Q);
-        let limit = Biquad::low_pass(BANDWIDTH_HZ, std::f32::consts::FRAC_1_SQRT_2);
+        let limit = Biquad::low_pass(bandwidth_hz, std::f32::consts::FRAC_1_SQRT_2);
         // `decay_s` is the time to -40 dB, so the per-sample multiplier is the
         // 1/(decay_s * fs)-th root of 1e-2.
         let decay = 10.0f32.powf(-2.0 / (decay_s.max(1.0e-3) * SAMPLE_RATE));
@@ -242,10 +268,10 @@ impl EventShape {
     }
 }
 
-/// The four event shapes of one preset, built once.
+/// The five event shapes of one preset, built once.
 ///
 /// A shape costs a few hundred thousand filter steps to normalise, and every
-/// one of the 88 voices would otherwise build the same two — so they are built
+/// one of the 88 voices would otherwise build the same three — so they are built
 /// once per engine and copied into the voices, which is also what the comment
 /// on [`EventShape`] promises.
 #[derive(Clone, Copy, Debug)]
@@ -254,16 +280,24 @@ pub struct NoiseShapes {
     pub damper_lift: EventShape,
     pub pedal_down: EventShape,
     pub pedal_up: EventShape,
+    pub strike: EventShape,
 }
 
 impl NoiseShapes {
     pub fn new(noise: &NoiseTables) -> NoiseShapes {
-        let shape = |e: &EventNoise| EventShape::new(e.centroid_hz, e.decay_s);
+        // The four action events share the structure-borne ceiling; the hammer
+        // does not, and says so in the file.
+        let shape = |e: &EventNoise| EventShape::new(e.centroid_hz, e.decay_s, BANDWIDTH_HZ);
         NoiseShapes {
             key_off: shape(&noise.key_off),
             damper_lift: shape(&noise.damper_lift),
             pedal_down: shape(&noise.pedal_down),
             pedal_up: shape(&noise.pedal_up),
+            strike: EventShape::new(
+                noise.strike.centroid_hz,
+                noise.strike.decay_s,
+                noise.strike.bandwidth_hz,
+            ),
         }
     }
 }
@@ -295,15 +329,35 @@ impl EventModel {
         drive_reference: f32,
         strike_reference: f32,
     ) -> EventModel {
-        let anchors: Vec<(f32, f32)> = spec
-            .level_db
+        EventModel::from_levels(
+            &spec.level_db,
+            spec.velocity_db,
+            shape,
+            key,
+            drive_reference,
+            strike_reference,
+        )
+    }
+
+    /// The same, for an event whose spec is not an [`EventNoise`] — the strike,
+    /// which carries a band limit of its own. Only the level law lives here, so
+    /// there is one of it.
+    pub fn from_levels(
+        level_db: &[NoiseAnchor],
+        velocity_db: f32,
+        shape: EventShape,
+        key: u8,
+        drive_reference: f32,
+        strike_reference: f32,
+    ) -> EventModel {
+        let anchors: Vec<(f32, f32)> = level_db
             .iter()
             .map(|a| (key_position(a.key), a.db))
             .collect();
         EventModel {
             shape,
             level: strike_reference * db_to_amp(interp_anchors(key_position(key), &anchors)),
-            velocity_db: spec.velocity_db,
+            velocity_db,
             reference: drive_reference,
         }
     }
@@ -647,7 +701,7 @@ mod tests {
     #[test]
     fn the_burst_lands_near_the_centroid_the_preset_asks_for() {
         for &asked in &[77.0f32, 143.0, 190.0, 261.0, 500.0] {
-            let shape = EventShape::new(asked, 0.25);
+            let shape = EventShape::new(asked, 0.25, BANDWIDTH_HZ);
             let m = EventModel {
                 shape,
                 level: 1.0,
@@ -667,7 +721,7 @@ mod tests {
         // nothing an octave and a half above it.
         let y = render(
             &EventModel {
-                shape: EventShape::new(500.0, 0.25),
+                shape: EventShape::new(500.0, 0.25, BANDWIDTH_HZ),
                 level: 1.0,
                 velocity_db: 0.0,
                 reference: 0.0,
@@ -696,6 +750,169 @@ mod tests {
             above < inside * 1.0e-3,
             "the 2 kHz band limit leaked: {above:e} above against {inside:e} inside"
         );
+    }
+
+    /// Power of `x` between `lo` and `hz`, on the same coarse log grid the
+    /// centroid uses.
+    fn band_power(x: &[f32], lo: f32, hi: f32) -> f64 {
+        let n = x.len().min(8192);
+        let mut power = 0.0f64;
+        let mut f = lo;
+        while f < hi {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, &v) in x[..n].iter().enumerate() {
+                let phase = std::f64::consts::TAU * f as f64 * i as f64 / SAMPLE_RATE as f64;
+                re += v as f64 * phase.cos();
+                im -= v as f64 * phase.sin();
+            }
+            power += re * re + im * im;
+            f *= 1.03;
+        }
+        power
+    }
+
+    /// The band limit is per event, and the four action events keep the 2 kHz
+    /// ceiling Askenfelt measured while the strike does not.
+    ///
+    /// The strike is the one event that is not structure-borne — a hammer on a
+    /// string radiates directly — and the residual the timbre ladder finds
+    /// missing is broadband at every key and centred *above* 2 kHz at C6. An
+    /// event held to the action's ceiling cannot supply it, which is why
+    /// `bandwidth_hz` is a field of the event rather than a constant of the
+    /// module.
+    #[test]
+    fn the_strike_carries_its_own_band_limit_and_the_action_events_keep_theirs() {
+        let mut preset = Preset::default();
+        preset.noise.strike.centroid_hz = 1_500.0;
+        preset.noise.strike.bandwidth_hz = 6_000.0;
+        preset.noise.strike.decay_s = 0.06;
+        assert!(preset.validate().is_ok());
+        let shapes = NoiseShapes::new(&preset.noise);
+
+        // Whatever the strike asks for, the action's four are the fixed 2 kHz.
+        let action_limit = Biquad::low_pass(BANDWIDTH_HZ, std::f32::consts::FRAC_1_SQRT_2);
+        for shape in [
+            shapes.key_off,
+            shapes.damper_lift,
+            shapes.pedal_down,
+            shapes.pedal_up,
+        ] {
+            assert_eq!(shape.limit, action_limit, "an action event moved its ceiling");
+        }
+        assert_ne!(shapes.strike.limit, action_limit);
+        assert_eq!(
+            shapes.strike.limit,
+            Biquad::low_pass(6_000.0, std::f32::consts::FRAC_1_SQRT_2)
+        );
+
+        // ... and it is audible in the render, not only in the coefficients.
+        let render_shape = |shape: EventShape| {
+            render(
+                &EventModel {
+                    shape,
+                    level: 1.0,
+                    velocity_db: 0.0,
+                    reference: 0.0,
+                },
+                1.0,
+                0.2,
+            )
+        };
+        let broad = render_shape(EventShape::new(3_000.0, 0.06, 6_000.0));
+        let narrow = render_shape(EventShape::new(3_000.0, 0.06, BANDWIDTH_HZ));
+        let above = |y: &[f32]| band_power(y, 3_500.0, 8_000.0) / band_power(y, 500.0, 2_000.0);
+        let ratio = above(&broad) / above(&narrow);
+        println!("strike band ratio {ratio:.1}x");
+        // Measured 10.3x — two second-order sections' worth of difference over
+        // 3.5-8 kHz. The threshold is well under it because what is being
+        // asserted is that the ceiling moved, not by how much.
+        assert!(
+            ratio > 6.0,
+            "the strike's 6 kHz band holds only {ratio:.1}x what a 2 kHz-limited \
+             burst of the same colour does"
+        );
+        // The centroid the preset names is still the one it plays.
+        let measured = centroid(&render_shape(shapes.strike));
+        assert!(
+            (0.8..1.25).contains(&(measured / 1_500.0)),
+            "asked for a 1500 Hz centroid and got {measured:.0} Hz"
+        );
+    }
+
+    /// The strike's level means what the other four events' levels mean: a peak
+    /// in dB relative to a velocity-90 strike of the same key, measured through
+    /// the same output-referenced calibration.
+    #[test]
+    fn the_strike_burst_plays_at_the_level_the_preset_asks_for() {
+        const WANT_DB: f32 = -20.0;
+        let mut preset = Preset::default();
+        preset.noise.strike.centroid_hz = 1_500.0;
+        preset.noise.strike.bandwidth_hz = 6_000.0;
+        preset.noise.strike.decay_s = 0.06;
+        preset.noise.strike.level_db = vec![crate::preset::NoiseAnchor {
+            key: 21,
+            db: WANT_DB,
+        }];
+        assert!(preset.validate().is_ok());
+
+        let shapes = NoiseShapes::new(&preset.noise);
+        let calibration = MechanismCalibration::new(&preset, &shapes);
+        let reference = calibration.strike(60);
+        let model = EventModel::from_levels(
+            &preset.noise.strike.level_db,
+            preset.noise.strike.velocity_db,
+            shapes.strike,
+            60,
+            NOMINAL_STRIKE_DRIVE,
+            reference,
+        );
+        // Averaged over seeds: the peak of one realization of a noise band is
+        // itself a random number, and that scatter is the feature.
+        let mean: f32 = (0..8)
+            .map(|i| amp_to_db(peak(&render_seeded(&model, NOMINAL_STRIKE_DRIVE, 0.3, seed_of(60, i * 4096)))))
+            .sum::<f32>()
+            / 8.0;
+        let re_strike = mean - amp_to_db(reference);
+        println!("strike burst: {re_strike:.2} dB re a strike, asked for {WANT_DB}");
+        assert!(
+            (re_strike - WANT_DB).abs() < 2.5,
+            "the strike noise is {re_strike:.1} dB re a strike, expected {WANT_DB}"
+        );
+
+        // Velocity reaches it: the tabulated level is the level at velocity 90,
+        // and a fortissimo blow is louder.
+        let soft = amp_to_db(peak(&render(&model, 40.0 / 127.0, 0.3)));
+        let hard = amp_to_db(peak(&render(&model, 1.0, 0.3)));
+        assert!(
+            soft < hard - 6.0,
+            "velocity barely moved the strike noise: {soft:.1} / {hard:.1} dB"
+        );
+    }
+
+    /// The neutral level is silence, and silence has to be *bit-exact* silence:
+    /// the default preset must render the note it always rendered.
+    #[test]
+    fn a_silent_strike_level_never_starts_a_burst() {
+        let preset = Preset::default();
+        assert_eq!(preset.noise.strike.level_db[0].db, crate::preset::SILENT_LEVEL_DB);
+        let shapes = NoiseShapes::new(&preset.noise);
+        let calibration = MechanismCalibration::new(&preset, &shapes);
+        let model = EventModel::from_levels(
+            &preset.noise.strike.level_db,
+            preset.noise.strike.velocity_db,
+            shapes.strike,
+            60,
+            NOMINAL_STRIKE_DRIVE,
+            calibration.strike(60),
+        );
+        let mut burst = Burst::new();
+        // The hardest blow there is, which is where the velocity law puts the
+        // level highest.
+        burst.trigger(&model, 1.0, seed_of(60, 0));
+        assert!(!burst.is_active(), "a -200 dB strike started a burst");
+        let mut out = [1.0f32; BLOCK];
+        burst.add(&mut out);
+        assert!(out.iter().all(|&x| x == 1.0), "a silent strike wrote samples");
     }
 
     /// Release velocity has to reach the level, or the key-off thump would be

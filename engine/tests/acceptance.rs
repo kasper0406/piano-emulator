@@ -50,6 +50,12 @@ fn silent_mechanism(mut preset: Preset) -> Preset {
             anchor.db = -200.0;
         }
     }
+    // The hammer's own noise is silent in every shipped preset, but a preset
+    // named by `PIANO_PRESET` may voice it, and "the action, silenced" has to
+    // mean all five events.
+    for anchor in &mut preset.noise.strike.level_db {
+        anchor.db = -200.0;
+    }
     preset.validate().expect("a silenced action is a legal preset");
     preset
 }
@@ -1194,6 +1200,77 @@ fn a_restrike_attacks_like_a_strike_from_silence() {
     }
 }
 
+/// ... and the felt arrives, lands and lets go without a click.
+///
+/// The damper's position advances once per block, and the felt's threshold is
+/// exponential in it, so anything that reads that position and holds it for the
+/// block is a staircase in the *output*: 13.3 dB of threshold at every boundary
+/// of a nominal release, plus a larger step wherever the limiter switched off.
+/// Measured on the shipped presets before this was fixed, every note-off of
+/// every key carried four single-sample jumps at four consecutive block
+/// boundaries, the worst of them 12 to 14 times the local slope and 17 to 23 dB
+/// under the note's own peak — inside the shipped benchmark renders, and
+/// nowhere in the recordings they are compared against (`DECISIONS.md` 218).
+///
+/// The assertion is scale-free on purpose. A step is only a click if it is
+/// *isolated*: a jump of a given size in the middle of a loud attack is the
+/// waveform, and the same jump in a decayed tail is a transient nothing in the
+/// physics produced. So each block boundary is measured against the RMS
+/// single-sample step of the block either side of it, which is what the signal
+/// is doing anyway, and a boundary is allowed to be no more than five times
+/// that. Nothing in the model is synchronised to the block grid, so a boundary
+/// that stands out from its own neighbourhood is an artefact of the block loop
+/// by construction.
+///
+/// The action is silenced because a key-off thump is a broadband burst that
+/// starts at the note-off — a step by design, and this test is about the string.
+#[test]
+fn a_release_does_not_click_at_the_block_boundary() {
+    const AFTER_S: f32 = 0.04;
+    const ALLOWED: f32 = 5.0;
+    let preset = silent_mechanism(preset());
+    let off_s = 0.5;
+    for key in [33u8, 45, 60, 72] {
+        for vel in [12u8, 90] {
+            let events = [
+                RenderEvent::new(0.1, Event::NoteOn { key, vel }),
+                RenderEvent::new(off_s, Event::NoteOff { key, vel: 64 }),
+            ];
+            let (l, r) = render_to_buffer(&preset, &events, 1.5);
+            let mono: Vec<f32> = l.iter().zip(&r).map(|(a, b)| 0.5 * (a + b)).collect();
+            // There has to be a note there to click: a silent window would pass
+            // this test on an engine that had stopped making sound at all.
+            let before = rms(window(&mono, off_s - 0.05, off_s));
+            let during = rms(window(&mono, off_s, off_s + AFTER_S));
+            assert!(
+                during > 0.1 * before && before > 1.0e-5,
+                "key {key} vel {vel}: nothing is ringing across the release \
+                 ({before:.2e} before, {during:.2e} after)"
+            );
+
+            let first = (off_s * SAMPLE_RATE) as usize / BLOCK;
+            let last = ((off_s + AFTER_S) * SAMPLE_RATE) as usize / BLOCK;
+            for block in first..=last {
+                let i = block * BLOCK - 1;
+                let step = (mono[i + 1] - mono[i]).abs();
+                let mut sum = 0.0f64;
+                for j in (i - BLOCK)..(i + BLOCK) {
+                    sum += f64::from(mono[j + 1] - mono[j]).powi(2);
+                }
+                let local = (sum / (2 * BLOCK) as f64).sqrt() as f32;
+                assert!(
+                    step <= ALLOWED * local,
+                    "key {key} vel {vel}: the block boundary {:.1} ms after the \
+                     note-off jumps {:.1}x the local slope ({step:.3e} against \
+                     {local:.3e} rms), which is a click and not a note",
+                    (i as f32 - off_s * SAMPLE_RATE) * 1000.0 / SAMPLE_RATE,
+                    step / local,
+                );
+            }
+        }
+    }
+}
+
 // -------------------------------------------------------- 8. performance
 
 /// The spec's worst case: sustain pedal down and a glissando that leaves all 88
@@ -1401,5 +1478,88 @@ fn the_worst_case_with_the_measured_presets_duplex_fits_the_performance_budget()
         best < 0.5,
         "the worst case on the measured preset took {:.1}% of one core (design goal 50%)",
         100.0 * best
+    );
+}
+
+/// The worst case with **both** noise paths running: every string ringing under
+/// the pedal, and a note starting or stopping every ten milliseconds so that
+/// the hammer's burst and the action's burst are alive on many voices at once.
+///
+/// The strike noise put a second `Burst` on every voice — deliberately, since a
+/// staccato is a release 80 ms into an attack and one burst cannot be both — so
+/// what this measures is the cost of the pair. The glissando alone would not
+/// show it: 88 note-ons over 1.8 s leave the bursts idle for most of the render,
+/// while the material below keeps a thousand events inside ten seconds on top of
+/// a full keyboard of ringing strings.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "timing is only meaningful in --release")]
+fn the_worst_case_with_the_strike_noise_fits_the_performance_budget() {
+    const AUDIO_S: f32 = 10.0;
+
+    // A preset whose hammer noise is voiced at the level the measurements ask
+    // for, at the top of the band limit the schema allows — the most expensive
+    // legal strike there is.
+    let mut voiced = preset();
+    voiced.noise.strike.centroid_hz = 2_000.0;
+    voiced.noise.strike.bandwidth_hz = 8_000.0;
+    voiced.noise.strike.decay_s = 0.3;
+    voiced.noise.strike.level_db = vec![piano_emulator::preset::NoiseAnchor {
+        key: 21,
+        db: -12.0,
+    }];
+    voiced
+        .validate()
+        .expect("a voiced hammer noise is a legal preset");
+
+    let mut events = vec![RenderEvent::new(
+        0.0,
+        Event::Pedal(PedalEvent::Sustain(1.0)),
+    )];
+    for (i, key) in (21u8..=108).enumerate() {
+        let t = i as f32 * 0.02;
+        events.push(RenderEvent::new(t, Event::NoteOn { key, vel: 90 }));
+        events.push(RenderEvent::new(t + 0.1, Event::NoteOff { key, vel: 64 }));
+    }
+    // ... and then a note every 10 ms for the rest of the render, so that both
+    // bursts are running on a large fraction of the 88 voices at every instant.
+    let mut key = 21u8;
+    let mut t = 2.0f32;
+    while t < AUDIO_S {
+        events.push(RenderEvent::new(t, Event::NoteOn { key, vel: 100 }));
+        events.push(RenderEvent::new(t + 0.02, Event::NoteOff { key, vel: 100 }));
+        key = if key >= 108 { 21 } else { key + 7 };
+        t += 0.01;
+    }
+
+    let measure = |preset: &Preset| {
+        // Best of three: a floor on the cost rather than an average of whatever
+        // else the machine was doing.
+        let mut best = f32::INFINITY;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let (l, r) = render_to_buffer(preset, &events, AUDIO_S);
+            let ratio = start.elapsed().as_secs_f32() / AUDIO_S;
+            assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()));
+            assert!(peak(&l).max(peak(&r)) <= 1.0, "clipped past 0 dBFS");
+            assert!(rms(&l) > 1.0e-3, "the material made no sound");
+            best = best.min(ratio);
+        }
+        best
+    };
+    let silent = measure(&silent_mechanism(preset()));
+    let both = measure(&voiced);
+    println!(
+        "worst case with a thousand events: {:.1}% of one core with the action \
+         silenced, {:.1}% with the mechanism and the hammer's noise both voiced \
+         (+{:.2} points)",
+        100.0 * silent,
+        100.0 * both,
+        100.0 * (both - silent)
+    );
+    assert!(
+        both < 0.5,
+        "the worst case with the strike noise took {:.1}% of one core \
+         (design goal 50%)",
+        100.0 * both
     );
 }
