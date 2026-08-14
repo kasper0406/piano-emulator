@@ -427,7 +427,7 @@ impl Opcodes {
 }
 
 /// An SFZ header `<name>` or an opcode `name=value`.
-enum Token<'a> {
+pub(crate) enum Token<'a> {
     Header(&'a str),
     Opcode(&'a str, &'a str),
 }
@@ -438,7 +438,7 @@ enum Token<'a> {
 /// on a line to contain spaces (sample paths do, in the wild). The rule that
 /// makes both work is that a value runs to the next token containing an `=`,
 /// which is where the next opcode must start.
-fn tokens(text: &str) -> Vec<Token<'_>> {
+pub(crate) fn tokens(text: &str) -> Vec<Token<'_>> {
     let mut out = Vec::new();
     for line in text.lines() {
         let line = match line.find("//") {
@@ -471,7 +471,7 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
 
 /// An SFZ key: either a MIDI number or a note name like `c#4` (C4 = 60, as in
 /// the rest of this crate).
-fn note_number(text: &str) -> Option<i32> {
+pub(crate) fn note_number(text: &str) -> Option<i32> {
     let text = text.trim();
     if let Ok(number) = text.parse::<i32>() {
         return Some(number);

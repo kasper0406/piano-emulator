@@ -42,7 +42,9 @@ pub mod library;
 pub mod numeric;
 pub mod pipeline;
 pub mod preset;
+pub mod realism;
 pub mod residual;
+pub mod sampler;
 pub mod response;
 pub mod stft;
 pub mod survey;
@@ -52,6 +54,11 @@ pub mod trajectory;
 
 pub use audio::Audio;
 pub use library::{Sample, SampleLibrary};
+pub use realism::{
+    compare, level_match, multi_res_log_mel_distance, phrase_set, Phrase, RealismMetrics,
+    VelocityLayers,
+};
+pub use sampler::{Instrument, Sampler, SamplerConfig, SamplerEvent, TimedEvent};
 pub use survey::{Survey, SurveyConfig};
 pub use error::{Error, Result};
 pub use estimate::decay::fit_decays;

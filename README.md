@@ -108,5 +108,6 @@ measure and print without writing anything.
 - `SPEC.md` — the model specification and acceptance tests.
 - `DECISIONS.md` — the running log of every design decision and deviation.
 - `TUNING.md` — the plan for estimating parameters automatically from recordings of real pianos (in progress; stage 1, its self-calibration gate and the first measured preset are built, in `tuner/`).
+- `renders/realism/REALISM.md` — the standing realism scoreboard: six fixed phrases rendered from one event list through both the engine and the Salamander recordings, with `TUNING.md`'s stage-2 losses measured over each pair *and* the same measurement between two recordings of the same piano, which is the noise floor that makes the first number readable. Written by `cargo run --release -p piano-tuner --example realism_bench` (needs `data/fetch_salamander.sh`); the metrics themselves live in `tuner/src/realism.rs` so the scoreboard and the loss an optimizer minimises are one piece of code.
 - `presets/default.toml` — the hand-tuned v1 instrument, written out in full.
 - `presets/salamander-c5.toml` — the same instrument with everything stage 1 could measure off a real Yamaha C5 written into it.

@@ -13,8 +13,17 @@ path = "src/lib.rs"
 name = "piano-tuner"
 path = "src/main.rs"
 
+[features]
+# The sampler's translation of the engine's own event list into the reference
+# player's (`sampler::engine_events`). Off by default so the library still
+# links without the engine; on inside this crate's own tests, which have the
+# engine as a dev-dependency anyway.
+engine-events = ["dep:piano-emulator"]
+
 [dependencies]
 hound = "3.5"
+# Only for `engine-events`; see the dev-dependency note below.
+piano-emulator = { path = "../engine", optional = true }
 claxon = "0.4"
 rubato = "0.15"
 rustfft = "6"
@@ -30,3 +39,7 @@ toml = "0.8"
 # recordings and must stay usable without an audio device on the link line.
 [dev-dependencies]
 piano-emulator = { path = "../engine" }
+# Images for `examples/realism_bench.rs`. Pure Rust, no C, no image-processing
+# stack: an encoder and nothing else. A dev-dependency because the library
+# measures and the examples draw.
+png = "0.17"
