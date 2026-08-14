@@ -45,7 +45,7 @@ fn an_engine_with_no_events_is_bit_exact_silent() {
 fn a_single_note_sounds_at_a_sane_level_and_decays() {
     let events = [
         RenderEvent::new(0.0, Event::NoteOn { key: 60, vel: 80 }),
-        RenderEvent::new(1.0, Event::NoteOff { key: 60 }),
+        RenderEvent::new(1.0, Event::NoteOff { key: 60, vel: 64 }),
     ];
     let (l, _r) = render_to_buffer(&preset(), &events, 3.0);
 
@@ -70,7 +70,7 @@ fn the_sustain_pedal_keeps_a_released_note_ringing() {
         let events = [
             RenderEvent::new(0.0, Event::Pedal(PedalEvent::Sustain(sustain))),
             RenderEvent::new(0.05, Event::NoteOn { key: 48, vel: 90 }),
-            RenderEvent::new(1.0, Event::NoteOff { key: 48 }),
+            RenderEvent::new(1.0, Event::NoteOff { key: 48, vel: 64 }),
         ];
         let (l, _r) = render_to_buffer(&preset(), &events, 3.5);
         rms(window(&l, 3.0, 3.2))
@@ -97,7 +97,7 @@ fn dense_playing_stays_finite_and_bounded() {
         let vel = 30 + (state >> 8) as u8 % 90;
         let t = i as f32 * 0.02;
         events.push(RenderEvent::new(t, Event::NoteOn { key, vel }));
-        events.push(RenderEvent::new(t + 0.4, Event::NoteOff { key }));
+        events.push(RenderEvent::new(t + 0.4, Event::NoteOff { key, vel: 64 }));
     }
     let (l, r) = render_to_buffer(&preset(), &events, 14.0);
 
@@ -158,10 +158,121 @@ fn struck_notes_sound_at_the_right_pitch() {
     }
 }
 
+/// Level of one partial in one window, in dB: the Hann-windowed DFT at that
+/// frequency. This is `TUNING_REPORT.md` §5's per-partial reading — the metric
+/// that measured 1.2–6.2 dB of left-minus-right drift between 0.3 s and 2 s on
+/// the recordings against 0.02–0.14 dB on the engine's renders.
+fn partial_level_db(signal: &[f32], f: f32, from_s: f32, to_s: f32) -> f32 {
+    let w = window(signal, from_s, to_s);
+    let n = w.len() as f64;
+    let (mut re, mut im) = (0.0f64, 0.0f64);
+    for (i, &x) in w.iter().enumerate() {
+        let t = i as f64;
+        let hann = 0.5 - 0.5 * (std::f64::consts::TAU * t / n).cos();
+        let phase = std::f64::consts::TAU * f as f64 * t / SAMPLE_RATE as f64;
+        re += x as f64 * hann * phase.cos();
+        im -= x as f64 * hann * phase.sin();
+    }
+    (10.0 * (re * re + im * im).max(1e-30).log10()) as f32
+}
+
+/// A note's stereo balance has to be able to *move* while it decays, which the
+/// engine could not do at all: it panned one mono voice per key, so whatever
+/// balance a note started with was the balance it died with. With the two
+/// polarizations placed apart, the fast one dying leaves the slow one's
+/// position behind — and with the spread at zero the old behaviour is exactly
+/// what is left.
+///
+/// The one test here that does not honour `PIANO_PRESET`. How far the balance
+/// travels between two given instants is set by how deep the preset's double
+/// decay is and by where the handover between the polarizations falls: on
+/// `presets/salamander-c5.toml`, whose horizontal polarization is 27.6 dB down
+/// rather than the default's 12, the handover is well past 2 s and the same
+/// spread moves the balance 0.09 dB inside this window. That is a property of
+/// that piano's voicing, not of the mechanism, so the mechanism is measured on
+/// the instrument the window was chosen for.
+#[test]
+fn spreading_the_polarizations_makes_a_held_notes_balance_drift() {
+    // Measured on the fundamental: it is the partial with the most left of it
+    // two seconds in, so the board's own diffuse field — which is decorrelated
+    // between the channels and drifts a little by itself — is furthest down.
+    let drift = |key: u8, spread: f32| -> f32 {
+        let mut preset = Preset::default();
+        preset.voicing.polarization_pan_spread = spread;
+        preset.validate().expect("a spread within the ceiling is legal");
+        let f0 = preset.f0(key);
+        // Held, so nothing but the string's own decay is in the measurement.
+        let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: 100 })];
+        let (l, r) = render_to_buffer(&preset, &events, 2.4);
+        let balance = |at: f32| {
+            partial_level_db(&l, f0, at, at + 0.2) - partial_level_db(&r, f0, at, at + 0.2)
+        };
+        balance(2.0) - balance(0.3)
+    };
+
+    let mut moved = [0.0f32; 2];
+    // Two neighbouring keys, because the spread alternates with key parity.
+    for (i, key) in [60u8, 61].into_iter().enumerate() {
+        let still = drift(key, 0.0);
+        assert!(
+            still.abs() < 1.0,
+            "key {key}: an unspread note's balance moved {still} dB, and the only
+             thing that can move it is the board's own field"
+        );
+        moved[i] = drift(key, 0.4);
+        assert!(
+            moved[i].abs() > 3.0,
+            "key {key}: a spread note's balance moved only {} dB, against the
+             1.2-6.2 dB the recordings drift",
+            moved[i]
+        );
+    }
+    // ... and it alternates: the note that leaves its aftersound to the right
+    // sits next to one that leaves it to the left, so 88 of them do not lean.
+    assert!(
+        moved[0] * moved[1] < 0.0,
+        "neighbouring keys drifted the same way: {moved:?}"
+    );
+}
+
 #[test]
 fn the_demo_renders_without_clipping() {
     let (l, r) = render_to_buffer(&preset(), &demo_sequence(), DEMO_DURATION_S);
     assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()));
     assert!(peak(&l).max(peak(&r)) <= 1.0);
     assert!(rms(&l) > 1e-4, "the demo produced no sound");
+}
+
+/// The demo now ends in mechanism noise rather than in digital silence: its
+/// last event is a chord under the pedal, and the pedal is still down, so what
+/// is left after the strings have gone is the tray rumble and the releases.
+/// The check is that the piece is still the piece — the noise is 30 dB or more
+/// under it, everywhere, and never on its own loud enough to be a fault.
+#[test]
+fn the_mechanism_stays_under_the_music() {
+    let (l, r) = render_to_buffer(&preset(), &demo_sequence(), DEMO_DURATION_S);
+    let music = rms(window(&l, 0.0, 14.0)).max(rms(window(&r, 0.0, 14.0)));
+    let mut silent = preset();
+    for event in [
+        &mut silent.noise.key_off,
+        &mut silent.noise.damper_lift,
+        &mut silent.noise.pedal_down,
+        &mut silent.noise.pedal_up,
+    ] {
+        for anchor in &mut event.level_db {
+            anchor.db = -200.0;
+        }
+    }
+    let (ql, qr) = render_to_buffer(&silent, &demo_sequence(), DEMO_DURATION_S);
+    // Difference of the two renders is the mechanism, on its own.
+    let noise: Vec<f32> = l.iter().zip(&ql).map(|(a, b)| a - b).collect();
+    let level = 20.0 * (rms(&noise) / music).max(1e-30).log10();
+    assert!(
+        (-60.0..-15.0).contains(&level),
+        "the mechanism sits {level:.1} dB under the music, expected roughly -20 to -40"
+    );
+    // ... and it is genuinely there in both channels.
+    let right: Vec<f32> = r.iter().zip(&qr).map(|(a, b)| a - b).collect();
+    assert!(rms(&right) > 0.0 && rms(&noise) > 0.0);
+    assert!(peak(&noise).max(peak(&right)) < 0.1, "the action is far too loud");
 }

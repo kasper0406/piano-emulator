@@ -36,7 +36,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::types::Event;
-use piano_tuner::estimate::inharmonic::{fit_inharmonic_partials, InharmonicConfig};
+use piano_tuner::estimate::inharmonic::{
+    fit_inharmonic_partials, trusted_prefix, InharmonicConfig,
+};
 use piano_tuner::estimate::strike::{fit_strike_position, StrikeConfig};
 use piano_tuner::pipeline::{analyze_trajectories, track_refined, NoteAnalysis};
 use piano_tuner::preset::{equal_temperament, Preset};
@@ -125,6 +127,13 @@ struct LayerSummary {
     preset_rms_cents: f64,
     preset_worst_cents: f64,
     preset_worst_k: u32,
+    /// The same deviation over the partials whose *index* the tracker can be
+    /// believed — everything below the first skipped partial
+    /// (`estimate::inharmonic::trusted_prefix`). Above the skip the tracked
+    /// frequencies are real and their `k` is one too low, so a deviation
+    /// measured there is the tracker's and not the instrument's.
+    preset_rms_trusted_cents: f64,
+    trusted_partials: usize,
     /// Inharmonicity fitted to the low partials alone and to the high ones
     /// alone. The engine's string has one `B` for the whole series; a real
     /// wound string does not, and the ratio is by how much.
@@ -140,8 +149,22 @@ fn summarise(
     written: Option<InharmonicModel>,
 ) -> (LayerSummary, Vec<(f64, f64)>) {
     let residuals = partial_residuals(analysis, config);
-    let cents: Vec<f64> = residuals.iter().map(|r| r.model_cents).collect();
-    let (worst, worst_k) = residuals
+    let trusted = trusted_prefix(
+        &residuals
+            .iter()
+            .map(|r| (r.k, r.frequency_hz))
+            .collect::<Vec<_>>(),
+        &InharmonicConfig::default(),
+    );
+    // The fit's own residual is reported over the partials the fit was allowed
+    // to believe. Above the first skipped partial the tracked frequencies are
+    // real and their index is one too low, so what a residual measures there is
+    // the tracker rather than the string — at A0 it comes to 800 cents.
+    let cents: Vec<f64> = residuals[..trusted]
+        .iter()
+        .map(|r| r.model_cents)
+        .collect();
+    let (worst, worst_k) = residuals[..trusted]
         .iter()
         .fold((0.0f64, 0u32), |(worst, k), r| {
             if r.model_cents.abs() > worst {
@@ -226,6 +249,8 @@ fn summarise(
         preset_rms_cents: rms(&preset),
         preset_worst_cents: preset_worst,
         preset_worst_k,
+        preset_rms_trusted_cents: rms(&preset[..trusted.min(preset.len())]),
+        trusted_partials: trusted,
         b_low: band_inharmonicity(&residuals, 1, 8),
         b_high: band_inharmonicity(&residuals, 14, 26),
     };
@@ -316,7 +341,7 @@ fn report_by_key(summaries: &[LayerSummary]) {
     println!("\n=== 1. trajectory residuals, median over the layers of each key\n");
     println!(
         " key   n  partials   inharm rms  worst (k)   glide k1  glide med   env rms  env trend  \
-         excite rms  excite worst   preset rms  worst (k)    B low     B high   ratio"
+         excite rms  excite worst   preset rms  worst (k)  trusted   preset rms(t)    B low     B high   ratio"
     );
     for (key, group) in grouped(summaries) {
         let show = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("{v:+7.2}"));
@@ -324,7 +349,7 @@ fn report_by_key(summaries: &[LayerSummary]) {
         let high = median(group.iter().filter_map(|s| s.b_high));
         println!(
             "{key:>4} {:>3}  {:>8}  {:>10.2}c {:>7.1}c ({:>2}) {:>9} {:>10} {:>9.2} {:>10} {:>11} \
-             {:>13} {:>11.2}c {:>7.1}c ({:>2}) {:>9} {:>10} {:>7}",
+             {:>13} {:>11.2}c {:>7.1}c ({:>2}) {:>8} {:>14.2}c {:>9} {:>10} {:>7}",
             group.len(),
             median(group.iter().map(|s| s.partials as f64)).unwrap_or(f64::NAN) as usize,
             median(group.iter().map(|s| s.inharmonic_rms_cents)).unwrap_or(f64::NAN),
@@ -340,6 +365,8 @@ fn report_by_key(summaries: &[LayerSummary]) {
             median(group.iter().map(|s| s.preset_rms_cents)).unwrap_or(f64::NAN),
             median(group.iter().map(|s| s.preset_worst_cents)).unwrap_or(f64::NAN),
             median(group.iter().map(|s| f64::from(s.preset_worst_k))).unwrap_or(f64::NAN) as u32,
+            median(group.iter().map(|s| s.trusted_partials as f64)).unwrap_or(f64::NAN) as usize,
+            median(group.iter().map(|s| s.preset_rms_trusted_cents)).unwrap_or(f64::NAN),
             low.map_or("-".to_string(), |b| format!("{b:.2e}")),
             high.map_or("-".to_string(), |b| format!("{b:.2e}")),
             low.zip(high)
@@ -1273,9 +1300,10 @@ fn mechanism_pass(
 /// synthesize when that key is struck.
 fn written_model(preset: &Preset, key: u8) -> Option<InharmonicModel> {
     let index = piano_tuner::preset::key_index(key)?;
-    Some(InharmonicModel::new(
+    Some(InharmonicModel::with_b4(
         f64::from(preset.f0(key)?),
         f64::from(preset.notes.inharmonicity_b[index]),
+        f64::from(preset.notes.inharmonicity_b4[index]),
     ))
 }
 

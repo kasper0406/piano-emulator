@@ -10,6 +10,14 @@
 //!
 //! - note on / note off on every channel, merged (the instrument is one piano);
 //!   a note on with velocity 0 is a note off, as the MIDI spec allows;
+//! - note-*off* velocity, which the engine plays as release velocity: it sets
+//!   how fast the damper falls and how loud the key-off thump is. A note off
+//!   written as a note on with velocity 0 carries none, and a keyboard that
+//!   cannot measure one sends 0; both are read as the nominal release rather
+//!   than as the slowest possible one, which is what the value means;
+//! - a note on quiet enough to miss escapement, which lifts the damper and
+//!   strikes nothing — the silent press of `PHYSICS.md` §6, playable from a
+//!   MIDI file without any new message;
 //! - CC 64 as a *continuous* sustain pedal, so half-pedalling in a Disklavier
 //!   recording reaches the dampers as the fractional value it was played at
 //!   rather than as a switch;
@@ -21,7 +29,7 @@
 //! ignored: the engine has no use for it.
 
 use crate::render::RenderEvent;
-use crate::types::{Event, PedalEvent, HIGHEST_KEY, LOWEST_KEY};
+use crate::types::{Event, PedalEvent, DEFAULT_RELEASE_VELOCITY, HIGHEST_KEY, LOWEST_KEY};
 use midly::{MetaMessage, MidiMessage, Smf, Timing, TrackEventKind};
 use std::fmt;
 use std::path::Path;
@@ -126,9 +134,19 @@ fn translate(message: MidiMessage) -> Option<Event> {
                 vel: vel.as_int(),
             })
         }
-        MidiMessage::NoteOn { key, .. } | MidiMessage::NoteOff { key, .. } => {
-            playable(key.as_int()).map(|key| Event::NoteOff { key })
-        }
+        MidiMessage::NoteOff { key, vel } => playable(key.as_int()).map(|key| Event::NoteOff {
+            key,
+            // Zero here is "this keyboard does not measure release velocity",
+            // not "released infinitely slowly".
+            vel: match vel.as_int() {
+                0 => DEFAULT_RELEASE_VELOCITY,
+                v => v,
+            },
+        }),
+        MidiMessage::NoteOn { key, .. } => playable(key.as_int()).map(|key| Event::NoteOff {
+            key,
+            vel: DEFAULT_RELEASE_VELOCITY,
+        }),
         MidiMessage::Controller { controller, value } => {
             let value = value.as_int();
             let switch = value >= SWITCH_THRESHOLD;
@@ -290,9 +308,18 @@ mod tests {
         let p = parse(&smf(DIVISION, &track)).expect("parses");
         assert_eq!(p.events.len(), 4);
         assert_eq!(at(&p, 0), (0.0, Event::NoteOn { key: 60, vel: 100 }));
-        assert_eq!(at(&p, 1), (1.0, Event::NoteOff { key: 60 }));
+        assert_eq!(at(&p, 1), (1.0, Event::NoteOff { key: 60, vel: 64 }));
         assert_eq!(at(&p, 2), (1.5, Event::NoteOn { key: 64, vel: 90 }));
-        assert_eq!(at(&p, 3), (1.75, Event::NoteOff { key: 64 }));
+        assert_eq!(
+            at(&p, 3),
+            (
+                1.75,
+                Event::NoteOff {
+                    key: 64,
+                    vel: DEFAULT_RELEASE_VELOCITY
+                }
+            )
+        );
         assert_eq!(p.last_event_s, 1.75);
         assert!(p.duration_s() > p.last_event_s);
     }
@@ -346,6 +373,41 @@ mod tests {
 
         let p = parse(&file).expect("parses");
         assert_eq!(at(&p, 0), (1.0, Event::NoteOn { key: 48, vel: 80 }));
+    }
+
+    /// Release velocity is carried through, and the two ways a file can say
+    /// "I do not have one" both land on the nominal release rather than on the
+    /// slowest one a key can be let go with.
+    #[test]
+    fn note_off_velocity_is_carried_through() {
+        let mut track = Vec::new();
+        event(0, &[0x90, 60, 100], &mut track);
+        event(0, &[0x80, 60, 120], &mut track); // let go fast
+        event(0, &[0x90, 62, 100], &mut track);
+        event(0, &[0x80, 62, 0], &mut track); // keyboard has no measurement
+        event(0, &[0x90, 64, 100], &mut track);
+        event(0, &[0x90, 64, 0], &mut track); // note off written as velocity 0
+        // Quiet enough to miss escapement: the damper lifts, nothing sounds.
+        event(0, &[0x90, 65, 2], &mut track);
+
+        let p = parse(&smf(DIVISION, &track)).expect("parses");
+        let events: Vec<Event> = p.events.iter().map(|e| e.event).collect();
+        assert_eq!(events[1], Event::NoteOff { key: 60, vel: 120 });
+        assert_eq!(
+            events[3],
+            Event::NoteOff {
+                key: 62,
+                vel: DEFAULT_RELEASE_VELOCITY
+            }
+        );
+        assert_eq!(
+            events[5],
+            Event::NoteOff {
+                key: 64,
+                vel: DEFAULT_RELEASE_VELOCITY
+            }
+        );
+        assert_eq!(events[6], Event::NoteOn { key: 65, vel: 2 });
     }
 
     #[test]

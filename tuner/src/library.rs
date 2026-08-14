@@ -9,10 +9,20 @@
 //! hammer noises and pedal actions drop out of the survey by construction
 //! instead of by a pattern match on somebody's naming scheme.
 //!
-//! Only the opcodes that answer those two questions are understood
-//! (`sample`, `pitch_keycenter`/`key`/`lokey`/`hikey`, `lovel`/`hivel`,
-//! `trigger`); everything else in the file is skipped. This is not an SFZ
-//! player.
+//! The same file also maps what the instrument does when it is *not* being
+//! struck — the key-off thumps and the pedal action — and those are the
+//! parameter set for the engine's mechanism noises
+//! ([`estimate::noise`](crate::estimate::noise)). They are indexed separately,
+//! by [`SampleLibrary::mechanism`], and again by what the SFZ says rather than
+//! by what the files are called: a release region with `pitch_keytrack=0` is a
+//! recording of the action (an unpitched sample the player must not transpose),
+//! one without it is the string still ringing, and a region triggered by CC 64
+//! crossing rather than by a key is the pedal.
+//!
+//! Only the opcodes that answer those questions are understood (`sample`,
+//! `pitch_keycenter`/`key`/`lokey`/`hikey`, `lovel`/`hivel`, `trigger`,
+//! `volume`, `amp_veltrack`, `pitch_keytrack`, `on_locc64`/`on_hicc64`);
+//! everything else in the file is skipped. This is not an SFZ player.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,7 +30,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 
 /// One recording: a key of the instrument, struck at one velocity layer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Sample {
     pub path: PathBuf,
     /// MIDI key number, 21 (A0) … 108 (C8).
@@ -30,6 +40,11 @@ pub struct Sample {
     /// MIDI velocity band the layer covers, inclusive.
     pub lovel: u8,
     pub hivel: u8,
+    /// The `volume` the instrument plays this region at, in dB. Levels are only
+    /// comparable between groups once it is applied: Salamander attenuates its
+    /// key-off group by 37 dB and its pedal groups by 19–20, and comparing the
+    /// raw files would say a damper landing is as loud as the note.
+    pub volume_db: f64,
 }
 
 impl Sample {
@@ -41,11 +56,40 @@ impl Sample {
     }
 }
 
-/// Every struck-note recording an SFZ instrument maps, grouped by key.
+/// Which part of the action a recording is of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MechanismKind {
+    /// The key and its action returning to rest, with the damper landing: one
+    /// per key, `rel1`…`rel88` in Salamander.
+    KeyOff,
+    /// The sustain pedal's tray going down, triggered by CC 64 crossing high.
+    PedalDown,
+    /// The same tray coming up.
+    PedalUp,
+}
+
+/// One recording of the mechanism rather than of a string.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MechanismSample {
+    pub path: PathBuf,
+    pub kind: MechanismKind,
+    /// The key this recording belongs to, where it has one. The pedal is
+    /// global and has none.
+    pub key: Option<u8>,
+    /// `volume`, in dB, as for [`Sample::volume_db`].
+    pub volume_db: f64,
+    /// `amp_veltrack`, as a percentage, where the group sets one. The SFZ law
+    /// is `40 log10(v / 127)` dB scaled by this over a hundred.
+    pub amp_veltrack: Option<f64>,
+}
+
+/// Every recording an SFZ instrument maps: the struck notes grouped by key, and
+/// the mechanism.
 #[derive(Clone, Debug, Default)]
 pub struct SampleLibrary {
     /// Key → layers, softest first.
     notes: BTreeMap<u8, Vec<Sample>>,
+    mechanism: Vec<MechanismSample>,
 }
 
 impl SampleLibrary {
@@ -118,23 +162,36 @@ impl SampleLibrary {
         }
 
         let mut notes: BTreeMap<u8, Vec<Sample>> = BTreeMap::new();
+        let mut mechanism: Vec<MechanismSample> = Vec::new();
         for region in regions {
+            let Some(sample) = region.sample.as_deref() else {
+                continue;
+            };
+            let path = root.join(sample);
+            if let Some(kind) = region.mechanism() {
+                mechanism.push(MechanismSample {
+                    path,
+                    kind,
+                    key: region.key(),
+                    volume_db: region.volume.unwrap_or(0.0),
+                    amp_veltrack: region.amp_veltrack,
+                });
+                continue;
+            }
             // A release sample is the sound of the key coming *up*: the damper
             // landing, or the string resonance it leaves behind. Neither is a
             // struck note and neither has partials to fit.
             if region.trigger.as_deref().is_some_and(|t| t != "attack") {
                 continue;
             }
-            let Some(sample) = region.sample.as_deref() else {
-                continue;
-            };
             let Some(key) = region.key() else { continue };
             notes.entry(key).or_default().push(Sample {
-                path: root.join(sample),
+                path,
                 key,
                 layer: 0,
                 lovel: region.lovel.unwrap_or(1),
                 hivel: region.hivel.unwrap_or(127),
+                volume_db: region.volume.unwrap_or(0.0),
             });
         }
         for (&key, layers) in notes.iter_mut() {
@@ -146,7 +203,7 @@ impl SampleLibrary {
                 sample.layer = i as u8;
             }
         }
-        Ok(Self { notes })
+        Ok(Self { notes, mechanism })
     }
 
     /// The sampled keys, ascending.
@@ -172,8 +229,52 @@ impl SampleLibrary {
         self.notes.values().flatten()
     }
 
+    /// Every mechanism recording the instrument maps, in file order.
+    pub fn mechanism(&self) -> &[MechanismSample] {
+        &self.mechanism
+    }
+
+    /// The mechanism recordings of one kind, ascending by key.
+    pub fn mechanism_of(&self, kind: MechanismKind) -> Vec<&MechanismSample> {
+        let mut samples: Vec<&MechanismSample> =
+            self.mechanism.iter().filter(|s| s.kind == kind).collect();
+        samples.sort_by_key(|s| s.key);
+        samples
+    }
+
+    /// The layer of `key` a strike at `velocity` would trigger, or the same
+    /// layer of the nearest key that has one.
+    ///
+    /// A library samples a subset of the compass — Salamander records 30 keys
+    /// of 88 — while it ships a key-off recording for every key, so a level
+    /// quoted against "a strike of the same key" has to fall back to the
+    /// nearest key that was struck at all. Both quantities move smoothly across
+    /// a couple of semitones; which key it settled for is returned so a caller
+    /// can say so.
+    pub fn nearest_layer(&self, key: u8, velocity: u8) -> Option<&Sample> {
+        self.notes
+            .iter()
+            .filter_map(|(&sampled, layers)| {
+                let layer = layers
+                    .iter()
+                    .find(|s| (s.lovel..=s.hivel).contains(&velocity))?;
+                Some((sampled.abs_diff(key), layer))
+            })
+            .min_by_key(|&(distance, _)| distance)
+            .map(|(_, layer)| layer)
+    }
+
+    /// The MIDI velocities the library's own layers are centred on, lowest and
+    /// highest — the dynamic range it was recorded across.
+    pub fn velocity_span(&self) -> Option<(u8, u8)> {
+        let mut velocities = self.samples().map(Sample::midi_velocity);
+        let first = velocities.next()?;
+        Some(velocities.fold((first, first), |(lo, hi), v| (lo.min(v), hi.max(v))))
+    }
+
     /// The same library with only `keys` in it — how a pilot run over three
-    /// notes is asked for.
+    /// notes is asked for. The mechanism is carried over whole: it is not
+    /// per-key material and a pilot run over three notes still wants it.
     pub fn restricted_to(&self, keys: &[u8]) -> Self {
         Self {
             notes: self
@@ -182,6 +283,7 @@ impl SampleLibrary {
                 .filter(|(key, _)| keys.contains(key))
                 .map(|(key, layers)| (*key, layers.clone()))
                 .collect(),
+            mechanism: self.mechanism.clone(),
         }
     }
 }
@@ -207,6 +309,11 @@ struct Opcodes {
     lovel: Option<u8>,
     hivel: Option<u8>,
     trigger: Option<String>,
+    volume: Option<f64>,
+    amp_veltrack: Option<f64>,
+    pitch_keytrack: Option<i32>,
+    on_locc64: Option<i32>,
+    on_hicc64: Option<i32>,
 }
 
 impl Opcodes {
@@ -221,6 +328,11 @@ impl Opcodes {
             lovel: other.lovel.or(self.lovel),
             hivel: other.hivel.or(self.hivel),
             trigger: other.trigger.clone().or_else(|| self.trigger.clone()),
+            volume: other.volume.or(self.volume),
+            amp_veltrack: other.amp_veltrack.or(self.amp_veltrack),
+            pitch_keytrack: other.pitch_keytrack.or(self.pitch_keytrack),
+            on_locc64: other.on_locc64.or(self.on_locc64),
+            on_hicc64: other.on_hicc64.or(self.on_hicc64),
         }
     }
 
@@ -234,8 +346,39 @@ impl Opcodes {
             "lovel" => self.lovel = value.parse().ok(),
             "hivel" => self.hivel = value.parse().ok(),
             "trigger" => self.trigger = Some(value.to_ascii_lowercase()),
+            "volume" => self.volume = value.parse().ok(),
+            "amp_veltrack" => self.amp_veltrack = value.parse().ok(),
+            "pitch_keytrack" => self.pitch_keytrack = value.parse().ok(),
+            "on_locc64" => self.on_locc64 = value.parse().ok(),
+            "on_hicc64" => self.on_hicc64 = value.parse().ok(),
             _ => {}
         }
+    }
+
+    /// Which part of the mechanism this region records, if any.
+    ///
+    /// Two markers, both of them statements the SFZ makes about how the sample
+    /// must be *played* rather than about what it is called. A release region
+    /// with `pitch_keytrack=0` is a sample the player is told not to transpose,
+    /// which is what an unpitched noise is; a release region without it is the
+    /// string, and has a pitch to track. A region gated on CC 64 rather than on
+    /// a key is the pedal, and which way the gate opens says which direction
+    /// the tray moved.
+    fn mechanism(&self) -> Option<MechanismKind> {
+        if self.on_locc64.is_some() || self.on_hicc64.is_some() {
+            let low = self.on_locc64.unwrap_or(0);
+            let high = self.on_hicc64.unwrap_or(127);
+            return Some(if low >= 64 {
+                MechanismKind::PedalDown
+            } else if high <= 63 {
+                MechanismKind::PedalUp
+            } else {
+                // A gate that spans the whole controller is not a crossing.
+                return None;
+            });
+        }
+        let released = self.trigger.as_deref().is_some_and(|t| t == "release");
+        (released && self.pitch_keytrack == Some(0)).then_some(MechanismKind::KeyOff)
     }
 
     /// Which key this region is a recording of.
@@ -336,10 +479,16 @@ mod tests {
 <region> sample=samples/C4v2.flac lokey=59 hikey=61 lovel=27 hivel=34 pitch_keycenter=60
 <region> sample=samples/C4v1.flac lokey=59 hikey=61 lovel=1 hivel=26 pitch_keycenter=60
 <region> sample=samples/C4v3.flac lokey=59 hikey=61 lovel=35 pitch_keycenter=60
-<group> trigger=release volume=-4
+<group> trigger=release volume=-4 amp_veltrack=94 rt_decay=6
 <region> sample=samples/harmC4.flac lokey=59 hikey=61
-<group> group=1 hikey=-1 lokey=-1 on_locc64=126
+//HammerNoise
+<group> trigger=release pitch_keytrack=0 volume=-37 amp_veltrack=82 rt_decay=2
+<region> sample=samples/rel40.flac lokey=60 hikey=60
+<region> sample=samples/rel1.flac lokey=21 hikey=21
+<group> group=1 hikey=-1 lokey=-1 on_locc64=126 on_hicc64=127 off_by=2 volume=-20
 <region> sample=samples/pedalD1.flac
+<group> group=2 hikey=-1 lokey=-1 on_locc64=0 on_hicc64=1 volume=-19
+<region> sample=samples/pedalU1.flac
 ";
 
     fn library() -> SampleLibrary {
@@ -368,6 +517,44 @@ mod tests {
         // The release group and the pedal group are both in the fixture; one is
         // excluded by its trigger and the other by having no key at all.
         assert!(library().samples().all(|s| s.key == 60));
+    }
+
+    #[test]
+    fn the_action_is_indexed_by_what_the_sfz_says_it_is() {
+        let library = library();
+        let key_off = library.mechanism_of(MechanismKind::KeyOff);
+        // Both hammer-noise regions, ordered by key — and *not* the string
+        // resonance in the release group above them, which has a pitch to
+        // track and is a recording of the string.
+        assert_eq!(
+            key_off.iter().map(|s| s.key).collect::<Vec<_>>(),
+            vec![Some(21), Some(60)]
+        );
+        assert_eq!(key_off[0].path, Path::new("/lib/samples/rel1.flac"));
+        assert_eq!(key_off[0].volume_db, -37.0);
+        assert_eq!(key_off[0].amp_veltrack, Some(82.0));
+        assert!(library
+            .mechanism()
+            .iter()
+            .all(|s| !s.path.ends_with("harmC4.flac")));
+
+        // The pedal, told apart by which way its gate on CC 64 opens.
+        let down = library.mechanism_of(MechanismKind::PedalDown);
+        let up = library.mechanism_of(MechanismKind::PedalUp);
+        assert_eq!(down.len(), 1);
+        assert_eq!(down[0].volume_db, -20.0);
+        assert_eq!(down[0].key, None);
+        assert_eq!(up.len(), 1);
+        assert_eq!(up[0].path, Path::new("/lib/samples/pedalU1.flac"));
+
+        // A key-off recording of a key the library never struck still has a
+        // strike to be measured against.
+        assert_eq!(library.nearest_layer(21, 90).map(|s| s.key), Some(60));
+        assert_eq!(library.nearest_layer(60, 90).map(|s| s.layer), Some(2));
+        assert_eq!(library.nearest_layer(60, 200), None);
+        assert_eq!(library.velocity_span(), Some((13, 81)));
+        // A pilot run over three notes still carries the whole mechanism.
+        assert_eq!(library.restricted_to(&[]).mechanism().len(), 4);
     }
 
     #[test]

@@ -5,7 +5,9 @@
 
 use crate::engine::Engine;
 use crate::preset::Preset;
-use crate::types::{Event, PedalEvent, BLOCK, HIGHEST_KEY, LOWEST_KEY, SAMPLE_RATE};
+use crate::types::{
+    Event, PedalEvent, BLOCK, DEFAULT_RELEASE_VELOCITY, HIGHEST_KEY, LOWEST_KEY, SAMPLE_RATE,
+};
 use std::path::Path;
 
 /// An event with the time, in seconds from the start of the render, at which
@@ -94,7 +96,13 @@ impl Sequence {
     fn note(&mut self, at: f32, key: u8, vel: u8, dur: f32) -> &mut Self {
         self.events.push(RenderEvent::new(at, Event::NoteOn { key, vel }));
         self.events
-            .push(RenderEvent::new(at + dur, Event::NoteOff { key }));
+            .push(RenderEvent::new(
+                at + dur,
+                Event::NoteOff {
+                    key,
+                    vel: DEFAULT_RELEASE_VELOCITY,
+                },
+            ));
         self
     }
 

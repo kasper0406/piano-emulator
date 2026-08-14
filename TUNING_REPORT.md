@@ -128,6 +128,19 @@ Control, same estimator, engine renders: **0.06 c** RMS at A0, 0.08 at A1, 0.26 
 A3/C4, 0.10 at C5, 0.09 at C6, 0.60 at C7. The measured deviations are the piano's by two orders of
 magnitude.
 
+> **Update (Milestone A).** Most of the bass rows of this table are the *tracker*, not the
+> piano. Above partial 24–25 at A0, C1 and D#1 the partial tracker loses one partial and every
+> index above it names the partial above itself: A0's spectrum has peaks at 696.7 and 729.5 Hz
+> where tracks 24 and 25 report 696.0 and 750.8, and from track 26 up the numbering is one out.
+> Fitting that top is what gave those keys the coefficient the preset wrote, and with it the
+> 78-cent fundamental. `estimate::inharmonic::trusted_prefix` now truncates the series at the
+> first skip; over the partials that survive it, the layout the preset writes stands 8.8 c (A0),
+> 6.3 c (C1) and 4.6 c (D#1) from the recordings, and the two-band diagnostic below is reproduced
+> by the estimator (0.80/0.68/0.65 against 0.75/0.66/0.63) where before it read 1.01–1.03. See
+> `DECISIONS.md` 131–134, 140–141. The `ratio` column, which was computed over partials 14–26,
+> is *not* affected — those indices are correct — and it is the column that turned out to be
+> right.
+
 Three separate things are in that table.
 
 * **Wound bass strings (A0–D#1): `B` falls 25–37 % along the series.** Refitting A0's partials 2–24
@@ -289,6 +302,14 @@ the loudest partial.
 
 (dB; drift is the median over partials of |Δ(2 s) − Δ(0.3 s)|.)
 
+> **Update (Milestone A).** `voicing.polarization_pan_spread` gives the two polarizations
+> different pan positions, and `estimate::directivity` fits it by inverting a line measured on the
+> engine itself. Salamander's median drift over 28 sampled keys is 4.40 dB, which asks for a
+> spread of 0.49 against the engine's ceiling of 0.40; at the ceiling the same measurement on the
+> engine's renders returns 0.24 (A0), 1.26 (A2), 3.33 (C4), 8.67 (C5) and 5.59 (C7) against the
+> recordings' 1.24, 4.73, 3.96, 5.33 and 5.85 — the direction of the compass is right, the bass
+> still barely moves. `DECISIONS.md` 137–138.
+
 The *spread* is not diagnostic — the engine's diffuse field already scatters partials between the
 channels by 2–21 dB. The *drift* is: 1.2–6.2 dB in the recordings against 0.02–0.14 dB in the
 engine's, and the engine's is zero for a structural reason. It pans one mono voice per key, so the
@@ -316,6 +337,16 @@ The engine produces none of these sounds. The key-off thump alone is a −25 to 
 note release; the pedal-down rumble is a −36 dB, six-second, 70 Hz event on every pedal press. The
 `harm*` samples are a direct measurement of the halo §4 found missing in the treble, and give a
 target for the sympathetic-coupling fit: −31 dB at C3, −39 dB at C5, ringing for 1–2 s.
+
+> **Update (Milestone A).** The engine plays all of them, and the column above is the parameter
+> set (`DECISIONS.md` 108–115). Two corrections since: the levels in this table are ratios measured
+> at the *microphone*, so the engine's reference — a velocity-90 strike of the same key — is now
+> measured at its output rather than at the soundboard's input, per preset and per key
+> (`engine/src/calibrate.rs`); and a mechanism burst no longer inherits the filter state of a
+> finished one. Rendered against what each preset asks for, over nine keys and 16 events each, the
+> key-off moved from +2.3 dB (default) and +3.9 dB (salamander-c5) to −0.33 and −0.36 — the two
+> presets now agree to 0.03 dB — and the pedal events from +1.8/+3.8 (down) and +0.1/+1.6 (up) to
+> −0.3/−0.1 and −1.1/−1.1. `DECISIONS.md` 144–145.
 
 ## 6. Pitch: one refutation and one unexpected finding
 

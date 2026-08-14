@@ -7,36 +7,48 @@
 //! The chain, and the order the estimators must run in, is:
 //!
 //! ```text
-//! trajectories ─┬─> inharmonic::fit  ──────────────> f0, B
+//! trajectories ─┬─> inharmonic::fit  ──────────────> f0, B, B4
 //!               ├─> decay::fit_decays ─────────────> sigma(f), polarization split
 //!               │        │
 //!               │        ├─> unison::estimate ─────> detune
+//!               │        │        └─> spread::note_spread -> per-string sigma
 //!               │        └─> excitation spectrum
-//!               │                 ├─> strike::fit ─> strike position
+//!               │                 ├─> strike::fit ─> strike position, contact width
 //!               │                 └─> hammer::fit ─> K, p, mass, velocity map
 //!               └─> (across notes) compass::interpolate -> all 88 keys
+//!
+//! recordings of the action ──> noise::fit_noise ───> the [noise] section
+//! stereo recordings of notes ─> directivity::balance_drift -> pan spread
 //! ```
 //!
 //! Nothing here reads audio or does a transform; everything reads
-//! [`NoteTrajectories`](crate::trajectory::NoteTrajectories). That is what
-//! makes the estimators cheap to iterate on: the expensive STFT pass is cached
-//! to disk once and the fits run against it in milliseconds.
+//! [`NoteTrajectories`](crate::trajectory::NoteTrajectories), or — for
+//! [`noise`], whose material is a recording of the mechanism and has no
+//! partials to track — measurements a caller has already taken from one. That
+//! is what makes the estimators cheap to iterate on: the expensive STFT pass is
+//! cached to disk once and the fits run against it in milliseconds.
 
 pub mod compass;
 pub mod decay;
+pub mod directivity;
 pub mod hammer;
 pub mod inharmonic;
+pub mod noise;
+pub mod spread;
 pub mod strike;
 pub mod unison;
 
 pub use compass::{interpolate_keys, CompassCurve};
+pub use directivity::{balance_drift, pan_spread_for_drift, BalanceDrift, DirectivityConfig};
 pub use decay::{DecayConfig, DecayCurve, DecayFit, DecayReport, Exponential, PolarizationSplit};
 pub use hammer::{
     contact_pulse, fit_hammer, fit_velocity_map, ContactConfig, FeltParams, ForcePulse, HammerConfig,
     HammerFit, LayerSpectrum, SpectrumPoint, SpectrumWeighting, VelocityMap,
 };
-pub use inharmonic::{fit_inharmonic, InharmonicConfig, InharmonicFit};
-pub use strike::{fit_strike_position, StrikeConfig, StrikeFit};
+pub use inharmonic::{fit_inharmonic, BandRatio, InharmonicConfig, InharmonicFit};
+pub use noise::{fit_noise, EventMetrics, MechanismMeasurements, NoiseConfig};
+pub use spread::{note_spread, spread_from_drift, NoteSpread, SigmaSpread, SpreadConfig};
+pub use strike::{contact_taper, fit_strike_position, StrikeConfig, StrikeFit};
 pub use unison::{estimate_unison, BeatEstimate, UnisonConfig, UnisonEstimate};
 
 use crate::trajectory::NoteTrajectories;

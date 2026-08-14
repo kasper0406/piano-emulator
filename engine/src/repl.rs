@@ -11,7 +11,7 @@ use crate::render::{
     demo_sequence, default_sequence, render_to_wav, RenderEvent, DEFAULT_DURATION_S,
     DEMO_DURATION_S,
 };
-use crate::types::{Event, PedalEvent, HIGHEST_KEY, LOWEST_KEY};
+use crate::types::{Event, PedalEvent, DEFAULT_RELEASE_VELOCITY, HIGHEST_KEY, LOWEST_KEY};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -70,7 +70,9 @@ pub fn note_name(key: u8) -> String {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Note { key: u8, vel: u8 },
-    Off { key: u8 },
+    /// A key held down without a strike: the damper lifts and nothing sounds.
+    Hold { key: u8 },
+    Off { key: u8, vel: u8 },
     Chord { keys: Vec<u8>, vel: u8 },
     Pedal(PedalEvent),
     Demo,
@@ -118,7 +120,10 @@ fn is_midi_path(arg: &str) -> bool {
 
 const HELP: &str = "commands (notes are names like C4, F#3, Bb2; A4 = 440 Hz)
   n <note> [vel]           strike a note (vel 1-127, default 80)
-  off <note>               release a key
+  hold <note>              press a key silently: the damper lifts, nothing
+                           is struck (sostenuto will still catch it)
+  off <note> [rel]         release a key; rel 1-127 is the release velocity,
+                           which sets how fast the damper falls (default 64)
   chord <note>... [vel]    strike notes together
   ped sus <0..1>           sustain pedal, continuous (half-pedal works)
   ped sos <0|1>            sostenuto: captures the keys held right now
@@ -154,12 +159,25 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
             }
             Ok(Command::Note { key, vel })
         }
-        "off" => {
+        "hold" => {
             if args.len() != 1 {
-                return Err("usage: off <note>".into());
+                return Err("usage: hold <note>".into());
             }
+            Ok(Command::Hold {
+                key: note_arg(args.first())?,
+            })
+        }
+        "off" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err("usage: off <note> [rel]".into());
+            }
+            let vel = match args.get(1) {
+                Some(v) => velocity_arg(v)?,
+                None => DEFAULT_RELEASE_VELOCITY,
+            };
             Ok(Command::Off {
                 key: note_arg(args.first())?,
+                vel,
             })
         }
         "chord" => {
@@ -283,7 +301,11 @@ fn execute(command: Command, sender: &mut EventSender, preset: &Preset) {
             send(sender, Event::NoteOn { key, vel });
             println!("{} vel {vel}", note_name(key));
         }
-        Command::Off { key } => send(sender, Event::NoteOff { key }),
+        Command::Hold { key } => {
+            send(sender, Event::KeyDown { key });
+            println!("{} held silently", note_name(key));
+        }
+        Command::Off { key, vel } => send(sender, Event::NoteOff { key, vel }),
         Command::Chord { keys, vel } => {
             for key in &keys {
                 send(sender, Event::NoteOn { key: *key, vel });
@@ -383,9 +405,35 @@ mod tests {
             parse_command("N f#3 120"),
             Ok(Command::Note { key: 54, vel: 120 })
         );
-        assert_eq!(parse_command("off Bb2"), Ok(Command::Off { key: 46 }));
+        assert_eq!(
+            parse_command("off Bb2"),
+            Ok(Command::Off {
+                key: 46,
+                vel: DEFAULT_RELEASE_VELOCITY
+            })
+        );
         assert!(parse_command("n C4 200").is_err());
         assert!(parse_command("n").is_err());
+    }
+
+    /// The two commands `PHYSICS.md` §6 asks for: a key pressed without a
+    /// strike, and a release with a velocity of its own.
+    #[test]
+    fn a_key_can_be_held_silently_and_released_at_a_speed() {
+        assert_eq!(parse_command("hold C3"), Ok(Command::Hold { key: 48 }));
+        assert_eq!(parse_command("HOLD f#3"), Ok(Command::Hold { key: 54 }));
+        assert!(parse_command("hold").is_err());
+        assert!(parse_command("hold C3 90").is_err());
+        assert!(parse_command("hold X9").is_err());
+
+        assert_eq!(parse_command("off C4 20"), Ok(Command::Off { key: 60, vel: 20 }));
+        assert_eq!(
+            parse_command("off C4 127"),
+            Ok(Command::Off { key: 60, vel: 127 })
+        );
+        assert!(parse_command("off C4 0").is_err());
+        assert!(parse_command("off C4 20 extra").is_err());
+        assert!(parse_command("off").is_err());
     }
 
     #[test]

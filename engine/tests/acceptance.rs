@@ -7,7 +7,7 @@
 use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::string::StringParams;
-use piano_emulator::types::{key_index, Event, PedalEvent, SAMPLE_RATE};
+use piano_emulator::types::{key_index, Event, PedalEvent, BLOCK, SAMPLE_RATE};
 use rustfft::{num_complex::Complex32, FftPlanner};
 
 /// Every test runs the instrument as shipped — or, when `PIANO_PRESET` names a
@@ -31,6 +31,27 @@ fn preset() -> Preset {
 
 fn string_params(key: u8) -> StringParams {
     preset().string_params(key)
+}
+
+/// The same instrument with its action silenced.
+///
+/// The mechanism noise is a preset field like any other, so switching it off is
+/// something a preset can say rather than something the tests have to reach
+/// into the engine for. Used where a measurement is about the strings and a
+/// thump in the same window would answer a different question.
+fn silent_mechanism(mut preset: Preset) -> Preset {
+    for event in [
+        &mut preset.noise.key_off,
+        &mut preset.noise.damper_lift,
+        &mut preset.noise.pedal_down,
+        &mut preset.noise.pedal_up,
+    ] {
+        for anchor in &mut event.level_db {
+            anchor.db = -200.0;
+        }
+    }
+    preset.validate().expect("a silenced action is a legal preset");
+    preset
 }
 
 // ---------------------------------------------------------------- helpers
@@ -65,7 +86,7 @@ fn render_mono(events: &[RenderEvent], duration_s: f32) -> Vec<f32> {
 fn strike(key: u8, vel: u8, release_s: f32, duration_s: f32) -> Vec<f32> {
     let mut events = vec![RenderEvent::new(0.0, Event::NoteOn { key, vel })];
     if release_s < duration_s {
-        events.push(RenderEvent::new(release_s, Event::NoteOff { key }));
+        events.push(RenderEvent::new(release_s, Event::NoteOff { key, vel: 64 }));
     }
     render_mono(&events, duration_s)
 }
@@ -293,7 +314,7 @@ fn the_sustain_pedal_holds_a_released_note() {
         vec![
             RenderEvent::new(0.0, Event::Pedal(PedalEvent::Sustain(pedal))),
             RenderEvent::new(0.01, Event::NoteOn { key: KEY, vel: 90 }),
-            RenderEvent::new(RELEASE_S, Event::NoteOff { key: KEY }),
+            RenderEvent::new(RELEASE_S, Event::NoteOff { key: KEY, vel: 64 }),
         ]
     };
 
@@ -323,7 +344,7 @@ fn half_pedal_damps_partially() {
         let events = vec![
             RenderEvent::new(0.0, Event::Pedal(PedalEvent::Sustain(pedal))),
             RenderEvent::new(0.01, Event::NoteOn { key: 48, vel: 90 }),
-            RenderEvent::new(1.0, Event::NoteOff { key: 48 }),
+            RenderEvent::new(1.0, Event::NoteOff { key: 48, vel: 64 }),
         ];
         let y = render_mono(&events, 1.8);
         db(rms(window(&y, 1.6, 1.8)))
@@ -354,7 +375,7 @@ fn undamped_strings_resonate_with_the_ones_being_played() {
         let blocks = (1.5 * SAMPLE_RATE / BLOCK as f32) as usize;
         for b in 0..blocks {
             if b == (0.2 * SAMPLE_RATE / BLOCK as f32) as usize {
-                engine.handle_event(Event::NoteOff { key: 67 });
+                engine.handle_event(Event::NoteOff { key: 67, vel: 64 });
             }
             engine.process(&mut l, &mut r);
         }
@@ -382,7 +403,7 @@ fn the_pedal_down_halo_outlives_the_note() {
         let events = vec![
             RenderEvent::new(0.0, Event::Pedal(PedalEvent::Sustain(sustain))),
             RenderEvent::new(0.01, Event::NoteOn { key: 55, vel: 120 }),
-            RenderEvent::new(0.3, Event::NoteOff { key: 55 }),
+            RenderEvent::new(0.3, Event::NoteOff { key: 55, vel: 64 }),
         ];
         let y = render_mono(&events, 1.6);
         db(rms(window(&y, 1.3, 1.6)))
@@ -390,6 +411,62 @@ fn the_pedal_down_halo_outlives_the_note() {
     let halo = render(1.0);
     let dry = render(0.0);
     assert!(halo > dry + 30.0, "halo {halo:.1} dB vs dry {dry:.1} dB");
+}
+
+/// ... and a prepared string that picks up enough to be *heard* goes on
+/// ringing after the note that excited it has stopped. The idle and culling
+/// thresholds are a floor under the audible, not a gate on the gesture.
+///
+/// Measured on C3 alone, by subtracting a render in which C3 was never pressed
+/// from one in which it was pressed silently — the only way to see one string's
+/// contribution, since nothing else about the two renders differs.
+///
+/// The coupling is raised to the maximum a preset may ask for, and that is the
+/// point of the test rather than a convenience: at the shipped coupling C3
+/// picks up about -95 dBFS from a fortissimo G4, five decibels over the
+/// engine's own -100 dBFS audibility floor (`types::IDLE_ENERGY`), so there is
+/// nothing left to ring on with once the exciter stops — which is
+/// `TUNING_REPORT.md`'s backlog item 5, a stage-2 *coupling level*, and not a
+/// property of the thresholds. Raise the level and the persistence comes with
+/// it, which is what this asserts.
+#[test]
+fn a_prepared_string_rings_on_after_the_note_that_excited_it() {
+    const PREPARED: u8 = 48; // C3
+    const EXCITER: u8 = 67; // G4, which lands on C3's third partial
+    let mut preset = silent_mechanism(preset());
+    preset.voicing.resonance_coupling = piano_emulator::resonance::MAX_COUPLING;
+    preset.validate().expect("a strongly coupled instrument is a legal preset");
+
+    let render = |prepare: bool| {
+        let mut events = vec![
+            RenderEvent::new(0.5, Event::NoteOn { key: EXCITER, vel: 120 }),
+            RenderEvent::new(2.5, Event::NoteOff { key: EXCITER, vel: 64 }),
+        ];
+        if prepare {
+            events.push(RenderEvent::new(0.0, Event::KeyDown { key: PREPARED }));
+        }
+        render_to_buffer(&preset, &events, 5.5)
+    };
+    let ((hl, hr), (cl, cr)) = (render(true), render(false));
+    let alone: Vec<f32> = hl
+        .iter()
+        .zip(&cl)
+        .zip(hr.iter().zip(&cr))
+        .map(|((a, b), (c, d))| (a - b) + (c - d))
+        .collect();
+
+    let ringing = db(rms(window(&alone, 1.5, 2.5)));
+    // A second and a half after the exciter's damper landed.
+    let after = db(rms(window(&alone, 4.0, 5.0)));
+    assert!(
+        ringing > -120.0,
+        "the prepared string picked up nothing at all ({ringing:.0} dBFS)"
+    );
+    assert!(
+        after > ringing - 30.0,
+        "the prepared string was at {ringing:.0} dBFS under the note and {after:.0} dBFS \
+         a second and a half after it stopped: it was cut off, not left to decay"
+    );
 }
 
 // ---------------------------------------------------------- 6. stability
@@ -409,7 +486,7 @@ fn thirty_seconds_of_dense_playing_stays_safe() {
         let vel = 20 + (state >> 8) as u8 % 107;
         let t = i as f32 * 0.024;
         events.push(RenderEvent::new(t, Event::NoteOn { key, vel }));
-        events.push(RenderEvent::new(t + 0.35, Event::NoteOff { key }));
+        events.push(RenderEvent::new(t + 0.35, Event::NoteOff { key, vel: 64 }));
         if i % 100 == 0 {
             let pedal = if (i / 100) % 2 == 0 { 1.0 } else { 0.0 };
             events.push(RenderEvent::new(t, Event::Pedal(PedalEvent::Sustain(pedal))));
@@ -429,7 +506,447 @@ fn thirty_seconds_of_dense_playing_stays_safe() {
     assert!(sl.iter().chain(sr.iter()).all(|&v| v == 0.0));
 }
 
-// -------------------------------------------------------- 7. performance
+// ------------------------------------------------------- 7. the mechanism
+
+/// The peak of a whole render, as a level in dB.
+fn peak_db(events: &[RenderEvent], duration_s: f32) -> f32 {
+    db(peak(&render_mono(events, duration_s)))
+}
+
+/// Stereo magnitude `sqrt(l^2 + r^2)`, which an equal-power pan preserves — so
+/// two sounds at different pan positions can be compared by level.
+fn magnitude(left: &[f32], right: &[f32]) -> Vec<f32> {
+    left.iter()
+        .zip(right)
+        .map(|(&l, &r)| (l * l + r * r).sqrt())
+        .collect()
+}
+
+/// Peak of the stereo magnitude of a whole render, as an amplitude.
+fn magnitude_peak(events: &[RenderEvent], duration_s: f32) -> f32 {
+    let (l, r) = render_to_buffer(&preset(), events, duration_s);
+    peak(&magnitude(&l, &r))
+}
+
+fn range(from_s: f32, to_s: f32) -> std::ops::Range<usize> {
+    (from_s * SAMPLE_RATE) as usize..(to_s * SAMPLE_RATE) as usize
+}
+
+/// `TUNING_REPORT.md` §5, the second table: a key-off plays at -25 to -39 dB
+/// relative to a velocity-90 strike of the same key, and the engine made no
+/// sound at all. This is that column, measured back out of the finished chain.
+///
+/// What it is asserted against is the level the *preset* asks for, which for
+/// the shipped instrument is §5's own measured column and for an estimated
+/// preset is that piano's. That makes this a claim about the engine — a burst
+/// triggered at a level of `x` dB has to arrive at the ear `x` dB under the
+/// strike — rather than about which piano is loaded, and it is the claim that
+/// `calibrate.rs` exists to make true: the levels are quoted against a strike
+/// at the *output*, so the reference is measured through the board rather than
+/// assumed at its input.
+///
+/// Sixteen releases per key, averaged, because the peak of one realization of a
+/// short noise band is itself a random number and scatters by 2-3 dB
+/// (`DECISIONS.md` 114) — the *design* level is what is under test, and it is
+/// the mean of many events. The statistic is the peak of the stereo magnitude,
+/// which an equal-power pan preserves, so a key at the edge of the stage is
+/// compared with its own strike on equal terms.
+#[test]
+fn a_note_off_thumps_at_the_level_the_recordings_measured() {
+    use piano_emulator::types::{interp_anchors, key_position};
+
+    // key, and what `rel1`/`rel37`/`rel40`/`rel52`/`rel76` measured for it —
+    // the five anchors `presets/default.toml` is written from.
+    const MEASURED: [(u8, f32); 5] = [
+        (21, -37.3),
+        (57, -30.2),
+        (60, -35.4),
+        (72, -25.4),
+        (96, -33.5),
+    ];
+    let preset = preset();
+    let anchors: Vec<(f32, f32)> = preset
+        .noise
+        .key_off
+        .level_db
+        .iter()
+        .map(|a| (key_position(a.key), a.db))
+        .collect();
+
+    let mut total = 0.0f32;
+    for (key, table) in MEASURED {
+        let strike = magnitude_peak(&[RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })], 1.0);
+        // Releases of a key that is not down: the thump on its own, with no
+        // string sound anywhere near it. Spaced a second apart, which is four
+        // envelope lifetimes of the longest key-off in the table.
+        const RELEASES: usize = 16;
+        let releases: Vec<RenderEvent> = (0..RELEASES)
+            .map(|i| RenderEvent::new(i as f32, Event::NoteOff { key, vel: 64 }))
+            .collect();
+        let (l, r) = render_to_buffer(&preset, &releases, RELEASES as f32);
+        let magnitude = magnitude(&l, &r);
+        let thump: f32 = (0..RELEASES)
+            .map(|i| peak(&magnitude[range(i as f32, i as f32 + 1.0)]) / RELEASES as f32)
+            .sum();
+        assert!(
+            db(thump) > -80.0,
+            "key {key}: the note-off made no sound ({:.1} dBFS)",
+            db(thump)
+        );
+        let measured = db(thump) - db(strike);
+        let asked = interp_anchors(key_position(key), &anchors);
+        // Printed as well as asserted: how far the render sits from the level
+        // it was asked for is the number to look at when the board or the gain
+        // staging moves.
+        println!("key {key:>3}: rendered {measured:>6.1} dB, preset asks {asked:>6.1}, table {table:>6.1}");
+        // Two decibels per key and 1.2 across the compass, against the six and
+        // 2.5 this test allowed while the reference was a constant. What is
+        // left is the sampling error of the eight realizations `calibrate.rs`
+        // measures the board's peak gain from — the mean over the compass sits
+        // about 0.8 dB under the ask because those eight sit that far above the
+        // population — against the 2-3 dB by which each individual event is
+        // *meant* to scatter (`DECISIONS.md` 114).
+        assert!(
+            (measured - asked).abs() < 2.0,
+            "key {key}: the note-off renders at {measured:.1} dB re a strike where the \
+             preset asks for {asked:.1} (the recordings say {table:.1})"
+        );
+        total += measured - asked;
+    }
+    let mean = total / MEASURED.len() as f32;
+    assert!(
+        mean.abs() < 1.2,
+        "the key-off level is {mean:+.1} dB off what the preset asks across the compass"
+    );
+}
+
+/// `pedalD1` and `pedalU1`: -35.8 dB with a six-second 70 Hz rumble going down,
+/// -42.4 dB over 0.3 s coming up. The engine used to move the dampers in
+/// silence.
+#[test]
+fn the_pedal_makes_a_sound_going_down_and_coming_up() {
+    let strike = peak_db(
+        &[RenderEvent::new(0.0, Event::NoteOn { key: 60, vel: 90 })],
+        1.0,
+    );
+
+    let down = peak_db(
+        &[RenderEvent::new(
+            0.0,
+            Event::Pedal(PedalEvent::Sustain(1.0)),
+        )],
+        1.0,
+    );
+    assert!(
+        (down - strike + 35.8).abs() < 4.0,
+        "pedal down is {:.1} dB re a strike, recordings say -35.8",
+        down - strike
+    );
+
+    // Released long after the down rumble has gone, so what is measured is the
+    // release and not the tail of the press.
+    let events = [
+        RenderEvent::new(0.0, Event::Pedal(PedalEvent::Sustain(1.0))),
+        RenderEvent::new(8.0, Event::Pedal(PedalEvent::Sustain(0.0))),
+    ];
+    let y = render_mono(&events, 10.0);
+    let up = db(peak(window(&y, 8.0, 10.0)));
+    assert!(
+        (up - strike + 42.4).abs() < 4.0,
+        "pedal up is {:.1} dB re a strike, recordings say -42.4",
+        up - strike
+    );
+
+    // ... and the rumble really is a rumble: seconds long and low.
+    let rumble = render_mono(
+        &[RenderEvent::new(
+            0.0,
+            Event::Pedal(PedalEvent::Sustain(1.0)),
+        )],
+        6.0,
+    );
+    let late = db(rms(window(&rumble, 4.0, 5.0)));
+    let early = db(rms(window(&rumble, 0.1, 1.1)));
+    assert!(
+        late > early - 40.0,
+        "the pedal-down rumble is {:.1} dB down after four seconds, expected a six-second decay",
+        late - early
+    );
+}
+
+/// A pedal press that lifts nothing is nearly silent: the sound is the damper
+/// rail moving, so a chord held by the keys leaves it almost nothing to move.
+#[test]
+fn the_pedal_is_quiet_when_the_keys_already_hold_the_dampers() {
+    let mut everything = vec![];
+    for key in 21u8..=90 {
+        everything.push(RenderEvent::new(0.0, Event::KeyDown { key }));
+    }
+    everything.push(RenderEvent::new(0.5, Event::Pedal(PedalEvent::Sustain(1.0))));
+    let held = render_mono(&everything, 2.0);
+    let free = render_mono(
+        &[RenderEvent::new(
+            0.5,
+            Event::Pedal(PedalEvent::Sustain(1.0)),
+        )],
+        2.0,
+    );
+    let (a, b) = (
+        db(peak(window(&held, 0.5, 2.0))),
+        db(peak(window(&free, 0.5, 2.0))),
+    );
+    assert!(
+        a < b - 4.0,
+        "the pedal was as loud over a fully held keyboard ({a:.1} dB) as over an empty one ({b:.1})"
+    );
+}
+
+/// `PHYSICS.md` §6's first acceptance test: a key pressed too gently to reach
+/// escapement lifts its damper and nothing else, so that string answers a note
+/// struck elsewhere **with the pedal up** — the whole point of the gesture, and
+/// the thing the engine could not do at all.
+#[test]
+fn a_silently_held_key_answers_a_struck_note_with_the_pedal_up() {
+    use piano_emulator::engine::Engine;
+
+    let energy_of_c3 = |prepare: Option<Event>| {
+        let (mut engine, _tx) = Engine::new(&preset());
+        if let Some(event) = prepare {
+            engine.handle_event(event);
+        }
+        engine.handle_event(Event::NoteOn { key: 67, vel: 120 });
+        let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
+        let blocks = (1.5 * SAMPLE_RATE / BLOCK as f32) as usize;
+        for b in 0..blocks {
+            if b == (0.2 * SAMPLE_RATE / BLOCK as f32) as usize {
+                engine.handle_event(Event::NoteOff { key: 67, vel: 64 });
+            }
+            engine.process(&mut l, &mut r);
+        }
+        engine.voice(key_index(48).unwrap()).string().energy()
+    };
+
+    let silent_press = energy_of_c3(Some(Event::KeyDown { key: 48 }));
+    // The same gesture written as a velocity-zero note-on.
+    let too_soft_to_sound = energy_of_c3(Some(Event::NoteOn { key: 48, vel: 0 }));
+    let nothing = energy_of_c3(None);
+
+    assert!(
+        silent_press > nothing * 100.0,
+        "the silently held C3 picked up {silent_press:e} against {nothing:e} for a key at rest"
+    );
+    assert!(
+        too_soft_to_sound > nothing * 100.0,
+        "a velocity-zero note-on did not prepare the string"
+    );
+    // ... and it really was silent: preparing C3 must not have struck it. Its
+    // own answer is orders of magnitude below what the hammer would put there.
+    let struck = {
+        let (mut engine, _tx) = Engine::new(&preset());
+        engine.handle_event(Event::NoteOn { key: 48, vel: 0 });
+        let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
+        engine.process(&mut l, &mut r);
+        engine.voice(key_index(48).unwrap()).string().energy()
+    };
+    assert_eq!(struck, 0.0, "a silent press struck the string");
+    // ... while velocity 1 — a genuine pianissimo note in a recorded
+    // performance — must strike: no sounding velocity is a silent press.
+    let quietest = {
+        let (mut engine, _tx) = Engine::new(&preset());
+        engine.handle_event(Event::NoteOn { key: 48, vel: 1 });
+        let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
+        engine.process(&mut l, &mut r);
+        engine.voice(key_index(48).unwrap()).string().energy()
+    };
+    assert!(quietest > 0.0, "a velocity-1 note-on was swallowed as a silent press");
+}
+
+/// `PHYSICS.md` §6's second: how fast the key comes back sets how fast the
+/// damper falls, so a note let go slowly rings on where one dropped stops.
+///
+/// Measured on an instrument whose mechanism is silenced, because release
+/// velocity reaches *two* things — the damper's ramp and the key-off thump —
+/// and this is the claim about the damper. The thump's own velocity law is
+/// `noise::tests::release_velocity_moves_the_level_and_the_nominal_one_hits_
+/// the_table`.
+#[test]
+fn a_slow_release_rings_on_where_a_fast_one_stops() {
+    let preset = silent_mechanism(preset());
+    let after_release = |release_vel: u8| {
+        let events = [
+            RenderEvent::new(0.0, Event::NoteOn { key: 48, vel: 100 }),
+            RenderEvent::new(
+                1.0,
+                Event::NoteOff {
+                    key: 48,
+                    vel: release_vel,
+                },
+            ),
+        ];
+        let (l, r) = render_to_buffer(&preset, &events, 1.6);
+        let y: Vec<f32> = l.iter().zip(&r).map(|(a, b)| a + b).collect();
+        db(rms(window(&y, 1.15, 1.30)))
+    };
+    let slow = after_release(1);
+    let nominal = after_release(64);
+    let fast = after_release(127);
+    assert!(
+        slow > nominal + 2.0 && nominal >= fast,
+        "release velocity did not reach the damper: {slow:.1} / {nominal:.1} / {fast:.1} dB"
+    );
+}
+
+/// `PHYSICS.md` §6's third: a damper that is touching but not seated limits the
+/// string's deflection nonlinearly, so a half-pedalled note is not the same
+/// note with a bigger `σ`.
+///
+/// The control is exact rather than approximate. Half-pedalling multiplies the
+/// damper's extra decay rate by the pedal position, so an instrument whose
+/// `damper_sigma` is halved and whose damper is *fully* down has, partial by
+/// partial, exactly the damping of the first instrument at half pedal — and no
+/// partly-engaged damper anywhere, so no felt in contact. Same note, same
+/// linear damping: the only thing left between them is the nonlinearity.
+///
+/// Both are rendered with the mechanism silent and the sympathetic bus
+/// uncoupled, because the pedal move that produces the half-pedal also makes a
+/// tray noise and lifts the whole instrument's dampers, and either of those
+/// would answer the question instead of the felt.
+#[test]
+fn a_half_pedalled_note_is_not_merely_a_faster_decay() {
+    const KEY: u8 = 48;
+    let render = |half: bool| {
+        let mut preset = silent_mechanism(preset());
+        preset.voicing.resonance_coupling = 0.0;
+        let sustain = if half {
+            0.5
+        } else {
+            for sigma in &mut preset.notes.damper_sigma {
+                *sigma *= 0.5;
+            }
+            0.0
+        };
+        let events = [
+            RenderEvent::new(0.0, Event::NoteOn { key: KEY, vel: 120 }),
+            RenderEvent::new(1.0, Event::Pedal(PedalEvent::Sustain(sustain))),
+            RenderEvent::new(1.0, Event::NoteOff { key: KEY, vel: 64 }),
+        ];
+        let (l, r) = render_to_buffer(&preset, &events, 2.0);
+        l.iter().zip(&r).map(|(a, b)| a + b).collect::<Vec<f32>>()
+    };
+    let (half, linear) = (render(true), render(false));
+
+    // The felt in contact takes energy out as well as colouring what is left,
+    // but the two notes have to stay comparable or "the spectrum differs" would
+    // only be saying that one of them is quieter.
+    let level = |y: &[f32]| db(rms(window(y, 1.0, 1.05)));
+    assert!(
+        (level(&half) - level(&linear)).abs() < 6.0,
+        "the control is not level-matched: {:.1} against {:.1} dB",
+        level(&half),
+        level(&linear)
+    );
+
+    // What a soft limit does that a decay rate cannot: fold the waveform, and
+    // put energy where the note's own partials are not. Read as the balance
+    // between the top of the spectrum and the fundamental region — which a
+    // linear damper can only move the *other* way, because the felt's
+    // frequency response grips low partials hardest.
+    const FFT: usize = 1 << 15;
+    let colour = |y: &[f32]| {
+        let mag = spectrum(window(y, 1.0, 1.05), FFT);
+        let bin = |f: f32| (f * FFT as f32 / SAMPLE_RATE) as usize;
+        let band = |lo: f32, hi: f32| {
+            mag[bin(lo)..bin(hi).min(mag.len())]
+                .iter()
+                .map(|m| m * m)
+                .sum::<f32>()
+        };
+        db(band(1_500.0, 6_000.0).sqrt() / band(100.0, 400.0).sqrt())
+    };
+    let (bright, plain) = (colour(&half), colour(&linear));
+    assert!(
+        bright > plain + 3.0,
+        "half pedal is only {:.1} dB brighter than the same damping applied linearly \
+         ({bright:.1} against {plain:.1}); the felt is doing nothing a bigger sigma \
+         could not",
+        bright - plain
+    );
+}
+
+/// ... and the felt limits the string only while it is *arriving*: a key struck
+/// again after it was released must have the attack it has from silence, and it
+/// must not depend on how loud the note before it was.
+///
+/// The engine starts the damper's lift and the hammer's blow at the same
+/// instant, so for the first ~10 ms of every re-strike the damper is between
+/// the string and its rest position; the real action lifts the damper early in
+/// the key's travel and has it clear before the hammer arrives. When the
+/// limiter did not test the damper's *direction* it spent those two blocks
+/// clamping the new attack against the level the *previous* note had when its
+/// damper landed — 27 to 68 dB of choke on the first two blocks here, and 23 dB
+/// of it purely historical. Measured on the attack transient itself, in 3 ms
+/// windows: nothing else in the engine has that time constant, and a whole-note
+/// level would average the effect away.
+///
+/// The mechanism is silenced because a key-off thump and a damper-lift burst
+/// both land inside the windows this reads.
+#[test]
+fn a_restrike_attacks_like_a_strike_from_silence() {
+    const KEY: u8 = 60;
+    const AT: f32 = 3.0;
+    let preset = silent_mechanism(preset());
+    let attack = |previous: Option<u8>| -> Vec<f32> {
+        let mut events = Vec::new();
+        if let Some(vel) = previous {
+            events.push(RenderEvent::new(0.0, Event::NoteOn { key: KEY, vel }));
+            events.push(RenderEvent::new(1.0, Event::NoteOff { key: KEY, vel: 64 }));
+        }
+        events.push(RenderEvent::new(AT, Event::NoteOn { key: KEY, vel: 120 }));
+        let (l, r) = render_to_buffer(&preset, &events, AT + 0.05);
+        let mono: Vec<f32> = l.iter().zip(&r).map(|(a, b)| a + b).collect();
+        [(0.0, 0.003), (0.003, 0.006), (0.006, 0.010), (0.010, 0.020)]
+            .iter()
+            .map(|&(a, b)| db(rms(window(&mono, AT + a, AT + b))))
+            .collect()
+    };
+    let clean = attack(None);
+    let after_soft = attack(Some(30));
+    let after_loud = attack(Some(120));
+    // Nothing of the earlier note is left to add to the new one: whatever the
+    // windows below show is the new strike, not a sum.
+    let (l, r) = render_to_buffer(
+        &preset,
+        &[
+            RenderEvent::new(0.0, Event::NoteOn { key: KEY, vel: 120 }),
+            RenderEvent::new(1.0, Event::NoteOff { key: KEY, vel: 64 }),
+        ],
+        AT,
+    );
+    let residual: Vec<f32> = l.iter().zip(&r).map(|(a, b)| a + b).collect();
+    assert!(
+        db(rms(window(&residual, AT - 0.1, AT))) < db(rms(window(&residual, 0.0, 0.02))) - 100.0,
+        "the released note is still ringing where the re-strike is measured"
+    );
+
+    for (i, (&c, (&soft, &loud))) in clean
+        .iter()
+        .zip(after_soft.iter().zip(&after_loud))
+        .enumerate()
+    {
+        assert!(
+            (soft - c).abs() < 1.0 && (loud - c).abs() < 1.0,
+            "window {i}: the re-strike attacks at {soft:.1} / {loud:.1} dB against \
+             {c:.1} dB from silence"
+        );
+        assert!(
+            (soft - loud).abs() < 0.5,
+            "window {i}: the re-strike's attack depends on the previous note's level \
+             ({soft:.1} dB after a pp note, {loud:.1} after a ff one)"
+        );
+    }
+}
+
+// -------------------------------------------------------- 8. performance
 
 /// The spec's worst case: sustain pedal down and a glissando that leaves all 88
 /// keys ringing, so every string is live and every undamped string is also
@@ -448,7 +965,7 @@ fn the_worst_case_fits_the_performance_budget() {
     for (i, key) in (21u8..=108).enumerate() {
         let t = i as f32 * 0.02;
         events.push(RenderEvent::new(t, Event::NoteOn { key, vel: 90 }));
-        events.push(RenderEvent::new(t + 0.1, Event::NoteOff { key }));
+        events.push(RenderEvent::new(t + 0.1, Event::NoteOff { key, vel: 64 }));
     }
 
     let start = std::time::Instant::now();

@@ -28,6 +28,14 @@ use crate::types::{db_to_amp, key_position, BLOCK, OUTPUT_GAIN, SAMPLE_RATE};
 /// Maximum pan displacement; bass to the left, treble to the right.
 const MAX_PAN: f32 = 0.6;
 
+/// Largest displacement `voicing.polarization_pan_spread` may put between the
+/// two polarizations of one key, either side of that key's own pan.
+///
+/// `MAX_PAN + MAX_PAN_SPREAD` is 1: at the ceiling the outer polarization of
+/// the outermost key lands hard left or hard right, and no setting can ask
+/// [`Soundboard::add_voice`] for a position off the stage.
+pub const MAX_PAN_SPREAD: f32 = 0.4;
+
 /// DC blocker corner frequency, Hz.
 const DC_BLOCK_HZ: f32 = 10.0;
 

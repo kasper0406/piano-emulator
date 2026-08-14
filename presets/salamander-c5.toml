@@ -1,19 +1,7 @@
-# Estimated from the Salamander Grand Piano V3 (a Yamaha C5), recorded by
-# Alexander Holm and published under CC-BY 3.0
-# <http://creativecommons.org/licenses/by/3.0/>. FLAC release assembled for
-# FreePats by roberto@zenvoid.org
-# <https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html>; fetched by
-# data/fetch_salamander.sh.
-# Produced by piano-tuner (TUNING.md phase D) from 480 recordings, 30 keys x
-# 16 velocity layers. Measured here: the tuning (a Railsback stretch),
-# inharmonicity, the damping law and the unison detuning. Everything the
-# recordings cannot identify - strike position, felt, soundboard, coupling,
-# dampers - is inherited unchanged from presets/default.toml.
+# Salamander Grand Piano V3 (Yamaha C5) by Alexander Holm, CC-BY 3.0
 
 name = "salamander-c5"
-description = """
-estimated by piano-tuner from data/salamander/SalamanderGrandPiano-V3+20200602.sfz; Estimated from the Salamander Grand Piano V3 (a Yamaha C5), recorded by Alexander Holm and published under CC-BY 3.0 <http://creativecommons.org/licenses/by/3.0/>. FLAC release assembled for FreePats by roberto@zenvoid.org <https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html>; fetched by data/fetch_salamander.sh.
-Produced by piano-tuner (TUNING.md phase D) from 480 recordings, 30 keys x 16 velocity layers. Measured here: the tuning (a Railsback stretch), inharmonicity, the damping law and the unison detuning. Everything the recordings cannot identify - strike position, felt, soundboard, coupling, dampers - is inherited unchanged from presets/default.toml."""
+description = "estimated by piano-tuner from data/salamander/SalamanderGrandPiano-V3+20200602.sfz; Salamander Grand Piano V3 (Yamaha C5) by Alexander Holm, CC-BY 3.0"
 
 [voicing]
 excitation_scale = 0.4
@@ -26,6 +14,7 @@ horizontal_offset_hz = [
 ]
 unison_coupling = 0.02
 resonance_coupling = 0.012
+polarization_pan_spread = 0.4
 
 [[voicing.unison_layout]]
 detune = [0.0]
@@ -51,6 +40,22 @@ share = [
     1.09,
     1.0,
     0.91,
+]
+
+[[voicing.unison_sigma_scale]]
+scale = [1.0]
+
+[[voicing.unison_sigma_scale]]
+scale = [
+    1.0,
+    1.0,
+]
+
+[[voicing.unison_sigma_scale]]
+scale = [
+    0.87782794,
+    1.0,
+    1.1221721,
 ]
 
 [[voicing.damper_weight]]
@@ -208,18 +213,18 @@ gain = 0.3
 
 [notes]
 f0_hz = [
-    27.088484,
-    28.669193,
-    30.342144,
-    32.131073,
-    34.0535,
-    36.115005,
-    38.325253,
-    40.714027,
-    43.278732,
+    27.111351,
+    28.723995,
+    30.433792,
+    32.248817,
+    34.20945,
+    36.32845,
+    38.565025,
+    40.90092,
+    43.362923,
     45.97137,
-    48.7693,
-    51.699707,
+    48.746773,
+    51.687763,
     54.78131,
     58.029297,
     61.46125,
@@ -227,20 +232,20 @@ f0_hz = [
     69.022156,
     73.216034,
     77.62086,
-    82.233055,
-    87.11624,
-    92.29265,
-    97.817,
-    103.70505,
+    82.23226,
+    87.113846,
+    92.28923,
+    97.814316,
+    103.704056,
     109.91251,
     116.38624,
     123.185005,
     130.44046,
-    138.23749,
-    146.53749,
-    155.2967,
-    164.48288,
-    174.16864,
+    138.23538,
+    146.53111,
+    155.28758,
+    164.47572,
+    174.16599,
     184.47113,
     195.5746,
     207.46846,
@@ -248,11 +253,11 @@ f0_hz = [
     233.01773,
     246.83887,
     261.4968,
-    277.05627,
-    293.5507,
-    311.01743,
-    329.43106,
-    348.86188,
+    277.05435,
+    293.54483,
+    311.00906,
+    329.4245,
+    348.85944,
     369.51608,
     391.61624,
     415.19128,
@@ -298,15 +303,15 @@ f0_hz = [
     4250.9663,
 ]
 inharmonicity_b = [
-    0.0003134808,
-    0.00029703244,
-    0.00028144714,
-    0.0002698814,
-    0.00026455714,
-    0.00025740554,
-    0.00023705146,
-    0.00017444383,
-    0.00011258875,
+    0.0002971601,
+    0.0002753052,
+    0.00025505765,
+    0.0002370311,
+    0.0002261479,
+    0.00021643266,
+    0.00019440502,
+    0.00014824972,
+    0.000106104715,
     0.000090094756,
     0.00009054273,
     0.00009138059,
@@ -314,38 +319,38 @@ inharmonicity_b = [
     0.00009182154,
     0.00009172768,
     0.000091473405,
-    0.00008838399,
-    0.00008274808,
+    0.00008836075,
+    0.00008270457,
     0.00007843871,
-    0.00007647059,
-    0.00007548256,
-    0.00007520714,
-    0.00007567887,
-    0.00007748341,
+    0.00007665179,
+    0.000075900556,
+    0.000075743024,
+    0.00007609795,
+    0.00007766701,
     0.00008130038,
-    0.000088849374,
-    0.0000995098,
+    0.00008879477,
+    0.000099465964,
     0.00010959067,
-    0.00011573385,
-    0.0001201831,
-    0.0001269756,
-    0.00013924294,
-    0.00015535313,
+    0.00011582642,
+    0.00012040752,
+    0.00012728054,
+    0.00013950295,
+    0.00015547739,
     0.00017183521,
-    0.00018577882,
-    0.0001991249,
+    0.00018574581,
+    0.0001991072,
     0.00021513563,
-    0.00023666669,
-    0.00026243352,
+    0.0002366459,
+    0.00026238742,
     0.0002893536,
-    0.00031433618,
-    0.00033953713,
-    0.00036973655,
-    0.0004102572,
-    0.000458915,
+    0.00031458485,
+    0.00034016417,
+    0.0003706147,
+    0.00041101483,
+    0.00045927803,
     0.0005081196,
-    0.0005510049,
-    0.00059142895,
+    0.0005509081,
+    0.00059137703,
     0.00063688104,
     0.00069115066,
     0.00075248134,
@@ -386,6 +391,96 @@ inharmonicity_b = [
     0.015282616,
     0.016694179,
     0.018236129,
+]
+inharmonicity_b4 = [
+    -0.00000003810467,
+    -0.0000000196363,
+    -0.000000020220265,
+    -0.000000020485702,
+    -0.00000002038388,
+    -0.000000019671125,
+    -0.000000017736506,
+    -0.000000023832573,
+    -0.000000015949682,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -0.00000000024656213,
+    -0.0000000007044632,
+    -0.0000000009510254,
+    -0.0000000007044632,
+    -0.00000000024656213,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
 ]
 strike_position = [
     0.12,
@@ -1377,3 +1472,103 @@ hammer_exponent = [
     2.991954,
     3.0,
 ]
+
+[noise.key_off]
+centroid_hz = 213.49332
+decay_s = 0.2425
+velocity_db = 24.0
+
+[[noise.key_off.level_db]]
+key = 21
+db = -37.079247
+
+[[noise.key_off.level_db]]
+key = 33
+db = -36.054363
+
+[[noise.key_off.level_db]]
+key = 45
+db = -34.452656
+
+[[noise.key_off.level_db]]
+key = 57
+db = -33.219246
+
+[[noise.key_off.level_db]]
+key = 69
+db = -30.424719
+
+[[noise.key_off.level_db]]
+key = 81
+db = -30.059673
+
+[[noise.key_off.level_db]]
+key = 93
+db = -30.830404
+
+[[noise.key_off.level_db]]
+key = 105
+db = -30.129309
+
+[[noise.key_off.level_db]]
+key = 108
+db = -30.915344
+
+[noise.damper_lift]
+centroid_hz = 341.58932
+decay_s = 0.08083333
+velocity_db = 24.0
+
+[[noise.damper_lift.level_db]]
+key = 21
+db = -43.079247
+
+[[noise.damper_lift.level_db]]
+key = 33
+db = -42.054363
+
+[[noise.damper_lift.level_db]]
+key = 45
+db = -40.452656
+
+[[noise.damper_lift.level_db]]
+key = 57
+db = -39.219246
+
+[[noise.damper_lift.level_db]]
+key = 69
+db = -36.42472
+
+[[noise.damper_lift.level_db]]
+key = 81
+db = -36.059673
+
+[[noise.damper_lift.level_db]]
+key = 93
+db = -36.830402
+
+[[noise.damper_lift.level_db]]
+key = 105
+db = -36.12931
+
+[[noise.damper_lift.level_db]]
+key = 108
+db = -36.915344
+
+[noise.pedal_down]
+centroid_hz = 72.813416
+decay_s = 5.985
+velocity_db = 6.0
+
+[[noise.pedal_down.level_db]]
+key = 21
+db = -38.31421
+
+[noise.pedal_up]
+centroid_hz = 166.47305
+decay_s = 0.3425
+velocity_db = 6.0
+
+[[noise.pedal_up.level_db]]
+key = 21
+db = -45.6083

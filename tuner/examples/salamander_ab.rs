@@ -100,8 +100,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         write_matched(&out, &group)?;
     }
+
+    // The mechanism, on the estimated preset: one file, because what it is
+    // being compared with is a piano rather than another preset.
+    let (_, salamander) = &presets[1];
+    write_matched(
+        &out,
+        &[(
+            "mechanism_demo".to_string(),
+            render_to_buffer(salamander, &mechanism_phrase(), MECHANISM_DURATION_S),
+        )],
+    )?;
     println!("wrote {}", out.display());
     Ok(())
+}
+
+const MECHANISM_DURATION_S: f32 = 26.0;
+
+/// A phrase written around the sounds the strings do not make.
+///
+/// Five things happen in it, in the order a pianist would meet them:
+///
+/// 1. **Staccato, released fast** — six short notes let go at release velocity
+///    110, which is the loudest key-off the model has. The thump is the point;
+///    the notes are short so that it is not buried.
+/// 2. **The same figure released slowly** — release velocity 8. The dampers
+///    take 50 ms rather than 2 to land, so the notes ring on into each other
+///    and the mechanism is quiet: the contrast is the parameter.
+/// 3. **The pedal** — down (a six-second 70 Hz rumble under a chord), then up
+///    while the chord is still ringing, so the tray's landing arrives on top of
+///    every damper landing at once.
+/// 4. **Silently held keys** — a bass octave pressed below escapement, which
+///    lifts its dampers and sounds nothing, then a loud staccato chord two
+///    octaves above. What rings on after the chord is released is the held
+///    strings answering it, and then those keys are let go too.
+/// 5. **A half pedal** — the same bass octave struck and the pedal taken to
+///    0.45, where the felt is touching the string without seating on it.
+fn mechanism_phrase() -> Vec<RenderEvent> {
+    let mut events: Vec<RenderEvent> = Vec::new();
+    fn note(
+        events: &mut Vec<RenderEvent>,
+        at: f32,
+        key: u8,
+        vel: u8,
+        hold: f32,
+        release: u8,
+    ) {
+        events.push(RenderEvent::new(at, Event::NoteOn { key, vel }));
+        events.push(RenderEvent::new(
+            at + hold,
+            Event::NoteOff { key, vel: release },
+        ));
+    }
+
+    // 1. staccato, let go as fast as the model allows
+    for (i, key) in [60u8, 64, 67, 72, 67, 64].into_iter().enumerate() {
+        note(&mut events, 0.2 + 0.30 * i as f32, key, 78, 0.14, 110);
+    }
+    // 2. the same figure, let go as slowly as the model allows
+    for (i, key) in [60u8, 64, 67, 72, 67, 64].into_iter().enumerate() {
+        note(&mut events, 2.4 + 0.30 * i as f32, key, 78, 0.14, 8);
+    }
+
+    // 3. the pedal, under a chord that is still ringing when it comes up
+    events.push(RenderEvent::new(4.6, Event::Pedal(PedalEvent::Sustain(1.0))));
+    for key in [41u8, 53, 57, 60, 65] {
+        note(&mut events, 5.0, key, 84, 0.35, 64);
+    }
+    events.push(RenderEvent::new(9.2, Event::Pedal(PedalEvent::Sustain(0.0))));
+
+    // 4. the silent press: dampers up, nothing struck, then a chord into them
+    for key in [33u8, 45] {
+        events.push(RenderEvent::new(10.4, Event::KeyDown { key }));
+    }
+    for key in [69u8, 73, 76] {
+        note(&mut events, 11.2, key, 108, 0.18, 96);
+    }
+    for key in [33u8, 45] {
+        events.push(RenderEvent::new(16.0, Event::NoteOff { key, vel: 32 }));
+    }
+
+    // 5. the half pedal: the felt touching the string without seating on it
+    for key in [33u8, 45] {
+        events.push(RenderEvent::new(17.5, Event::NoteOn { key, vel: 104 }));
+    }
+    events.push(RenderEvent::new(19.0, Event::Pedal(PedalEvent::Sustain(1.0))));
+    for key in [33u8, 45] {
+        events.push(RenderEvent::new(19.2, Event::NoteOff { key, vel: 64 }));
+    }
+    events.push(RenderEvent::new(20.5, Event::Pedal(PedalEvent::Sustain(0.45))));
+    events.push(RenderEvent::new(23.0, Event::Pedal(PedalEvent::Sustain(0.0))));
+
+    events.sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+    events
 }
 
 type Stereo = (Vec<f32>, Vec<f32>);
@@ -115,7 +206,7 @@ fn pedal_phrase() -> Vec<RenderEvent> {
     let mut strike = |at: f32, keys: &[u8], vel: u8, hold: f32| {
         for &key in keys {
             events.push(RenderEvent::new(at, Event::NoteOn { key, vel }));
-            events.push(RenderEvent::new(at + hold, Event::NoteOff { key }));
+            events.push(RenderEvent::new(at + hold, Event::NoteOff { key, vel: 64 }));
         }
     };
     strike(0.05, &[33, 45], 96, 0.6);

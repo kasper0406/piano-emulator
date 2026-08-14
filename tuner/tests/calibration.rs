@@ -50,6 +50,10 @@ use piano_tuner::estimate::hammer::{
     fit_hammer, fit_velocity_map, ContactConfig, FeltParams, HammerConfig, LayerSpectrum,
     SpectrumWeighting,
 };
+use piano_tuner::estimate::directivity::{
+    balance_drift, pan_spread_for_drift, DirectivityConfig, DRIFT_AT_ZERO_DB, DRIFT_PER_SPREAD_DB,
+};
+use piano_tuner::estimate::spread::{note_spread, SpreadConfig};
 use piano_tuner::estimate::{DecayConfig, StrikeConfig};
 use piano_tuner::pipeline::{analyze_note, NoteAnalysis, NoteConfig};
 use piano_tuner::preset::{equal_temperament, key_index, Preset, PresetBuilder};
@@ -672,6 +676,346 @@ fn the_felt_and_the_velocity_map_come_back_from_a_velocity_ladder() {
     .velocity_map(map)
     .build()
     .expect("the velocity map makes a valid preset");
+}
+
+// ------------------------------------------------ the refinements of Phase E
+//
+// Three parameters the engine gained after `TUNING_REPORT.md`: the signed
+// fourth-order inharmonicity of §1, the per-string decay spread of §6 and the
+// hammer's contact width of `PHYSICS.md` §7. Each is rendered into a preset,
+// played, and asked for back. The control in every case is the *same note from
+// the unmodified preset*, where the parameter is zero: an estimator that
+// returns the right answer on the modified render and something nonzero on the
+// neutral one has measured its own noise, not the instrument.
+
+/// The gate preset with one key's fourth-order coefficient set.
+fn preset_with_b4(pairs: &[(u8, f32)]) -> EnginePreset {
+    let mut preset = gate_preset();
+    for &(key, b4) in pairs {
+        preset.notes.inharmonicity_b4[key_index(key).expect("a key")] = b4;
+    }
+    EnginePreset::from_toml(&preset.to_toml()).expect("a preset the engine accepts")
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+fn a_known_fourth_order_inharmonicity_comes_back_within_a_tenth() {
+    // Both signs of `TUNING_REPORT.md` §1's finding, at C2 — the note where §1
+    // measured the ratio inverting, and the one whose forty tracked partials
+    // are measured well enough for the two-band test to resolve the
+    // disagreement. `+3e-8` is worth 51 cents at partial 40 and `-2e-8` 34, so
+    // both stay inside the tracker's 60-cent association window: past that the
+    // seed model is the two-parameter one and the tracker follows the wrong
+    // peaks, which is the ceiling on how large a `B4` this pipeline can measure
+    // rather than a property of the fit.
+    //
+    // A1 is not asserted, and the reason is worth recording: the same
+    // coefficients there stand 1.3-1.7 sigma from a flat ratio instead of
+    // 2.1-2.4, so the guard reports zero. Its high band is measured half as
+    // well (a jackknife sigma of 0.11-0.15 on the ratio against C2's 0.06-0.08)
+    // and the wound-bass side is bounded anyway: A1 is built with all eighty
+    // partials, and a coefficient past -2.6e-8 folds the top of that series
+    // back down and is refused by both crates.
+    let truth: [(u8, f32); 2] = [(36, 3.0e-8), (36, -2.0e-8)];
+    let neutral = gate_preset();
+    for &(key, b4) in &truth {
+        let preset = preset_with_b4(&[(key, b4)]);
+        let fit = analyze(&preset, key, 90, 20.0).inharmonic;
+        let bands = fit.bands.expect("two bands");
+        println!(
+            "key {key}: B4 {:+.3e} vs {b4:+.3e} ({:+.1} %), bands {:.3} +- {:.3} \
+             ({:.1} sigma), residual {:.3} c against {:.3} c two-parameter",
+            fit.model.b4,
+            100.0 * (fit.model.b4 / f64::from(b4) - 1.0),
+            bands.ratio(),
+            bands.sigma(),
+            bands.sigmas_from_one(),
+            fit.residual_cents,
+            fit.residual_cents_2,
+        );
+        assert!(fit.is_fourth_order(), "key {key}: no fourth-order term fitted");
+        assert!(
+            (fit.model.b4 / f64::from(b4) - 1.0).abs() < 0.10,
+            "key {key}: B4 {:+.4e} vs {b4:+.4e}",
+            fit.model.b4
+        );
+        // The term earns its place: it is the difference between placing this
+        // note's partials and not placing them.
+        assert!(fit.residual_cents < fit.residual_cents_2, "key {key}");
+
+        // The control: the same note from the same preset with the coefficient
+        // at zero comes back at zero, because the two bands agree.
+        let control = analyze(&neutral, key, 90, 20.0).inharmonic;
+        println!(
+            "key {key}: control B4 {:+.3e}, bands {:.3} ({:.1} sigma)",
+            control.model.b4,
+            control.bands.map_or(f64::NAN, |b| b.ratio()),
+            control.bands.map_or(f64::NAN, |b| b.sigmas_from_one()),
+        );
+        assert_eq!(
+            control.model.b4, 0.0,
+            "key {key}: a two-parameter render was given a fourth-order term"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+fn a_known_per_string_decay_spread_comes_back_from_a_beating_unison() {
+    // C4: three strings, 2.83 cents wide, with the outer two decaying 25 %
+    // either side of the note's own law. That is what `TUNING_REPORT.md` §6
+    // says a real tenor note does and the engine could not: the composite
+    // fundamental's measured pitch drifts as the slow string takes over.
+    //
+    // Two numbers come out of this and only one of them is a percentage. The
+    // *signature* is unambiguous — a drift that moves by more than a cent when
+    // the spread is put in, against an instrument whose own control drifts by a
+    // fraction of one. The *size* is good to a factor of two, and the reason is
+    // in `estimate::spread`'s header: the inversion divides the drift by the
+    // unison's width, and this instrument's two polarizations are offset by
+    // 1.8-3.4 cents at C4 — a second pair, wider than the unison, handing over
+    // at the same time.
+    const KEY: u8 = 60;
+    const TRUTH: f64 = 0.25;
+    let index = key_index(KEY).expect("a key");
+    let detune = f64::from(gate_preset().notes.detune_cents[index]);
+    let with_spread = |truth: f64| {
+        let mut preset = gate_preset();
+        preset.voicing.unison_sigma_scale[2].scale =
+            vec![1.0 - truth as f32, 1.0, 1.0 + truth as f32];
+        EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset")
+    };
+    let drift = |preset: &EnginePreset, config: &SpreadConfig| {
+        let analysis = analyze(preset, KEY, 90, 10.0);
+        note_spread(KEY, 3, detune, &analysis.trajectories, config)
+    };
+
+    // The control first: what this instrument's C4 does with one damping law.
+    // It is not zero — the strings are coupled through the bridge and the two
+    // polarizations are a pair of their own — and it is the baseline the
+    // inversion is given.
+    let plain = SpreadConfig::default();
+    let control = drift(&gate_preset(), &plain).drift_cents().expect("a drift");
+    let measured = drift(&with_spread(TRUTH), &plain);
+    let moved = measured.drift_cents().expect("a drift") - control;
+    println!(
+        "C4: drift {:.2} c with the spread, {control:.2} c on one damping law ({moved:+.2} c)",
+        measured.drift_cents().unwrap_or(f64::NAN),
+    );
+    assert!(
+        moved > 1.0,
+        "putting a 25 % spread in moved the fundamental by {moved:+.2} cents"
+    );
+
+    // ... and with the baseline named, the size of the spread comes back.
+    let config = SpreadConfig {
+        baseline_cents: control,
+        ..plain
+    };
+    let recovered = drift(&with_spread(TRUTH), &config)
+        .spread
+        .expect("a measured spread");
+    let neutral = drift(&gate_preset(), &config).spread;
+    println!(
+        "C4: s {recovered:.3} against {TRUTH} ({:+.0} %); the control returns {neutral:?}",
+        100.0 * (recovered / TRUTH - 1.0)
+    );
+    assert!(
+        (0.5 * TRUTH..=2.0 * TRUTH).contains(&recovered),
+        "s = {recovered:.3} against {TRUTH}"
+    );
+    // The control has to come back with nothing to report, or the estimator is
+    // measuring the instrument rather than the spread.
+    assert_eq!(neutral, Some(0.0), "a shared damping law returned {neutral:?}");
+}
+
+/// The pan spread is the one parameter whose inversion is a measured constant
+/// rather than a model (`estimate::directivity`), so the constant is what this
+/// checks — on the engine, which is the instrument it was measured on.
+///
+/// Two claims, both about the finished chain rather than about the arithmetic:
+/// the drift a spread produces is a straight line through
+/// `DRIFT_AT_ZERO_DB + DRIFT_PER_SPREAD_DB * s`, and putting the measured drift
+/// back through [`pan_spread_for_drift`] returns the spread that was rendered.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+fn the_pan_spread_comes_back_from_the_drift_it_puts_in_the_image() {
+    // The keys `estimate::directivity`'s constants were measured over, minus
+    // the two lowest: at A0 and A1 the note is panned so far left that the
+    // spread has almost nowhere to move it, and this test is about the
+    // constant rather than about the compass. Their drift is in the survey's
+    // own table.
+    const KEYS: [u8; 6] = [45, 57, 60, 72, 84, 96];
+    let config = DirectivityConfig::default();
+    let survey = piano_tuner::survey::SurveyConfig::default();
+
+    let median_drift = |spread: f32| -> f64 {
+        let mut preset = gate_preset();
+        preset.voicing.polarization_pan_spread = spread;
+        let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
+        let mut drifts: Vec<f64> = KEYS
+            .iter()
+            .filter_map(|&key| {
+                let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })];
+                let (left, right) = render_to_buffer(&preset, &events, 8.0);
+                let note_config = survey.note_config(equal_temperament(key)).ok()?;
+                balance_drift(
+                    &left,
+                    &right,
+                    equal_temperament(key),
+                    SAMPLE_RATE,
+                    &note_config,
+                    &config,
+                )
+                .ok()
+                .map(|d| d.drift_db)
+            })
+            .collect();
+        drifts.sort_by(f64::total_cmp);
+        drifts[drifts.len() / 2]
+    };
+
+    let zero = median_drift(0.0);
+    println!("drift at spread 0: {zero:.2} dB against DRIFT_AT_ZERO_DB {DRIFT_AT_ZERO_DB}");
+    assert!(
+        zero < DRIFT_AT_ZERO_DB + 1.5,
+        "an unspread instrument drifts {zero:.2} dB, which is not 'cannot move'"
+    );
+
+    for truth in [0.15f32, 0.30] {
+        let measured = median_drift(truth);
+        let predicted = DRIFT_AT_ZERO_DB + DRIFT_PER_SPREAD_DB * f64::from(truth);
+        let recovered = pan_spread_for_drift(measured);
+        println!(
+            "spread {truth}: drift {measured:.2} dB (line says {predicted:.2}), \
+             inverted back to {recovered:.3}"
+        );
+        assert!(
+            (measured - predicted).abs() < 1.5,
+            "the measured line has moved: {measured:.2} dB against {predicted:.2}"
+        );
+        assert!(
+            (recovered - f64::from(truth)).abs() < 0.08,
+            "a spread of {truth} came back as {recovered:.3}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+fn a_known_contact_width_comes_back_and_takes_the_felt_with_it() {
+    // C2, whose forty tracked partials reach past the taper's own null at
+    // `k w = 1` — the only place a width is identifiable at all
+    // (`estimate::strike`). Rendered at five velocities, because the second
+    // half of this test is what the width does to the felt fit that reads the
+    // same spectra.
+    const KEY: u8 = 36;
+    const TRUTH: f32 = 0.03;
+    let mut preset = gate_preset();
+    preset.notes.contact_width[key_index(KEY).expect("a key")] = TRUTH;
+    let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
+    let truth = Truth::of(&preset, KEY);
+    let chain = MasterChain::measure(&preset);
+    let velocities: [u8; 5] = [30, 55, 80, 100, 120];
+    let config = NoteConfig {
+        tracker: TrackerConfig {
+            stft: StftConfig::padded(WINDOW, HOP, 1).expect("a valid transform"),
+            ..TrackerConfig::default()
+        },
+        strike: StrikeConfig {
+            null_floor: 0.03,
+            ..StrikeConfig::default()
+        },
+        ..NoteConfig::default()
+    };
+    let analyses: Vec<NoteAnalysis> = velocities
+        .iter()
+        .map(|&vel| analyze_with(&preset, KEY, vel, 6.0, &config))
+        .collect();
+    let loudest = analyses.last().expect("a ladder");
+    let fit = loudest.strike.clone().expect("C2 has a strike position");
+    let width = fit.contact_width.expect("a width whose null was measured");
+    println!(
+        "C2: w {width:.4} vs {TRUTH} ({:+.1} %), x {:.4} vs {:.4}, comb residual {:.2} dB \
+         against {:.2} dB point-force",
+        100.0 * (width / f64::from(TRUTH) - 1.0),
+        fit.position,
+        truth.strike_position,
+        fit.residual_db,
+        fit.residual_db_point,
+    );
+    assert!(
+        (width / f64::from(TRUTH) - 1.0).abs() < 0.20,
+        "w = {width:.4} against {TRUTH}"
+    );
+    assert!(
+        (fit.position / truth.strike_position - 1.0).abs() < 0.05,
+        "the width was bought with the strike point: {:.4}",
+        fit.position
+    );
+    // The control: the same note struck by a point hammer is not given one.
+    let neutral = analyze_with(&gate_preset(), KEY, 120, 6.0, &config);
+    let point = neutral.strike.clone().expect("a strike position");
+    println!("C2 control: w {:?}", point.contact_width);
+    assert_eq!(
+        point.contact_width, None,
+        "a point-force render was given a contact width"
+    );
+
+    // And what the width buys the felt, which reads the same spectra through
+    // the same comb: the taper belongs on the comb's side of the division, so
+    // fitting it changes what the felt is asked to explain.
+    let felt_residual = |strike: &piano_tuner::estimate::StrikeFit| {
+        let layers: Vec<LayerSpectrum> = analyses
+            .iter()
+            .enumerate()
+            .map(|(i, analysis)| {
+                let mut layer = LayerSpectrum::from_decays(
+                    i as u8,
+                    &analysis.decays,
+                    strike,
+                    &SpectrumWeighting::default(),
+                );
+                for point in &mut layer.points {
+                    point.amplitude /= chain.magnitude_at(point.frequency_hz);
+                }
+                layer
+            })
+            .collect();
+        fit_hammer(
+            &layers,
+            &FeltParams {
+                mass: truth.felt.mass * 1.3,
+                stiffness: truth.felt.stiffness * 0.7,
+                exponent: 2.4,
+            },
+            &HammerConfig {
+                contact: truth.contact,
+                gain: Some(truth.gain),
+                ..HammerConfig::default()
+            },
+        )
+        .expect("a felt fit")
+    };
+    let with_width = felt_residual(&fit);
+    let mut without = fit.clone();
+    without.contact_width = None;
+    let without_width = felt_residual(&without);
+    println!(
+        "felt residual: {:.2} dB with the width, {:.2} dB without; p {:.3} against {:.3} \
+         (truth {:.3})",
+        with_width.residual_db,
+        without_width.residual_db,
+        with_width.felt.exponent,
+        without_width.felt.exponent,
+        truth.felt.exponent,
+    );
+    assert!(
+        with_width.residual_db < without_width.residual_db,
+        "fitting the width did not improve the felt fit: {:.2} dB against {:.2} dB",
+        with_width.residual_db,
+        without_width.residual_db
+    );
 }
 
 #[test]

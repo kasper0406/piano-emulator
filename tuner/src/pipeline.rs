@@ -13,6 +13,17 @@
 //! partials only, where a harmonic seed is still right; the second re-tracks
 //! with that model, which is now good to a few cents everywhere, and fits
 //! everything.
+//!
+//! That loop is also what bounds the fourth-order coefficient the last fit can
+//! find. The seed the second pass tracks with is a *two-parameter* model, so a
+//! `B4` displaces the high partials from where the tracker is looking for them:
+//! at C2 a coefficient of `3e-8` puts partial 40 fifty cents off the seed,
+//! inside the 60-cent association window, and one of `6e-8` puts it past —
+//! whereupon the tracker follows the wrong peaks up there and the fit comes
+//! back with a *worse* residual and no fourth-order term at all. A third pass
+//! seeded with the full model would lift the ceiling; nothing measured so far
+//! has needed it, and it would cost half again the only expensive step in the
+//! pipeline.
 
 use crate::error::{Error, Result};
 use crate::estimate::decay::{fit_decays, DecayConfig, DecayReport};

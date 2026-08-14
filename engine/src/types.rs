@@ -113,11 +113,38 @@ pub enum PedalEvent {
     UnaCorda(bool),
 }
 
+/// Nominal velocity attributed to the damper lift of a silent press.
+///
+/// A key pressed slowly enough that the jack escapes without the hammer
+/// reaching the string lifts that note's damper and makes no note — the
+/// standard way of preparing sympathetic resonance, and written into repertoire
+/// (`PHYSICS.md` §6). The gesture is spelled [`Event::KeyDown`] (or a
+/// [`Event::NoteOn`] at velocity 0); this constant only sets how briskly the
+/// damper-lift noise of that gesture plays. A nonzero MIDI velocity is *never*
+/// reinterpreted as a silent press: recorded performances carry genuine
+/// pianissimo notes at velocities 1–3, and a threshold would silence them —
+/// exactly the kind of silent, data-dependent loss stage-2 replay fitting
+/// cannot survive.
+pub const ESCAPEMENT_VELOCITY: u8 = 3;
+
+/// Release velocity used when the source has none to give: MIDI's own idle
+/// value, and what a note-off written as a note-on with velocity 0 means.
+pub const DEFAULT_RELEASE_VELOCITY: u8 = 64;
+
 /// Everything the UI thread can tell the audio thread to do.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Event {
+    /// A key press. Any nonzero velocity throws the hammer — velocity 1 is the
+    /// quietest playable note, not a silent press. Velocity 0 is the silent
+    /// press, same as [`Event::KeyDown`].
     NoteOn { key: u8, vel: u8 },
-    NoteOff { key: u8 },
+    /// A key release. `vel` is the *release* velocity: how fast the key comes
+    /// back sets how fast the damper falls onto the string, and how loud the
+    /// key-off thump is.
+    NoteOff { key: u8, vel: u8 },
+    /// A key held down without striking — the silent press, made explicit for
+    /// callers that do not want to express it as a velocity.
+    KeyDown { key: u8 },
     Pedal(PedalEvent),
     AllOff,
 }

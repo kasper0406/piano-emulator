@@ -17,39 +17,61 @@ use crate::error::Result;
 /// The stiff-string partial layout,
 ///
 /// ```text
-/// f_k = k f0 sqrt(1 + B k^2)
+/// f_k = k f0 sqrt(1 + B k^2 + B4 k^4)
 /// ```
 ///
 /// which is both what the engine synthesizes (`SPEC.md`, "String") and what
 /// seeds the tracker's search for partial `k`.
+///
+/// `B4` is signed and is zero unless a fit put something there — at which point
+/// the law is exactly the two-parameter one, term for term.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InharmonicModel {
     pub f0_hz: f64,
     /// Inharmonicity coefficient `B`, dimensionless; ~1e-4 in the bass to
     /// ~1e-2 at the top of the compass.
     pub b: f64,
+    /// Fourth-order coefficient `B4`, **signed** and normally zero. A wound
+    /// bass string's `B` falls 25–37 % along its own series and a short wound
+    /// tenor string's rises 24–45 % (`TUNING_REPORT.md` §1); one `k^4` term is
+    /// how much of that shape the engine can be told about.
+    ///
+    /// `#[serde(default)]`: trajectory caches written before the term existed
+    /// reload as the two-parameter model they were.
+    #[serde(default)]
+    pub b4: f64,
 }
 
 impl InharmonicModel {
     pub fn new(f0_hz: f64, b: f64) -> Self {
-        Self { f0_hz, b }
+        Self { f0_hz, b, b4: 0.0 }
+    }
+
+    /// The same layout with a fourth-order term.
+    pub fn with_b4(f0_hz: f64, b: f64, b4: f64) -> Self {
+        Self { f0_hz, b, b4 }
     }
 
     /// A perfectly harmonic series — the right seed when nothing is known
     /// about the string's stiffness yet.
     pub fn harmonic(f0_hz: f64) -> Self {
-        Self { f0_hz, b: 0.0 }
+        Self {
+            f0_hz,
+            b: 0.0,
+            b4: 0.0,
+        }
     }
 
     /// Frequency of partial `k` (1-based).
     pub fn partial(&self, k: u32) -> f64 {
         let k = f64::from(k);
-        k * self.f0_hz * (1.0 + self.b * k * k).max(0.0).sqrt()
+        let k2 = k * k;
+        k * self.f0_hz * (1.0 + self.b * k2 + self.b4 * k2 * k2).max(0.0).sqrt()
     }
 
     /// The highest partial index at or below `limit_hz`, capped at `max_k`.
-    /// `f_k` is strictly increasing in `k` for `B >= 0`, so this is a simple
-    /// walk rather than a search.
+    /// `f_k` is strictly increasing in `k` for the coefficients any fit here
+    /// produces, so this is a simple walk rather than a search.
     pub fn partials_below(&self, limit_hz: f64, max_k: u32) -> u32 {
         let mut k = 0;
         while k < max_k && self.partial(k + 1) <= limit_hz {

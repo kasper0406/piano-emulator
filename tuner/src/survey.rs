@@ -45,8 +45,10 @@ use crate::estimate::hammer::{
     SpectrumWeighting, VelocityMap,
 };
 use crate::estimate::inharmonic::InharmonicConfig;
+use crate::estimate::noise::{EventMetrics, MechanismMeasurements};
+use crate::estimate::spread::{note_spread_over, NoteSpread, SigmaSpread, SpreadConfig};
 use crate::estimate::strike::StrikeFit;
-use crate::library::{Sample, SampleLibrary};
+use crate::library::{MechanismKind, Sample, SampleLibrary};
 use crate::numeric::weighted_least_squares;
 use crate::pipeline::{analyze_trajectories, track_refined, NoteAnalysis, NoteConfig};
 use crate::preset::{
@@ -54,6 +56,7 @@ use crate::preset::{
 };
 use crate::stft::StftConfig;
 use crate::tracker::TrackerConfig;
+use crate::residual::transient_metrics;
 use crate::trajectory::{InharmonicModel, NoteId, NoteTrajectories};
 use crate::{audio, SAMPLE_RATE};
 
@@ -246,6 +249,69 @@ impl NoteSurvey {
         self.median(|a| a.strike.as_ref().map(|s| s.position))
     }
 
+    /// The signed fourth-order inharmonicity, by majority of the layers.
+    ///
+    /// Each layer decides for itself whether its partial series curves away
+    /// from the two-parameter law by more than its own noise
+    /// (`estimate::inharmonic`'s two-band guard). A note where most of them say
+    /// it does is a note with a `B4`, and its value is the median of theirs; a
+    /// note where most say it does not is measured to *have* no `B4`, which is
+    /// a zero and not a missing measurement — that is what keeps one lucky
+    /// layer out of the preset.
+    pub fn inharmonicity_b4(&self) -> Option<f64> {
+        if self.layers.is_empty() {
+            return None;
+        }
+        let quartic: Vec<f64> = self
+            .layers
+            .iter()
+            .map(|l| l.analysis.inharmonic.model.b4)
+            .filter(|b4| b4.is_finite() && *b4 != 0.0)
+            .collect();
+        if quartic.len() * 2 <= self.layers.len() {
+            return Some(0.0);
+        }
+        Some(median(quartic.into_iter()).unwrap_or(0.0))
+    }
+
+    /// What this note's beating partials say about its strings' damping.
+    ///
+    /// `detune_cents` is the group's **full** width — the interval between the
+    /// outer strings, which is the pair the survivor argument is about — and
+    /// not the dominant beat the unison estimator reports;
+    /// [`Survey::spreads`] is where the two are converted.
+    pub fn spread(
+        &self,
+        strings: usize,
+        detune_cents: f64,
+        config: &SpreadConfig,
+    ) -> NoteSpread {
+        note_spread_over(
+            self.key,
+            strings,
+            detune_cents,
+            self.layers.iter().map(|l| &l.analysis.trajectories),
+            config,
+        )
+    }
+
+    /// The two-band diagnostic, medianed over the layers: how far the ratio of
+    /// `B(high k)` to `B(low k)` stands from 1, and by how many of its own
+    /// standard deviations. This is what decides whether a fourth-order term is
+    /// fitted at all, so a note that came back without one is read here.
+    pub fn band_ratio(&self) -> Option<(f64, f64)> {
+        let ratio = self.median(|a| a.inharmonic.bands.map(|b| b.ratio()))?;
+        let sigmas = self.median(|a| a.inharmonic.bands.map(|b| b.sigmas_from_one()))?;
+        Some((ratio, sigmas))
+    }
+
+    /// The hammer's contact width, as the strike fits saw it. Reported, not
+    /// written: it comes out of the same comb as the strike position, so it
+    /// carries the same microphone confound — see the module header.
+    pub fn contact_width(&self) -> Option<f64> {
+        self.median(|a| a.strike.as_ref().and_then(|s| s.contact_width))
+    }
+
     pub fn detune_cents(&self) -> Option<f64> {
         self.median(|a| a.unison.as_ref().map(|u| u.detune_cents))
     }
@@ -361,7 +427,14 @@ impl NoteSurvey {
             key: self.key,
             f0_hz: Some(f0),
             inharmonicity_b: self.inharmonicity_b(),
+            inharmonicity_b4: self.inharmonicity_b4(),
             strike_position: None,
+            // The width comes out of the same comb as the strike position, and
+            // is left out of the file for the same reason: a close microphone's
+            // own `sin(k pi x)` comb is not separable from the hammer's, so
+            // what the fit returns on library material is right to divide out
+            // of an excitation spectrum and wrong to write into a preset.
+            contact_width: None,
             sigma0: curve.map(|c| c.sigma0),
             sigma1: curve.map(|c| c.sigma1),
             detune_cents: self.detune_cents(),
@@ -478,6 +551,38 @@ impl Survey {
             decay_ratio: median(notes.iter().map(|p| p.decay_ratio))?,
             partials: notes.iter().map(|p| p.partials).max().unwrap_or(0),
         })
+    }
+
+    /// Every note's decay spread, in key order.
+    ///
+    /// The group's full detune width comes from the note's own beat where it
+    /// measured one — widened through `base`'s unison layout exactly as
+    /// [`PresetBuilder`] widens it before writing the table — and from `base`'s
+    /// table where it did not. A note whose width is unknown is not measured:
+    /// the drift alone says nothing without the interval it is a fraction of.
+    pub fn spreads(&self, base: &Preset, config: &SpreadConfig) -> Vec<NoteSpread> {
+        let mut spreads: Vec<NoteSpread> = self
+            .notes
+            .iter()
+            .filter_map(|note| {
+                let index = key_index(note.key)?;
+                let strings = usize::from(base.notes.unison[index]);
+                let fraction = base.voicing.dominant_beat_fraction(strings);
+                let detune = match note.detune_cents() {
+                    Some(beat) if fraction > 0.0 => beat / fraction,
+                    _ => f64::from(base.notes.detune_cents[index]),
+                };
+                Some(note.spread(strings, detune, config))
+            })
+            .collect();
+        spreads.sort_by_key(|note| note.key);
+        spreads
+    }
+
+    /// The instrument's per-string decay spread: [`Survey::spreads`] pooled by
+    /// group size.
+    pub fn sigma_spread(&self, base: &Preset, config: &SpreadConfig) -> SigmaSpread {
+        SigmaSpread::pooled(&self.spreads(base, config), config)
     }
 
     /// Fits the felt and the layer speeds for one note.
@@ -718,6 +823,69 @@ fn cache_path(dir: &Path, sample: &Sample, stft: &StftConfig) -> PathBuf {
     ))
 }
 
+/// Measures every mechanism recording a library maps.
+///
+/// The level of each is quoted against a strike of `reference_velocity` on the
+/// same key, at the level the *instrument* plays both — the SFZ's own `volume`
+/// on each side — which is the difference between "a damper landing is 37 dB
+/// under the note" and "a damper landing is as loud as the note". A key-off
+/// recording of a key the library never struck is measured against the nearest
+/// key it did, and says which.
+///
+/// A recording that will not decode is skipped rather than fatal: this runs at
+/// the end of a survey that took minutes, and one missing file must not cost
+/// the other ninety.
+pub fn measure_mechanism(
+    library: &SampleLibrary,
+    config: &crate::estimate::noise::NoiseConfig,
+) -> MechanismMeasurements {
+    // One decode per *file*, not per recording that refers to it: a library
+    // that samples every third key answers three of its own key-off recordings
+    // with the same strike, and these are multi-megabyte FLACs.
+    let mut strikes: std::collections::HashMap<PathBuf, Option<f64>> =
+        std::collections::HashMap::new();
+    let mut reference = |key: u8| -> Option<(u8, f64)> {
+        let sample = library.nearest_layer(key, config.reference_velocity)?;
+        let level = *strikes.entry(sample.path.clone()).or_insert_with(|| {
+            let recording = audio::load_at(&sample.path, SAMPLE_RATE).ok()?;
+            let metrics = transient_metrics(&recording.mono(), f64::from(SAMPLE_RATE))?;
+            Some(sample.volume_db + 20.0 * metrics.peak.log10())
+        });
+        Some((sample.key, level?))
+    };
+    let mut measure = |kind: MechanismKind| -> Vec<EventMetrics> {
+        library
+            .mechanism_of(kind)
+            .into_iter()
+            .filter_map(|sample| {
+                let recording = audio::load_at(&sample.path, SAMPLE_RATE).ok()?;
+                let metrics = transient_metrics(&recording.mono(), f64::from(SAMPLE_RATE))?;
+                // A global event has no key of its own; the middle of the
+                // keyboard is what §5 measured the pedal against.
+                let (reference_key, strike_db) = reference(sample.key.unwrap_or(60))?;
+                Some(EventMetrics {
+                    key: sample.key,
+                    level_db: sample.volume_db + 20.0 * metrics.peak.log10() - strike_db,
+                    decay_s: metrics.decay_s,
+                    centroid_hz: metrics.centroid_hz,
+                    reference_key,
+                })
+            })
+            .filter(|metrics| metrics.level_db.is_finite())
+            .collect()
+    };
+    MechanismMeasurements {
+        key_off: measure(MechanismKind::KeyOff),
+        pedal_down: measure(MechanismKind::PedalDown),
+        pedal_up: measure(MechanismKind::PedalUp),
+        key_off_veltrack: library
+            .mechanism_of(MechanismKind::KeyOff)
+            .first()
+            .and_then(|sample| sample.amp_veltrack),
+        velocity_span: library.velocity_span(),
+    }
+}
+
 fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
     let mut v: Vec<f64> = values.filter(|x| x.is_finite()).collect();
     if v.is_empty() {
@@ -762,6 +930,7 @@ mod tests {
             layer: 0,
             lovel: 1,
             hivel: 26,
+            volume_db: 0.0,
         };
         let config = SurveyConfig::default();
         let a = cache_path(Path::new("/cache"), &sample, &config.geometry(261.6).unwrap());
@@ -822,6 +991,8 @@ mod tests {
                             rejected: Vec::new(),
                             residual_cents: 0.0,
                             worst_cents: 0.0,
+                            bands: None,
+                            residual_cents_2: 0.0,
                         },
                         decays: DecayReport {
                             partials: partials(v),

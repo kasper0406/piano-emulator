@@ -14,7 +14,7 @@ fn note_on(t: f32, key: u8, vel: u8) -> RenderEvent {
 }
 
 fn note_off(t: f32, key: u8) -> RenderEvent {
-    RenderEvent::new(t, Event::NoteOff { key })
+    RenderEvent::new(t, Event::NoteOff { key, vel: 64 })
 }
 
 fn pedal(t: f32, p: PedalEvent) -> RenderEvent {

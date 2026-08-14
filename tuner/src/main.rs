@@ -8,10 +8,15 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use piano_tuner::estimate::decay::{DecayConfig, DecayCurve};
+use piano_tuner::estimate::directivity::{balance_drift, pan_spread_for_drift, DirectivityConfig};
 use piano_tuner::estimate::hammer::HammerConfig;
+use piano_tuner::estimate::noise::{fit_noise, NoiseConfig};
+use piano_tuner::estimate::spread::{SigmaSpread, SpreadConfig};
 use piano_tuner::pipeline::{analyze_note, NoteConfig};
 use piano_tuner::preset::{equal_temperament, key_index, Preset, PresetBuilder};
-use piano_tuner::survey::{pooled_velocity_map, HammerReport, Survey, SurveyConfig};
+use piano_tuner::survey::{
+    measure_mechanism, pooled_velocity_map, HammerReport, Survey, SurveyConfig,
+};
 use piano_tuner::{
     audio, cents, Error, InharmonicModel, PartialTracker, Result, SampleLibrary, StftConfig,
     TrackerConfig, SAMPLE_RATE,
@@ -377,6 +382,11 @@ fn survey(args: &[String]) -> Result<()> {
     let decay = options.config.note.decay;
     report_notes(&survey, &base, &decay);
 
+    let spread_config = SpreadConfig::default();
+    let spread = report_spread(&survey, &base, &spread_config);
+    let pan_spread = report_directivity(&library, &options.config);
+    let noise = report_mechanism(&library, &base);
+
     let hammers = report_hammer(&survey, &base);
     let map = pooled_velocity_map(&hammers).ok();
     if let Some(map) = &map {
@@ -418,6 +428,15 @@ fn survey(args: &[String]) -> Result<()> {
             map.ok_or_else(|| Error::Estimate("no velocity map was fitted".into()))?,
         );
     }
+    if !spread.is_neutral() {
+        builder = builder.sigma_scale(spread.rows());
+    }
+    if let Some(pan_spread) = pan_spread.filter(|s| *s > 0.0) {
+        builder = builder.pan_spread(pan_spread as f32);
+    }
+    if let Some(noise) = noise {
+        builder = builder.noise(noise);
+    }
     let preset = builder.build()?;
     // The attribution goes in twice: as a comment, where a human reading the
     // file sees it, and in `description`, where it survives being loaded and
@@ -457,8 +476,8 @@ fn wrapped_comment(text: &str) -> String {
 fn report_notes(survey: &Survey, base: &Preset, decay: &DecayConfig) {
     let factor = survey.vertical_factor(base);
     println!(
-        "\n key  lay   f0 Hz    stretch      B       vs base   sigma0  sigma1   T60 f0   base  \
-          T60 f4   detune  base   comb  written"
+        "\n key  lay   f0 Hz    stretch      B       vs base       B4      bands    sigma0  sigma1   T60 f0 \
+           base  T60 f4   detune  base   comb  width  written"
     );
     for note in &survey.notes {
         let index = key_index(note.key).expect("a surveyed key is on the keyboard");
@@ -478,14 +497,22 @@ fn report_notes(survey: &Survey, base: &Preset, decay: &DecayConfig) {
         };
         let show = |t: Option<f64>| t.map_or("-".to_string(), |t| format!("{t:.2}s"));
         println!(
-            "{:>4} {:>4} {:>9.3} {:+7.2}c {:9.3e} {:+7.1}% {:>7} {:>7} {:>7} {:>6} {:>7} {:>7} \
-             {:>6} {:>6}  {}",
+            "{:>4} {:>4} {:>9.3} {:+7.2}c {:9.3e} {:+7.1}% {:>10} {:>10} {:>7} {:>7} {:>7} {:>6} \
+             {:>7} {:>7} {:>6} {:>6} {:>6}  {}",
             note.key,
             note.layers.len(),
             f0,
             1200.0 * (f0 / equal_temperament(note.key)).log2(),
             b,
             100.0 * (b / base_b - 1.0),
+            match note.inharmonicity_b4() {
+                Some(b4) if b4 != 0.0 => format!("{b4:+.2e}"),
+                Some(_) => "0".to_string(),
+                None => "-".to_string(),
+            },
+            note.band_ratio().map_or("-".to_string(), |(ratio, sigmas)| {
+                format!("{ratio:.2}/{sigmas:.1}s")
+            }),
             curve.map_or("-".to_string(), |c| format!("{:.3}", c.sigma0)),
             curve.map_or("-".to_string(), |c| format!("{:.3}", c.sigma1)),
             show(curve.map(|c| c.t60_at(f0))),
@@ -496,6 +523,11 @@ fn report_notes(survey: &Survey, base: &Preset, decay: &DecayConfig) {
             format!("{:.2}c", base.notes.detune_cents[index]),
             note.strike_position()
                 .map_or("-".to_string(), |x| format!("{x:.3}")),
+            // Measured on every survey and written only when asked for: the
+            // width comes out of the same comb as the strike position and
+            // carries the same microphone confound (`DECISIONS.md` 93, 130).
+            note.contact_width()
+                .map_or("-".to_string(), |w| format!("{w:.3}")),
             if note.tuning(base_b).is_some() { "yes" } else { "NO" },
         );
     }
@@ -508,6 +540,142 @@ fn report_notes(survey: &Survey, base: &Preset, decay: &DecayConfig) {
             base.voicing.horizontal_decay_ratio
         );
     }
+}
+
+/// The per-string decay spread, note by note, and what it pools to.
+fn report_spread(survey: &Survey, base: &Preset, config: &SpreadConfig) -> SigmaSpread {
+    let notes = survey.spreads(base, config);
+    println!("\n key  strings   detune   drift      spread");
+    for note in &notes {
+        println!(
+            "{:>4} {:>8} {:>8} {:>7} {:>11}",
+            note.key,
+            note.strings,
+            format!("{:.2}c", note.detune_cents),
+            note.drift_cents()
+                .map_or("-".to_string(), |c| format!("{c:.2}c")),
+            match note.spread {
+                Some(s) if note.saturated => format!("{s:.3} (sat)"),
+                Some(s) => format!("{s:.3}"),
+                None => "-".to_string(),
+            },
+        );
+    }
+    let pooled = SigmaSpread::pooled(&notes, config);
+    println!(
+        "\nunison sigma scale: {:?} (from {:?} notes; {:?} more drifted further than their own \
+         unison and were not pooled)",
+        pooled
+            .rows()
+            .iter()
+            .map(|row| row.scale.clone())
+            .collect::<Vec<_>>(),
+        pooled.notes,
+        pooled.saturated,
+    );
+    pooled
+}
+
+/// The mechanism's own recordings: the `[noise]` section, measured.
+fn report_mechanism(
+    library: &piano_tuner::SampleLibrary,
+    base: &Preset,
+) -> Option<piano_tuner::preset::NoiseTables> {
+    let config = NoiseConfig::default();
+    let measurements = measure_mechanism(library, &config);
+    if measurements.is_empty() {
+        println!("\nno mechanism recordings in this library");
+        return None;
+    }
+    println!("\n mechanism   key   re strike   decay to -40 dB   centroid   against");
+    let rows = [
+        ("key_off", &measurements.key_off),
+        ("pedal_down", &measurements.pedal_down),
+        ("pedal_up", &measurements.pedal_up),
+    ];
+    for (name, metrics) in rows {
+        for metric in metrics.iter() {
+            println!(
+                "{name:>10} {:>5} {:>11.1} {:>17.3} {:>10.0} {:>9}",
+                metric.key.map_or("-".to_string(), |k| k.to_string()),
+                metric.level_db,
+                metric.decay_s,
+                metric.centroid_hz,
+                metric.reference_key,
+            );
+        }
+    }
+    let fitted = fit_noise(&measurements, &base.noise, &config);
+    println!(
+        "\nkey-off: {} anchors, {:.0} Hz, {:.3} s, {:.1} dB of velocity",
+        fitted.key_off.level_db.len(),
+        fitted.key_off.centroid_hz,
+        fitted.key_off.decay_s,
+        fitted.key_off.velocity_db
+    );
+    Some(fitted)
+}
+
+/// How far each note's stereo balance travels while it decays, and the
+/// `voicing.polarization_pan_spread` that reproduces it.
+///
+/// The loudest layer of every sampled key, in stereo — which is the one thing
+/// in the survey that cannot come from the trajectory cache, because the cache
+/// holds the mono sum. One note per key, not sixteen: the drift is a property
+/// of how the instrument radiates, and `TUNING_REPORT.md` §5 measured it on the
+/// loudest layer for the same reason (a soft note's high partials are in the
+/// floor by 2 s and the floor has a balance of its own).
+fn report_directivity(library: &piano_tuner::SampleLibrary, config: &SurveyConfig) -> Option<f64> {
+    let directivity = DirectivityConfig::default();
+    println!("\n key   partials   drift 0.3->2s");
+    let mut drifts: Vec<f64> = Vec::new();
+    for key in library.keys() {
+        let Some(sample) = library.layers(key).last() else {
+            continue;
+        };
+        let Ok(recording) = piano_tuner::audio::load_at(&sample.path, SAMPLE_RATE) else {
+            continue;
+        };
+        if recording.channel_count() < 2 {
+            continue;
+        }
+        let Ok(note_config) = config.note_config(equal_temperament(key)) else {
+            continue;
+        };
+        match balance_drift(
+            &recording.channels[0],
+            &recording.channels[1],
+            equal_temperament(key),
+            f64::from(SAMPLE_RATE),
+            &note_config,
+            &directivity,
+        ) {
+            Ok(drift) => {
+                println!(
+                    "{key:>4} {:>10} {:>15.2}",
+                    drift.partials, drift.drift_db
+                );
+                drifts.push(drift.drift_db);
+            }
+            Err(error) => println!("{key:>4}          -   {error}"),
+        }
+    }
+    if drifts.is_empty() {
+        return None;
+    }
+    drifts.sort_by(f64::total_cmp);
+    let median = drifts[drifts.len() / 2];
+    let spread = pan_spread_for_drift(median);
+    println!(
+        "\nstereo drift: {median:.2} dB median over {} keys -> polarization_pan_spread {spread:.3}{}",
+        drifts.len(),
+        if spread >= piano_tuner::estimate::directivity::MAX_PAN_SPREAD {
+            " (the engine's ceiling; the instrument drifts further than it can reach)"
+        } else {
+            ""
+        }
+    );
+    Some(spread)
 }
 
 /// The felt fit, note by note. Reported rather than written: the recording has

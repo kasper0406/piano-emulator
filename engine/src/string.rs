@@ -36,16 +36,68 @@ pub const MAX_UNISON_COUPLING: f32 = 0.05;
 /// is proportional to f0, and this is the f0 that scale was calibrated at (C4).
 const REFERENCE_F0: f32 = 261.6256;
 
+/// Widest hammer contact a preset may declare, as a fraction of the speaking
+/// length. A real hammer touches 1–2 % of it (`PHYSICS.md` §7); 5 % is already
+/// past any measured felt and is where the raised-cosine taper below has nulled
+/// the twentieth partial outright, so nothing above it describes a hammer.
+pub const MAX_CONTACT_WIDTH: f32 = 0.05;
+
+/// Bounds on a per-string decay-rate multiplier. The rows average to 1, so a
+/// factor of two either way is already a group whose fastest string dies four
+/// times sooner than its slowest — wider than any voicing, and wide enough that
+/// the value stops being a multiplier and becomes a different note.
+pub const MIN_SIGMA_SCALE: f32 = 0.5;
+pub const MAX_SIGMA_SCALE: f32 = 2.0;
+
+/// Excitation taper of a hammer that touches a patch of the string rather than
+/// a point, for partial `k` and a contact width of `width` speaking lengths.
+///
+/// The point-force comb `sin(k pi x)` is convolved with the contact profile, so
+/// each partial is scaled by the profile's transform at that partial's
+/// wavenumber; for a raised-cosine patch that is `cos^2(k pi w / 2)` down to its
+/// first zero (`PHYSICS.md` §7, after Hall & Askenfelt). Past that zero the
+/// analytic form turns back up, which a widening contact patch does not do, so
+/// it is clamped: once a partial has a whole contact patch inside one of its
+/// half-periods the hammer cannot drive it at all.
+///
+/// `contact_taper(k, 0.0)` is exactly 1.0, which is what makes a preset without
+/// the field the point-force instrument bit for bit.
+pub fn contact_taper(k: usize, width: f32) -> f32 {
+    let phase = 0.5 * k as f32 * std::f32::consts::PI * width;
+    if phase >= std::f32::consts::FRAC_PI_2 {
+        0.0
+    } else {
+        let c = phase.cos();
+        c * c
+    }
+}
+
 /// Per-note string parameters. Every field is a starting point that automated
 /// tuning is expected to overwrite later.
 #[derive(Clone, Copy, Debug)]
 pub struct StringParams {
     /// Fundamental frequency in Hz.
     pub f0: f32,
-    /// Stiffness inharmonicity coefficient B in `f_k = k f0 sqrt(1 + B k^2)`.
+    /// Stiffness inharmonicity coefficient B in
+    /// `f_k = k f0 sqrt(1 + B k^2 + B4 k^4)`.
     pub inharmonicity_b: f32,
+    /// Fourth-order coefficient B4 of the same law, **signed**.
+    ///
+    /// One `B` is not enough at the bottom of the compass: fitted to a wound
+    /// bass string's partials 1–8 and again to its partials 14–26, `B` comes
+    /// back 25–37 % *smaller* on the upper band (A0 0.75, C1 0.66, D#1 0.63)
+    /// and 24–45 % *larger* on the short wound tenor strings (F#1 1.24, A1
+    /// 1.40, C2 1.45) — up to 78 cents of misplaced partial against a single
+    /// coefficient (`TUNING_REPORT.md` §1). The sign flips across that break,
+    /// so the correction has to be signed. Zero everywhere reduces the law to
+    /// the two-parameter one exactly.
+    pub inharmonicity_b4: f32,
     /// Hammer strike point as a fraction of string length.
     pub strike_position: f32,
+    /// Width of the hammer's contact with the string, as a fraction of the
+    /// speaking length. Zero is the point force the comb `sin(k pi x)` assumes;
+    /// see [`contact_taper`].
+    pub contact_width: f32,
     /// Frequency-independent part of the decay rate, 1/s.
     pub sigma0: f32,
     /// Coefficient of `(f_k/1000)^2` in the decay rate, 1/s.
@@ -72,16 +124,32 @@ pub struct StringParams {
 }
 
 impl StringParams {
+    /// The number under the root of the partial law: `1 + B k^2 + B4 k^4`.
+    ///
+    /// A preset is refused unless this stays positive and the series it
+    /// produces stays ordered over the partials the note actually uses — a
+    /// negative radicand is a NaN in a mode frequency, and a series that turns
+    /// over is not a string.
+    pub fn partial_radicand(&self, k: usize) -> f32 {
+        let k = k as f32;
+        let k2 = k * k;
+        // `B k^2` keeps the association the two-parameter law used, so a preset
+        // with `B4 = 0` lays its partials out bit for bit as before: the extra
+        // term is then exactly `+ 0.0`.
+        1.0 + self.inharmonicity_b * k * k + self.inharmonicity_b4 * k2 * k2
+    }
+
     /// Frequency of partial `k` (1-based) including stiffness inharmonicity.
     pub fn partial_freq(&self, k: usize) -> f32 {
-        let k = k as f32;
-        k * self.f0 * (1.0 + self.inharmonicity_b * k * k).sqrt()
+        k as f32 * self.f0 * self.partial_radicand(k).sqrt()
     }
 
     /// Decay rate of partial `k` for the note as a whole, 1/s: `6.91 / sigma`
     /// is the time that partial takes to fall 60 dB counting both
-    /// polarizations. The vertical bank decays faster than this and the
-    /// horizontal one slower — see
+    /// polarizations. The vertical bank decays faster than this, the horizontal
+    /// one slower, and the individual strings of a unison faster or slower
+    /// again by [`Voicing::sigma_scale`](crate::preset::Voicing::sigma_scale) —
+    /// see
     /// [`Voicing::vertical_decay_factor`](crate::preset::Voicing::vertical_decay_factor).
     pub fn partial_sigma(&self, k: usize) -> f32 {
         self.sigma0 + self.sigma1 * (self.partial_freq(k) / 1000.0).powi(2)
@@ -145,17 +213,25 @@ impl PianoString {
             .enumerate()
         {
             let detune = voicing.detune_ratio(i, params.unison, params.detune_cents);
+            // The strings of a unison do not share one damping law: a group
+            // whose strings are mistuned *and* decay at different rates is what
+            // moves a composite partial's measured frequency as the survivor
+            // takes over, which the recordings do by up to 32 cents and one
+            // damping law cannot do at all (`TUNING_REPORT.md` §6).
+            let sigma_scale = voicing.sigma_scale(i, params.unison);
             let mut vertical = ModalBank::with_capacity(partials);
             let mut horizontal = ModalBank::with_capacity(partials);
             for k in 1..=partials {
                 let f = params.partial_freq(k) * detune;
-                let sigma = params.partial_sigma(k) * vertical_factor;
+                let sigma = params.partial_sigma(k) * vertical_factor * sigma_scale;
                 // g_k ∝ sin(k pi x_strike) nulls the partials with a node at
-                // the strike point; the 1/SAMPLE_RATE turns the per-sample
-                // accumulation of the excitation into an integral over the
-                // hammer's force pulse.
+                // the strike point, and the contact taper is what a hammer wide
+                // enough to average over that comb does to the top of it; the
+                // 1/SAMPLE_RATE turns the per-sample accumulation of the
+                // excitation into an integral over the hammer's force pulse.
                 let g = output_scale
                     * (k as f32 * std::f32::consts::PI * params.strike_position).sin()
+                    * contact_taper(k, params.contact_width)
                     / SAMPLE_RATE;
                 vertical.push_mode(f, sigma, g);
                 horizontal.push_mode(
@@ -233,6 +309,22 @@ impl PianoString {
         }
     }
 
+    /// Bridge coupling, one block late for the same reason the resonance bus
+    /// is: it breaks the circular dependency between summing and driving. Each
+    /// string is driven by its neighbours' previous block, its own removed.
+    fn couple(&mut self) {
+        for s in &mut self.strings {
+            for ((e, &sum), &own) in s
+                .excitation
+                .iter_mut()
+                .zip(&self.group_previous)
+                .zip(&s.previous)
+            {
+                *e += self.coupling * (sum - own);
+            }
+        }
+    }
+
     /// Renders one block, **adding** the summed output of every unison string
     /// and both polarizations into `out` (exactly `BLOCK` samples).
     pub fn process(&mut self, out: &mut [f32]) {
@@ -245,19 +337,7 @@ impl PianoString {
             return;
         }
 
-        // Bridge coupling, one block late for the same reason the resonance bus
-        // is: it breaks the circular dependency between summing and driving.
-        for s in &mut self.strings {
-            for ((e, &sum), &own) in s
-                .excitation
-                .iter_mut()
-                .zip(&self.group_previous)
-                .zip(&s.previous)
-            {
-                *e += self.coupling * (sum - own);
-            }
-        }
-
+        self.couple();
         self.group_previous.fill(0.0);
         for s in &mut self.strings {
             s.previous.fill(0.0);
@@ -271,6 +351,53 @@ impl PianoString {
             {
                 *o += v;
                 *g += v;
+            }
+        }
+    }
+
+    /// Renders one block with the two polarizations kept apart: the vertical
+    /// bank of every unison string is **added** into `out_v` and the horizontal
+    /// one into `out_h` (exactly `BLOCK` samples each).
+    ///
+    /// The strings advance exactly as they do in [`PianoString::process`] —
+    /// same excitation, same coupling, same state — so this is a different way
+    /// of *reading* the group, not a different group. It exists because the two
+    /// polarizations decay at very different rates, so giving them different
+    /// stereo positions is what makes a note's image move as it dies
+    /// (`TUNING_REPORT.md` §5). `process` stays the path for the common case:
+    /// summing the polarizations per string, in string order, is the
+    /// accumulation the instrument's renders are pinned against, and the split
+    /// path cannot reproduce that order to the last bit.
+    pub fn process_split(&mut self, out_v: &mut [f32], out_h: &mut [f32]) {
+        debug_assert_eq!(out_v.len(), BLOCK);
+        debug_assert_eq!(out_h.len(), BLOCK);
+        if self.strings.len() == 1 {
+            let s = &mut self.strings[0];
+            s.vertical.process_add(&s.excitation, out_v);
+            s.horizontal.process_add(&s.excitation, out_h);
+            s.excitation.fill(0.0);
+            return;
+        }
+
+        self.couple();
+        self.group_previous.fill(0.0);
+        // Stack scratch, not an allocation: the vertical bank needs a buffer of
+        // its own before the string's two polarizations are added back together
+        // for the bridge coupling.
+        let mut vertical = [0.0f32; BLOCK];
+        for s in &mut self.strings {
+            vertical.fill(0.0);
+            s.previous.fill(0.0);
+            s.vertical.process_add(&s.excitation, &mut vertical);
+            s.horizontal.process_add(&s.excitation, &mut s.previous);
+            s.excitation.fill(0.0);
+            for i in 0..BLOCK {
+                out_v[i] += vertical[i];
+                out_h[i] += s.previous[i];
+                // The bridge sees one string, not two planes of one: the
+                // coupling drives on the whole of it.
+                s.previous[i] += vertical[i];
+                self.group_previous[i] += s.previous[i];
             }
         }
     }
@@ -379,6 +506,91 @@ mod tests {
         }
     }
 
+    /// The two-parameter law, written out here so the tests below compare the
+    /// engine's layout against the formula rather than against itself.
+    fn two_parameter_freq(p: &StringParams, k: usize) -> f32 {
+        let k = k as f32;
+        k * p.f0 * (1.0 + p.inharmonicity_b * k * k).sqrt()
+    }
+
+    #[test]
+    fn a_zero_fourth_order_coefficient_is_the_two_parameter_law_to_the_bit() {
+        for key in 21..=108u8 {
+            let p = preset().string_params(key);
+            assert_eq!(p.inharmonicity_b4, 0.0);
+            for k in 1..=p.partial_count() {
+                assert_eq!(p.partial_freq(k), two_parameter_freq(&p, k), "key {key} k {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fourth_order_coefficient_moves_the_high_partials_and_not_the_low_ones() {
+        let base = preset().string_params(21); // A0, the note §1 measures worst
+        // A wound bass string's series behaves as if `B` fell along it: fitted
+        // to partials 14-26 it comes back 25-37 % below the fit to partials 1-8
+        // (`TUNING_REPORT.md` §1). `B + B4 k^2` is that falling coefficient.
+        // Only part of that shape fits under one k^4 term: A0 is built with the
+        // full 80 partials, and a coefficient that takes more than ~7.5 % off
+        // `B` by the twentieth partial has turned the top of that series over
+        // by the eightieth, which `Preset::validate` refuses. This is a third
+        // of the way to the limit.
+        let mut p = base;
+        p.inharmonicity_b4 = -0.025 * base.inharmonicity_b / 400.0;
+
+        let cents = |a: f32, b: f32| 1200.0 * (a / b).log2();
+        // The fundamental cannot move: `B4 k^4` is 400^2 times smaller there
+        // than at k = 20, which is the whole point of a second coefficient.
+        assert!(
+            cents(p.partial_freq(1), base.partial_freq(1)).abs() < 0.001,
+            "the fundamental moved"
+        );
+        // Partial 20 flattens by what the closed form says, and by an amount
+        // the ear resolves: A0's partial 20 sits at ~570 Hz.
+        let radicand = 1.0 + p.inharmonicity_b * 400.0 + p.inharmonicity_b4 * 160_000.0;
+        let want = 20.0 * p.f0 * radicand.sqrt();
+        assert!((p.partial_freq(20) - want).abs() < 1e-4 * want);
+        let moved = cents(p.partial_freq(20), base.partial_freq(20));
+        assert!((-1.0..-0.1).contains(&moved), "partial 20 moved {moved} cents");
+        // The top of the series is where a k^4 term does its work: tens of
+        // cents, on partials A0 puts at 2-3 kHz.
+        let top = p.partial_count();
+        assert!(cents(p.partial_freq(top), base.partial_freq(top)) < -20.0);
+        // ... and the series is still a series.
+        for k in 2..=top {
+            assert!(p.partial_freq(k) > p.partial_freq(k - 1), "partial {k}");
+        }
+
+        // The other sign is the short wound tenor string, whose high partials
+        // come back *sharper* than one coefficient predicts (ratio 1.24-1.45).
+        let mut sharp = base;
+        sharp.inharmonicity_b4 = 0.025 * base.inharmonicity_b / 400.0;
+        assert!(cents(sharp.partial_freq(20), base.partial_freq(20)) > 0.1);
+        assert!(cents(sharp.partial_freq(top), base.partial_freq(top)) > 20.0);
+        assert!(cents(sharp.partial_freq(1), base.partial_freq(1)).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_fourth_order_term_reaches_the_bank_and_the_partial_count() {
+        let mut preset = preset();
+        let i = crate::types::key_index(60).unwrap();
+        // Enough curvature to pull the top of C4's series below the cap, which
+        // is the one place the coefficient changes how many modes are built.
+        preset.notes.inharmonicity_b4[i] = 4.0e-6;
+        assert!(preset.validate().is_ok());
+        let params = preset.string_params(60);
+        let plain = Preset::default().string_params(60);
+        assert!(params.partial_count() < plain.partial_count());
+
+        let s = PianoString::new(params, &preset.voicing);
+        assert_eq!(s.partial_count(), params.partial_count());
+        for k in 1..=s.partial_count() {
+            let want = params.partial_freq(k);
+            assert!((s.partial_freq(1, k) - want).abs() < 1e-3 * want);
+            assert!(want > two_parameter_freq(&params, k), "partial {k} not stretched");
+        }
+    }
+
     #[test]
     fn banks_are_laid_out_from_the_formula() {
         let preset = preset();
@@ -469,6 +681,147 @@ mod tests {
             (horizontal / want - 1.0).abs() < 0.05,
             "horizontal sigma {horizontal}, expected {want}"
         );
+    }
+
+    /// Decay rate of one unison string's vertical bank, measured on the note
+    /// the engine actually renders: the bank's stored energy is a clean
+    /// exponential at twice its polarization's rate once the high partials have
+    /// gone, so the fundamental alone is what the two probes see.
+    fn per_string_vertical_sigma(preset: &Preset, key: u8, probes: [f32; 2]) -> Vec<f32> {
+        let params = preset.string_params(key);
+        let mut string = PianoString::new(params, &preset.voicing);
+        let mut hammer = Hammer::new(preset.hammer_params(key));
+        hammer.strike_midi(100);
+        let mut out = [0.0f32; BLOCK];
+        let mut energy = vec![[0.0f32; 2]; params.unison];
+        let last = probes[1] + 0.05;
+        for block in 0..(last * SAMPLE_RATE / BLOCK as f32) as usize {
+            let t = (block * BLOCK) as f32 / SAMPLE_RATE;
+            for (p, &probe) in probes.iter().enumerate() {
+                if (t - probe).abs() < BLOCK as f32 / SAMPLE_RATE * 0.5 {
+                    for (s, e) in energy.iter_mut().enumerate() {
+                        e[p] = string.strings[s].vertical.energy();
+                    }
+                }
+            }
+            for i in 0..string.string_count() {
+                let share = string.strike_share(i);
+                hammer.add_pulse(string.excitation_mut(i), 0, share);
+            }
+            hammer.advance(BLOCK);
+            string.process(&mut out);
+        }
+        let dt = probes[1] - probes[0];
+        energy
+            .iter()
+            .map(|e| (e[0] / e[1]).ln() / (2.0 * dt))
+            .collect()
+    }
+
+    /// The strings of a unison do not share one damping law once the preset
+    /// says they do not — and they do share it, exactly, when it does not.
+    #[test]
+    fn unison_sigma_scale_sets_each_string_of_a_group_going_at_its_own_rate() {
+        let key = 84u8;
+        for scales in [[1.0f32, 1.0, 1.0], [0.7, 1.0, 1.3]] {
+            let mut preset = preset();
+            preset.voicing.unison_sigma_scale[2].scale = scales.to_vec();
+            // The bridge coupling is a second decay law on top of the one being
+            // measured — it moves energy between the strings — and this test is
+            // about the per-string sigma alone.
+            preset.voicing.unison_coupling = 0.0;
+            assert!(preset.validate().is_ok(), "{scales:?} is a legal voicing");
+
+            let params = preset.string_params(key);
+            assert_eq!(params.unison, 3);
+            let designed = params.partial_sigma(1) * preset.voicing.vertical_decay_factor();
+            let string = PianoString::new(params, &preset.voicing);
+            for (s, &scale) in scales.iter().enumerate() {
+                // The layout says it ...
+                assert!(
+                    (string.strings[s].vertical.mode_sigma(0) / (designed * scale) - 1.0).abs()
+                        < 1e-6,
+                    "string {s} vertical sigma"
+                );
+                // ... for both polarizations.
+                let horizontal = designed * scale * preset.voicing.horizontal_decay_ratio;
+                assert!(
+                    (string.strings[s].horizontal.mode_sigma(0) / horizontal - 1.0).abs() < 1e-6,
+                    "string {s} horizontal sigma"
+                );
+            }
+            // ... and so does the note it renders. With every scale at 1 this
+            // is the whole-note T60 anchor of `notes.sigma0` being reproduced
+            // string by string: a row that averages to 1 redistributes the
+            // note's damping and does not retune it.
+            for (s, (&scale, measured)) in scales
+                .iter()
+                .zip(per_string_vertical_sigma(&preset, key, [0.35, 0.6]))
+                .enumerate()
+            {
+                let want = designed * scale;
+                assert!(
+                    (measured / want - 1.0).abs() < 0.05,
+                    "{scales:?}: string {s} decays at {measured}, expected {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contact_width_tapers_the_top_of_the_comb_monotonically() {
+        // Zero width is exactly the point force, so a preset that does not
+        // mention the field builds exactly the comb it always did.
+        for k in 1..=MAX_PARTIALS {
+            assert_eq!(contact_taper(k, 0.0), 1.0);
+        }
+        let widths = [0.0f32, 0.005, 0.01, 0.02, 0.03, 0.04, MAX_CONTACT_WIDTH];
+        for k in [1usize, 4, 12, 30, 60] {
+            for w in widths.windows(2) {
+                let (wide, narrow) = (contact_taper(k, w[1]), contact_taper(k, w[0]));
+                assert!(
+                    wide <= narrow,
+                    "partial {k}: {narrow} at {} rose to {wide} at {}",
+                    w[0],
+                    w[1]
+                );
+                // Strictly, while there is anything left to take away.
+                if narrow > 0.0 {
+                    assert!(wide < narrow, "partial {k} did not move between {w:?}");
+                }
+            }
+            // ... and always harder on the higher partial.
+            for &w in &widths[1..] {
+                assert!(contact_taper(k + 1, w) <= contact_taper(k, w));
+            }
+        }
+        // Past its first null the taper stays at zero instead of turning back
+        // up: a contact patch that spans a whole half-period cannot drive that
+        // partial, and cannot start driving it again by getting wider.
+        assert_eq!(contact_taper(40, MAX_CONTACT_WIDTH), 0.0); // k w = 2
+        assert_eq!(contact_taper(70, MAX_CONTACT_WIDTH), 0.0); // k w = 3.5
+        assert!(contact_taper(20, MAX_CONTACT_WIDTH) < 1e-6); // k w = 1, the null
+
+        // The gains the bank is built with are the comb times that taper.
+        let width = 0.015;
+        let mut preset = preset();
+        for w in &mut preset.notes.contact_width {
+            *w = width;
+        }
+        assert!(preset.validate().is_ok());
+        let key = 96u8; // C7, where the contact is the largest fraction of a string
+        let stock = Preset::default();
+        let plain = PianoString::new(stock.string_params(key), &stock.voicing);
+        let tapered = PianoString::new(preset.string_params(key), &preset.voicing);
+        for k in 0..tapered.partial_count() {
+            let want = plain.strings[0].vertical.mode_gain(k) * contact_taper(k + 1, width);
+            let got = tapered.strings[0].vertical.mode_gain(k);
+            assert!(
+                (got - want).abs() <= 1e-6 * want.abs().max(1e-20),
+                "partial {} gain {got}, expected {want}",
+                k + 1
+            );
+        }
     }
 
     #[test]
@@ -579,6 +932,44 @@ mod tests {
         assert!(sibling > 0.0, "unstruck sibling never picked anything up");
         // ... but stays far below the struck string: this is a weak coupling.
         assert!(sibling < s.strings[0].vertical.energy() * 0.25);
+    }
+
+    /// The split path is a different way of reading the group, not a different
+    /// group: same excitation, same coupling, same state.
+    #[test]
+    fn splitting_the_polarizations_renders_the_same_string() {
+        let (key, preset) = (60u8, preset());
+        let mut summed = PianoString::new(preset.string_params(key), &preset.voicing);
+        let mut split = PianoString::new(preset.string_params(key), &preset.voicing);
+        let mut hammer = Hammer::new(preset.hammer_params(key));
+        let mut hammer_split = Hammer::new(preset.hammer_params(key));
+        hammer.strike_midi(100);
+        hammer_split.strike_midi(100);
+
+        let (mut a, mut v, mut h) = ([0.0f32; BLOCK], [0.0f32; BLOCK], [0.0f32; BLOCK]);
+        let mut peak = 0.0f32;
+        for _ in 0..200 {
+            for i in 0..summed.string_count() {
+                let share = summed.strike_share(i);
+                hammer.add_pulse(summed.excitation_mut(i), 0, share);
+                hammer_split.add_pulse(split.excitation_mut(i), 0, share);
+            }
+            hammer.advance(BLOCK);
+            hammer_split.advance(BLOCK);
+            a.fill(0.0);
+            v.fill(0.0);
+            h.fill(0.0);
+            summed.process(&mut a);
+            split.process_split(&mut v, &mut h);
+            for i in 0..BLOCK {
+                peak = peak.max(a[i].abs());
+                // Not bit-exact and cannot be: the two paths add the same
+                // numbers in a different order.
+                assert!((a[i] - (v[i] + h[i])).abs() <= 1e-6 * peak.max(1e-12));
+            }
+        }
+        assert!(peak > 0.0);
+        assert!((split.energy() / summed.energy() - 1.0).abs() < 1e-4);
     }
 
     #[test]

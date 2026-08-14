@@ -7,7 +7,9 @@ A physically modeled (simulated) grand piano — no samples. Every note is synth
 - **Strings** — modal synthesis with stiffness inharmonicity (`f_k = k·f0·√(1+Bk²)`), frequency-dependent decay, and two polarizations per string for the characteristic fast-attack / slow-aftersound double decay.
 - **Unison groups** — 1–3 strings per key, unevenly detuned and unevenly struck, coupled through the bridge: real beating and uneven decay rather than envelope tricks.
 - **Hammer** — nonlinear felt (Hunt–Crossley hysteresis) integrated against an explicit agraffe reflection; contact time and brightness vary with key and velocity the way measured grands do.
-- **Pedals** — sustain as *continuous* damper lift (half-pedaling works), sostenuto with correct capture semantics, and una corda (softer felt, one string of the group unstruck). Keys from G6 up have no dampers, as on a real grand.
+- **Pedals** — sustain as *continuous* damper lift (half-pedaling works), sostenuto with correct capture semantics, and una corda (softer felt, one string of the group unstruck). Keys from G6 up have no dampers, as on a real grand. A damper that is touching but not seated limits the string nonlinearly, so a half-pedal buzzes rather than merely decaying faster.
+- **The action** — the piano's own noises, at the levels they were measured at on a real instrument: the key-off thump on every release (scaled by how fast the key is let go), the damper lifting under a silently pressed key, and the pedal tray going down and coming up, scaled by how many dampers actually move. Panned per key, band-limited like the structure-borne path it travels, and deterministic — the same performance renders the same samples. The levels are ratios to a strike of the same key as a microphone hears it, so the strike they are quoted against is measured through the finished chain when the instrument is built: a preset that voices the piano more quietly takes its action down with it.
+- **Touch** — a key pressed too gently to reach escapement lifts its damper and strikes nothing, which is how a pianist prepares sympathetic resonance without the pedal; release velocity sets how fast the damper falls.
 - **Sympathetic resonance** — undamped strings pick up energy from everything else that rings; strike-and-release with the pedal down leaves the authentic halo.
 - **Soundboard** — body resonances plus a short diffuse-field reverberator, per-key stereo placement, and a master chain with a safety limiter.
 
@@ -36,7 +38,8 @@ The default (dev) profile is built with `opt-level = 3` — the DSP is unusable 
 
 ```
 n C4 90            strike C4 at velocity 90 (names like F#3, Bb2; A4 = 440 Hz)
-off C4             release the key
+hold C4            press the key silently: the damper lifts, nothing sounds
+off C4 [rel]       release the key, optionally at a release velocity
 chord C3 E3 G3 95  strike together
 ped sus 0.5        sustain pedal (0..1, continuous) — also: sos 0|1, uc 0|1
 demo               ~15 s musical demo
@@ -60,11 +63,11 @@ cargo test --release
 
 ## Presets
 
-Every number that voices the instrument — the per-note tables (tuning, inharmonicity, decay, unison detuning, strike position, impedance, damper and hammer parameters) and the global constants (polarization balance, couplings, hammer felt, soundboard) — lives in a preset file. `--preset <file.toml>` voices both the live engine and offline renders from it; without it the built-in default is used, which is exactly `presets/default.toml`.
+Every number that voices the instrument — the per-note tables (tuning, inharmonicity, decay, unison detuning, strike position, impedance, damper and hammer parameters), the global constants (polarization balance, couplings, hammer felt, soundboard) and the action's own noises — lives in a preset file. `--preset <file.toml>` voices both the live engine and offline renders from it; without it the built-in default is used, which is exactly `presets/default.toml`.
 
 The `f0` table is the tuning, so a stretch-tuned (Railsback) instrument is a preset like any other. The default table is equal temperament.
 
-`presets/salamander-c5.toml` is the first preset *measured* rather than tuned by hand: the tuning, inharmonicity, damping and unison detuning of the Yamaha C5 recorded as the [Salamander Grand Piano](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html) (Alexander Holm, CC-BY 3.0), estimated from 480 recordings by the tuner. Everything those recordings cannot identify — strike position, felt, soundboard, coupling, dampers — is inherited from the default. To reproduce it:
+`presets/salamander-c5.toml` is the first preset *measured* rather than tuned by hand: the tuning, inharmonicity (including the signed fourth-order term the wound bass needs), damping, unison detuning, per-string decay spread, stereo directivity and action noise of the Yamaha C5 recorded as the [Salamander Grand Piano](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html) (Alexander Holm, CC-BY 3.0), estimated from 480 recordings by the tuner. Everything those recordings cannot identify — strike position, hammer contact width, felt, soundboard, coupling, dampers — is inherited from the default. To reproduce it:
 
 ```sh
 data/fetch_salamander.sh                       # 707 MiB, checksummed, into the gitignored data/
