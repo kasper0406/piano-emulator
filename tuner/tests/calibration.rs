@@ -53,6 +53,7 @@ use piano_tuner::estimate::hammer::{
 use piano_tuner::estimate::directivity::{
     balance_drift, pan_spread_for_drift, DirectivityConfig, DRIFT_AT_ZERO_DB, DRIFT_PER_SPREAD_DB,
 };
+use piano_tuner::estimate::duplex::{DuplexConfig, DUPLEX_LEVEL_OFFSET_DB};
 use piano_tuner::estimate::spread::{note_spread, SpreadConfig};
 use piano_tuner::estimate::{DecayConfig, StrikeConfig};
 use piano_tuner::pipeline::{analyze_note, NoteAnalysis, NoteConfig};
@@ -1082,4 +1083,442 @@ fn an_engine_loaded_with_the_recovered_preset_plays_the_notes_it_was_measured_fr
         }
         assert!(compared >= 5, "key {}: only {compared} partials", truth.key);
     }
+}
+
+// ------------------------------------------------- stage 2: the sympathetic side
+
+/// The engine's halo, isolated the way a sampler's release-resonance recording
+/// isolates it: the same note struck and released, rendered once through the
+/// whole instrument and once with nothing to couple through, subtracted.
+///
+/// The engine is deterministic, so the difference is exactly the sympathetic
+/// contribution — the bus, the admittance and the segments — with the struck
+/// string, the hammer and the mechanism all removed by cancellation rather than
+/// by a window chosen after the fact.
+fn halo_only(preset: &EnginePreset, key: u8, hold_s: f32, duration_s: f32) -> Vec<f32> {
+    let mut bare = preset.clone();
+    bare.voicing.resonance_coupling = 0.0;
+    bare.notes.duplex = Vec::new();
+    let events = [
+        RenderEvent::new(ONSET_S, Event::NoteOn { key, vel: 90 }),
+        RenderEvent::new(ONSET_S + hold_s, Event::NoteOff { key, vel: 64 }),
+    ];
+    let (wl, wr) = render_to_buffer(preset, &events, duration_s);
+    let (bl, br) = render_to_buffer(&bare, &events, duration_s);
+    wl.iter()
+        .zip(&wr)
+        .zip(bl.iter().zip(&br))
+        .skip(((ONSET_S + hold_s) * SAMPLE_RATE as f32) as usize)
+        .map(|((&l, &r), (&bl, &br))| 0.5 * ((l + r) - (bl + br)))
+        .collect()
+}
+
+/// A preset with the action silenced. `TUNING_REPORT.md` §5's `harm*` files are
+/// a recording of the strings alone — Salamander samples the key-off thump
+/// separately — so the engine's halo has to be measured with the mechanism out
+/// of the way too, or the thump would be counted as sympathetic resonance.
+fn without_mechanism(preset: &EnginePreset) -> EnginePreset {
+    let mut quiet = preset.clone();
+    for event in [
+        &mut quiet.noise.key_off,
+        &mut quiet.noise.damper_lift,
+        &mut quiet.noise.pedal_down,
+        &mut quiet.noise.pedal_up,
+    ] {
+        for anchor in &mut event.level_db {
+            anchor.db = -200.0;
+        }
+    }
+    quiet
+}
+
+/// A duplex segment the pipeline never saw, recovered from the engine's own
+/// render of it — and the two things that recovery says about the model.
+///
+/// This is the gate's answer to the obvious objection to `notes.duplex`: the
+/// estimator free-tracks peaks nobody told it about, so what stops it returning
+/// the note, or the room, or nothing? Here the truth is known.
+///
+/// What comes back exactly is the **frequency**, which is what `PHYSICS.md` §3
+/// says the field is *for* ("store measured frequencies, not ratios"), and the
+/// **linearity** of the level in `gain_db`, which is what makes the field
+/// estimable at all. What does not come back is the level's absolute value or
+/// the decay, and the reason is measured here rather than guessed at — see
+/// [`DUPLEX_LEVEL_OFFSET_DB`] and `DECISIONS.md`.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
+    let config = DuplexConfig::default();
+    // Where a real duplex sits, which is the case worth testing: Öberg &
+    // Askenfelt found rear-duplex tuning *sharp of nominal* by an average
+    // approaching +50 cents with tens of cents of scatter, so these are the
+    // fifth and ninth partials of C5 moved by +52 and −38 cents. Not ratios,
+    // and not arbitrary either — a segment placed midway between two partials
+    // receives no drive at all in this engine (`DECISIONS.md` 157), so it could
+    // not be recovered from any render, which is a fact about the model rather
+    // than about the estimator.
+    const KEY: u8 = 72;
+    let mut preset = without_mechanism(&gate_preset());
+    let partial = |k: u32, cents: f64| -> f32 {
+        let b = f64::from(preset.notes.inharmonicity_b[key_index(KEY).unwrap()]);
+        let k = f64::from(k);
+        (k * f64::from(preset.f0(KEY)) * (1.0 + b * k * k).sqrt() * (cents / 1200.0).exp2()) as f32
+    };
+    let truth = [
+        piano_emulator::preset::DuplexMode { hz: partial(5, 52.0), gain_db: -14.0, t60_s: 1.4 },
+        piano_emulator::preset::DuplexMode { hz: partial(9, -38.0), gain_db: -20.0, t60_s: 0.9 },
+    ];
+    preset.notes.duplex = vec![Vec::new(); 88];
+    preset.notes.duplex[key_index(KEY).unwrap()] = truth.to_vec();
+    assert!(preset.validate().is_ok(), "{:?}", preset.validate().err());
+
+    let partials: Vec<f64> = piano_tuner::estimate::duplex::partial_frequencies(
+        f64::from(preset.f0(KEY)),
+        f64::from(preset.notes.inharmonicity_b[key_index(KEY).unwrap()]),
+        0.0,
+        80,
+    );
+    // The peaks the estimator is allowed to see are only ever above the band a
+    // sympathetic speaking length occupies; here everything else has been
+    // subtracted away, so the cuts are relaxed to what the recovery needs.
+    // The cuts a release recording needs are relaxed to what this render
+    // needs: everything but the segments has been subtracted away, so nothing
+    // has to be told apart from a sympathetic string; and `max_fit_db` has to
+    // go, because the thing being measured is a mode the bank *culls* — a
+    // truncated decay is not a straight line in log amplitude, which is the
+    // finding of block (c) and cannot also be a rejection criterion here.
+    let loose = DuplexConfig {
+        min_t60_s: 0.0,
+        max_onset_s: 10.0,
+        max_fit_db: 40.0,
+        ..config
+    };
+    let track = |preset: &EnginePreset| -> Vec<piano_tuner::estimate::duplex::ResidualMode> {
+        let halo = halo_only(preset, KEY, 1.0, 6.0);
+        piano_tuner::estimate::duplex::residual_modes_above(
+            &halo,
+            SAMPLE_RATE,
+            &partials,
+            f64::from(preset.f0(KEY)),
+            &loose,
+        )
+        .expect("the residual tracks")
+    };
+
+    // The strike a segment's level is a ratio to, measured the way a segment
+    // is: an STFT peak against an STFT peak (`estimate::duplex::strongest_peak`).
+    let (sl, sr) = render_to_buffer(
+        &preset,
+        &[RenderEvent::new(ONSET_S, Event::NoteOn { key: KEY, vel: 90 })],
+        3.0,
+    );
+    let strike: Vec<f32> = sl.iter().zip(&sr).map(|(&l, &r)| 0.5 * (l + r)).collect();
+    let reference =
+        piano_tuner::estimate::duplex::strongest_peak(&strike, SAMPLE_RATE, &config).unwrap();
+
+    // (a) The frequency, which is the field's whole point.
+    let modes = track(&preset);
+    assert!(!modes.is_empty(), "nothing came back at all");
+    let found = modes
+        .iter()
+        .min_by(|a, b| {
+            (a.hz - f64::from(truth[0].hz))
+                .abs()
+                .total_cmp(&(b.hz - f64::from(truth[0].hz)).abs())
+        })
+        .expect("a nearest mode");
+    let cents = 1200.0 * (found.hz / f64::from(truth[0].hz)).log2();
+    println!(
+        "segment asked for at {:.1} Hz came back at {:.1} Hz ({cents:+.2} cents), {:+.2} dB re strike",
+        truth[0].hz,
+        found.hz,
+        20.0 * (found.amplitude / reference).log10()
+    );
+    assert!(
+        cents.abs() < 2.0,
+        "{cents:+.2} cents: that is a different resonance, or the tracker snapped to the grid"
+    );
+    // It is not the note's own partial either — 52 cents away, and the guard
+    // that would have thrown a real duplex away is 12.
+    assert!(
+        partials
+            .iter()
+            .all(|&f| (1200.0 * (found.hz / f).log2()).abs() > 40.0),
+        "the recovered segment is a partial"
+    );
+
+    // (b) The level is exactly linear in `gain_db`, which is what makes the
+    // field invertible: one measured constant turns a measured ratio into a
+    // preset value, and `DUPLEX_LEVEL_OFFSET_DB` is that constant.
+    let mut offsets = Vec::new();
+    for gain_db in [-26.0f32, -20.0, -14.0, -8.0] {
+        let mut candidate = preset.clone();
+        for mode in candidate.notes.duplex[key_index(KEY).unwrap()].iter_mut() {
+            mode.gain_db = gain_db;
+        }
+        let modes = track(&candidate);
+        let level = modes
+            .iter()
+            .find(|m| (1200.0 * (m.hz / f64::from(truth[0].hz)).log2()).abs() < 2.0)
+            .map(|m| 20.0 * (m.amplitude / reference).log10())
+            .expect("the segment is there at every gain");
+        offsets.push(f64::from(gain_db) - level);
+    }
+    let spread = offsets.iter().fold(f64::NEG_INFINITY, |m, &x| m.max(x))
+        - offsets.iter().fold(f64::INFINITY, |m, &x| m.min(x));
+    println!(
+        "the level offset over 18 dB of gain: {offsets:?} (spread {spread:.3} dB) against \
+         DUPLEX_LEVEL_OFFSET_DB = {DUPLEX_LEVEL_OFFSET_DB:+.2}"
+    );
+    assert!(spread < 0.2, "the level is not linear in gain_db: {offsets:?}");
+    let mean = offsets.iter().sum::<f64>() / offsets.len() as f64;
+    assert!(
+        (mean - DUPLEX_LEVEL_OFFSET_DB).abs() < 2.0,
+        "the engine's duplex gain staging has moved: {mean:+.2} dB against \
+         DUPLEX_LEVEL_OFFSET_DB = {DUPLEX_LEVEL_OFFSET_DB:+.2}"
+    );
+
+    // (c) And the finding the offset's *size* is: 94 dB is not a gain-staging
+    // constant, it is a mode that never builds. `gain_db` is normalised to the
+    // steady response at resonance, so the per-sample input gain is
+    // `2 G (1 - r)` — a part in ten thousand at these decays — and
+    // `ModalBank`'s culling zeroes a state that small before the drive has had
+    // time to raise it. The segment therefore shows its *impulse* response and
+    // stops, whatever `t60_s` says, which this pins: the recovered decay is a
+    // small fraction of the one asked for, and the day the drive path changes
+    // this test fails and the constant above has to be re-measured.
+    let modes = track(&preset);
+    let decayed = modes
+        .iter()
+        .find(|m| (1200.0 * (m.hz / f64::from(truth[0].hz)).log2()).abs() < 2.0)
+        .expect("the segment");
+    println!(
+        "the segment asked to ring {:.1} s rang {:.2} s: the bank is culled before it builds",
+        truth[0].t60_s, decayed.t60_s
+    );
+    assert!(
+        decayed.t60_s < 0.5 * f64::from(truth[0].t60_s),
+        "the segment rang for {:.2} s of the {} s it was given — the culling finding has been \
+         fixed, and `estimate::duplex`'s level convention has to be re-derived",
+        decayed.t60_s,
+        truth[0].t60_s
+    );
+}
+
+/// The halo's level answers the coupling the way the fit assumes it does —
+/// close to one dB per dB — so that `estimate::halo::refine`'s step is a step
+/// and not a guess.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+fn the_halo_level_follows_the_coupling_the_fit_inverts_it_on() {
+    const KEY: u8 = 48;
+    let base = without_mechanism(&gate_preset());
+    let level = |coupling: f32| -> f64 {
+        let mut preset = base.clone();
+        preset.voicing.resonance_coupling = coupling;
+        let halo = halo_only(&preset, KEY, 1.0, 6.0);
+        let (sl, sr) = render_to_buffer(
+            &preset,
+            &[RenderEvent::new(ONSET_S, Event::NoteOn { key: KEY, vel: 90 })],
+            3.0,
+        );
+        let strike: Vec<f32> = sl.iter().zip(&sr).map(|(&l, &r)| 0.5 * (l + r)).collect();
+        piano_tuner::estimate::halo::resonance_level(&halo, 0.0, &strike, 0.0, SAMPLE_RATE)
+            .map_or(f64::NAN, |l| l.peak_db)
+    };
+    let quiet = level(0.012);
+    let loud = level(0.024);
+    println!("halo at coupling 0.012: {quiet:.1} dB; at 0.024: {loud:.1} dB");
+    assert!(quiet.is_finite() && loud.is_finite());
+    // Doubling the coupling doubles the drive. It is not exactly 6 dB — a
+    // louder halo wakes voices that were culled, which adds more than the
+    // drive did — so the band is wide, and the direction is the assertion.
+    let moved = loud - quiet;
+    assert!(
+        (3.0..12.0).contains(&moved),
+        "doubling the coupling moved the halo {moved:+.1} dB"
+    );
+}
+
+/// The tuner's mirror of the bridge filter is the engine's filter, and the one
+/// shape parameter the halo fit is allowed to move lands where it was aimed.
+///
+/// This is what makes the backbone fittable rather than a knob. `max|B|` — the
+/// quantity both crates' stability check is computed from — comes out of a
+/// *fitted* shelf cascade, so a mirror that drifted by a decibel would let a
+/// preset through one crate and not the other; and a tilt that did not land
+/// where it was asked for would make `estimate::halo::refine`'s step a guess.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+fn a_known_bridge_tilt_is_the_tilt_the_engines_own_filter_realises() {
+    let tuner_base = Preset::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/default.toml"),
+    )
+    .expect("the base preset");
+    let peaks = piano_tuner::estimate::halo::peaks_from_body_modes(&tuner_base);
+    let transition = piano_tuner::estimate::halo::TRANSITION_HZ;
+
+    let mut realised = Vec::new();
+    for tilt in [0.0f64, 9.0] {
+        let voicing = piano_tuner::estimate::halo::HaloVoicing {
+            coupling: 0.012,
+            backbone_gain_db: 0.0,
+            treble_tilt_db: tilt,
+        };
+        let mut candidate = tuner_base.clone();
+        voicing
+            .apply(&mut candidate, peaks.clone())
+            .expect("a valid voicing");
+        let engine =
+            EnginePreset::from_toml(&candidate.to_toml()).expect("the engine reads it back");
+
+        // Bit for bit, on the realised cascade and not on the anchors.
+        let mine = piano_tuner::response::BridgeResponse::of(candidate.voicing.bridge.as_ref());
+        let theirs =
+            piano_emulator::resonance::BridgeFilter::new(engine.voicing.bridge.as_ref().unwrap());
+        assert_eq!(mine.max_magnitude(), theirs.max_magnitude());
+        for hz in [20.0f32, 100.0, 1_100.0, 4_000.0, 12_000.0, 19_000.0] {
+            assert_eq!(
+                mine.magnitude(f64::from(hz)) as f32,
+                theirs.magnitude(hz),
+                "the mirror and the engine disagree at {hz} Hz"
+            );
+        }
+        realised.push((
+            20.0 * (mine.magnitude(8_000.0) / mine.magnitude(transition)).log10(),
+            20.0 * mine.magnitude(200.0).log10(),
+        ));
+
+        // ... including on the construction that made the measurement hard:
+        // two clusters of resonances whose joint maximum sits between their
+        // centres, where the search has to scan finely and refine rather than
+        // sample (`DECISIONS.md` 179). If the two crates disagreed by one bit
+        // *there*, a preset would be legal in the tuner and refused by the
+        // engine, which is the failure this whole mirror exists to prevent.
+        let mut clustered = candidate.clone();
+        let mut cluster = clustered.voicing.bridge.clone().expect("a bridge");
+        cluster.peaks.clear();
+        for hz in [101.63f32, 102.32] {
+            for _ in 0..10 {
+                cluster.peaks.push(piano_tuner::preset::BridgePeak {
+                    hz,
+                    q: 50.0,
+                    gain_db: 6.0,
+                });
+            }
+        }
+        clustered.voicing.bridge = Some(cluster);
+        clustered.voicing.resonance_coupling = 1.0e-6;
+        clustered.validate().expect("the clustered bridge is well formed");
+        let engine_cluster =
+            EnginePreset::from_toml(&clustered.to_toml()).expect("the engine reads it back");
+        let mine_cluster =
+            piano_tuner::response::BridgeResponse::of(clustered.voicing.bridge.as_ref());
+        let theirs_cluster = piano_emulator::resonance::BridgeFilter::new(
+            engine_cluster.voicing.bridge.as_ref().expect("a bridge"),
+        );
+        assert_eq!(
+            mine_cluster.max_magnitude(),
+            theirs_cluster.max_magnitude(),
+            "the mirror and the engine disagree on a clustered bridge"
+        );
+        println!(
+            "tilt {tilt:+.1} dB: realised {:+.2} dB at 8 kHz re the transition, {:+.2} dB at 200 Hz",
+            realised[realised.len() - 1].0,
+            realised[realised.len() - 1].1
+        );
+    }
+
+    // A tilt quoted at 16 kHz is `log2(8000/1100) / log2(16000/1100)` of itself
+    // at 8 kHz, which is where the backbone anchors say it should be.
+    let asked = 9.0 * (8_000.0f64 / transition).log2() / (16_000.0f64 / transition).log2();
+    let moved = realised[1].0 - realised[0].0;
+    assert!(
+        (moved - asked).abs() < 1.0,
+        "a {asked:.2} dB tilt at 8 kHz was realised as {moved:.2} dB"
+    );
+    // And it barely touches the bass. Not *exactly* nothing: the backbone is a
+    // fitted cascade, so moving the top anchors moves every shelf a little —
+    // which is precisely why `max|B|` has to be measured rather than read off
+    // the file.
+    let bass = (realised[1].1 - realised[0].1).abs();
+    assert!(bass < 1.5, "the treble tilt moved 200 Hz by {bass:.2} dB");
+}
+
+/// `notes.pan_spread` recovered per key from the drift it puts in the image —
+/// the per-key half of `the_pan_spread_comes_back_from_the_drift_it_puts_in_the_image`,
+/// and the reason the field exists: one global number cannot fit both ends of
+/// the compass.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+fn a_known_per_key_spread_comes_back_key_by_key() {
+    const KEYS: [u8; 3] = [45, 60, 72];
+    let truth = [0.10f32, 0.30, 0.20];
+    let config = DirectivityConfig::default();
+    let survey = piano_tuner::survey::SurveyConfig::default();
+
+    let tuner_base = Preset::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/default.toml"),
+    )
+    .expect("the base preset");
+
+    // The two ends of each key's line, measured on the engine.
+    let drift = |table: Option<&[f32]>, global: f32, key: u8| -> Option<f64> {
+        let mut candidate = tuner_base.clone();
+        candidate.voicing.polarization_pan_spread = global;
+        candidate.notes.pan_spread = table.map(<[f32]>::to_vec).unwrap_or_default();
+        let mut engine = EnginePreset::from_toml(&candidate.to_toml()).ok()?;
+        engine.soundboard.board_mix = 0.0;
+        let (left, right) = render_to_buffer(
+            &engine,
+            &[RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })],
+            8.0,
+        );
+        let f0 = equal_temperament(key);
+        let note_config = survey.note_config(f0).ok()?;
+        balance_drift(&left, &right, f0, SAMPLE_RATE, &note_config, &config)
+            .ok()
+            .map(|d| d.drift_db)
+    };
+
+    let mut table = vec![0.0f32; 88];
+    for (&key, &spread) in KEYS.iter().zip(&truth) {
+        table[key_index(key).unwrap()] = spread;
+    }
+
+    let mut lines = Vec::new();
+    let mut measured = Vec::new();
+    for &key in &KEYS {
+        let line = piano_tuner::estimate::directivity::KeyDriftLine {
+            key,
+            at_zero_db: drift(None, 0.0, key).expect("a drift at zero"),
+            at_ceiling_db: drift(None, 0.4, key).expect("a drift at the ceiling"),
+        };
+        let truth_drift = drift(Some(&table), 0.0, key).expect("a drift at the truth");
+        println!(
+            "key {key}: line {:.2}..{:.2} dB, the table's own spread drifted {truth_drift:.2} dB \
+             -> {:.3}",
+            line.at_zero_db,
+            line.at_ceiling_db,
+            line.spread_for(truth_drift)
+        );
+        lines.push(line);
+        measured.push((key, truth_drift));
+    }
+
+    let recovered =
+        piano_tuner::estimate::directivity::pan_spread_table(&measured, &lines).expect("a table");
+    for (&key, &want) in KEYS.iter().zip(&truth) {
+        let got = recovered[key_index(key).unwrap()];
+        assert!(
+            (got - want).abs() < 0.08,
+            "key {key}: a spread of {want} came back as {got:.3}"
+        );
+    }
+    // And the compass-wide inversion does not manage it: the whole point.
+    let global: Vec<f64> = measured
+        .iter()
+        .map(|&(_, d)| pan_spread_for_drift(d))
+        .collect();
+    println!("the compass-wide line would have said {global:?} against {truth:?}");
 }

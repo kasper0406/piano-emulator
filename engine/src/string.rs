@@ -12,6 +12,7 @@
 
 use crate::modal::ModalBank;
 use crate::preset::Voicing;
+use crate::resonance::BridgeFilter;
 use crate::types::{db_to_amp, BLOCK, MAX_PARTIALS, MAX_PARTIAL_RATIO, SAMPLE_RATE};
 
 /// Largest unison bridge coupling a preset may ask for.
@@ -194,9 +195,50 @@ pub struct PianoString {
     damper: f32,
 }
 
+/// How far the admittance may move a partial's fitted decay rate, as a
+/// multiplier on it.
+///
+/// `sigma_k * (1 + share * (|P| - 1))` is unbounded above — forty +20 dB peaks
+/// on one frequency multiply `|P|` by ten thousand — and can approach zero
+/// below. The fitted `sigma(f)` is a *measurement* and the admittance's
+/// fluctuation is a correction to it, so the correction is held to a factor of
+/// four either way: a partial may ring twice as long or die four times as fast
+/// as the recordings say, and no more, whatever the bridge asks for. Both ends
+/// are far outside the ±10–15 dB of real board fluctuation, so this clamps
+/// pathological presets and nothing else.
+pub const RADIATED_FACTOR_RANGE: (f32, f32) = (0.25, 4.0);
+
+/// The per-partial multiplier `voicing.bridge.radiated_share` implies, one
+/// entry per partial. All ones — and built as ones, not computed — when the
+/// preset has no bridge or asks for no share of it, which is what keeps every
+/// existing preset's strings bit for bit what they were.
+fn radiated_damping(params: &StringParams, voicing: &Voicing, partials: usize) -> Vec<f32> {
+    let share = match &voicing.bridge {
+        Some(bridge) if bridge.radiated_share > 0.0 => bridge.radiated_share,
+        _ => return vec![1.0; partials],
+    };
+    // The *fluctuation* of the board's mobility, not its mean: the mean is
+    // already in the fitted `sigma(f)` and adding it again would retune the
+    // whole compass. See `BridgeVoicing::radiated_share`.
+    let modes = BridgeFilter::peaks_only(voicing.bridge.as_ref().expect("checked above"));
+    (1..=partials)
+        .map(|k| {
+            let excess = modes.magnitude(params.partial_freq(k)) - 1.0;
+            (1.0 + share * excess).clamp(RADIATED_FACTOR_RANGE.0, RADIATED_FACTOR_RANGE.1)
+        })
+        .collect()
+}
+
 impl PianoString {
     pub fn new(params: StringParams, voicing: &Voicing) -> Self {
         let partials = params.partial_count();
+        // `Re Y` in the per-partial damping: a partial that sits on a board
+        // mode loses energy into the board faster than the smooth fitted decay
+        // law says, and one in a trough slower. This is the half of
+        // `PHYSICS.md` §4 the resonance bus cannot produce — the bus subtracts
+        // each string's own contribution, so nothing in it is proportional to
+        // the string's own motion and it can only ever *add* drive.
+        let radiated = radiated_damping(&params, voicing, partials);
         // Mode k's force on the bridge for a hammer impulse J is
         // `4 f0 J sin(k pi x_strike)`: the modal mass of the string is
         // Z / (2 f0), and turning the mode's displacement back into bridge
@@ -223,7 +265,8 @@ impl PianoString {
             let mut horizontal = ModalBank::with_capacity(partials);
             for k in 1..=partials {
                 let f = params.partial_freq(k) * detune;
-                let sigma = params.partial_sigma(k) * vertical_factor * sigma_scale;
+                let sigma =
+                    params.partial_sigma(k) * vertical_factor * sigma_scale * radiated[k - 1];
                 // g_k ∝ sin(k pi x_strike) nulls the partials with a node at
                 // the strike point, and the contact taper is what a hammer wide
                 // enough to average over that comb does to the top of it; the
@@ -452,7 +495,7 @@ impl PianoString {
 mod tests {
     use super::*;
     use crate::hammer::Hammer;
-    use crate::preset::Preset;
+    use crate::preset::{BridgeAnchor, BridgePeak, BridgeVoicing, Preset};
 
     fn preset() -> Preset {
         Preset::default()
@@ -589,6 +632,82 @@ mod tests {
             assert!((s.partial_freq(1, k) - want).abs() < 1e-3 * want);
             assert!(want > two_parameter_freq(&params, k), "partial {k} not stretched");
         }
+    }
+
+    /// `Re Y` in the string's own damping: the half of `PHYSICS.md` §4 that
+    /// the resonance bus cannot produce.
+    ///
+    /// The bus subtracts each string's own contribution, so nothing in it is
+    /// proportional to the string's own motion and it can only ever *add*
+    /// drive — `resonance.rs` pins that. A partial that sits on a board mode
+    /// nevertheless has to die faster than the smooth fitted decay law says,
+    /// because that is where the board takes energy fastest, and this is where
+    /// it happens: at the partial's own pole, when the instrument is built.
+    ///
+    /// Measured on the rendered note, not on the coefficient: a single string,
+    /// a bridge resonance sitting on its fundamental, and the vertical bank's
+    /// stored energy read at two times, which decays at exactly twice the
+    /// polarization's rate once only the fundamental is left.
+    #[test]
+    fn a_partial_on_a_board_mode_decays_faster_than_the_fitted_law() {
+        const KEY: u8 = 84;
+        const PEAK_DB: f32 = 6.0;
+        let base = preset();
+        let f0 = base.string_params(KEY).partial_freq(1);
+
+        let rate_at = |share: f32| {
+            let mut preset = base.clone();
+            preset.voicing.bridge = Some(BridgeVoicing {
+                backbone: vec![
+                    BridgeAnchor { hz: 20.0, gain_db: 0.0 },
+                    BridgeAnchor { hz: 16_000.0, gain_db: 0.0 },
+                ],
+                peaks: vec![BridgePeak { hz: f0, q: 30.0, gain_db: PEAK_DB }],
+                radiated_share: share,
+            });
+            preset.voicing.resonance_coupling = 0.0;
+            assert!(preset.validate().is_ok(), "the probe preset is not legal");
+            let mut params = preset.string_params(KEY);
+            params.unison = 1;
+            let mut string = PianoString::new(params, &preset.voicing);
+            let mut hammer = Hammer::new(preset.hammer_params(KEY));
+            hammer.strike_midi(100);
+            let mut out = [0.0f32; BLOCK];
+            let probes = [0.35f32, 0.6];
+            let mut energy = Vec::new();
+            for block in 0..(SAMPLE_RATE / BLOCK as f32) as usize {
+                let t = (block * BLOCK) as f32 / SAMPLE_RATE;
+                if probes.iter().any(|p| (t - p).abs() < BLOCK as f32 / SAMPLE_RATE * 0.5) {
+                    energy.push(string.strings[0].vertical.energy());
+                }
+                hammer.add_pulse(string.excitation_mut(0), 0, 1.0);
+                hammer.advance(BLOCK);
+                string.process(&mut out);
+            }
+            assert_eq!(energy.len(), probes.len());
+            (energy[0] / energy[1]).ln() / (2.0 * (probes[1] - probes[0]))
+        };
+
+        // A share of zero is the instrument as it was, to the last bit of the
+        // pole: the factor is exactly 1.0 and nothing is recomputed.
+        let plain = rate_at(0.0);
+        let sigma_v = base.string_params(KEY).partial_sigma(1) * base.voicing.vertical_decay_factor();
+        assert!(
+            (plain / sigma_v - 1.0).abs() < 0.05,
+            "a zero share moved the decay: {plain} against the designed {sigma_v}"
+        );
+
+        // Half of the loss is into the board, and the board is 6 dB livelier
+        // right here, so the partial must lose it 1 + 0.5 * (2 - 1) = 1.5 times
+        // as fast.
+        let share = 0.5f32;
+        let want = 1.0 + share * (db_to_amp(PEAK_DB) - 1.0);
+        let faster = rate_at(share) / plain;
+        assert!(
+            (faster / want - 1.0).abs() < 0.05,
+            "a partial on a {PEAK_DB} dB board mode decayed {faster:.3} times faster, \
+             expected {want:.3}"
+        );
     }
 
     #[test]

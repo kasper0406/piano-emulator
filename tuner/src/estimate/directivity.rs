@@ -53,6 +53,17 @@ pub const DRIFT_AT_ZERO_DB: f64 = 0.32;
 /// The engine's ceiling on the parameter (`soundboard::MAX_PAN_SPREAD`).
 pub const MAX_PAN_SPREAD: f64 = 0.4;
 
+/// The band `TUNING_REPORT.md` §5 measured the recordings' drift in: 1.2 dB at
+/// A0 to 6.2 dB at C6, over the whole compass and every key it sampled.
+///
+/// [`pan_spread_table`] aims at each key's *own* recorded drift clamped into
+/// this band, and the clamp is the point of the field. A recording that drifts
+/// 10.7 dB at C6 is a measurement of eight partials at the end of a treble
+/// note's decay, where three of them are in the recording's floor; asking the
+/// engine to reproduce it exactly is asking it to reproduce the floor. The
+/// band is what the report is willing to claim, so it is what the fit aims at.
+pub const MEASURED_DRIFT_BAND: (f64, f64) = (1.2, 6.2);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectivityConfig {
     /// The two times the balance is read at, in seconds after the onset.
@@ -177,6 +188,92 @@ pub fn pan_spread_for_drift(measured_db: f64) -> f64 {
     ((measured_db - DRIFT_AT_ZERO_DB) / DRIFT_PER_SPREAD_DB).clamp(0.0, MAX_PAN_SPREAD)
 }
 
+/// The line one key's drift follows against the spread, measured on the engine
+/// at two spreads rather than assumed from the compass-wide constants.
+///
+/// [`DRIFT_PER_SPREAD_DB`] is one number for the whole instrument, and the
+/// instrument does not have one: at the ceiling the engine's own renders drift
+/// 0.24 dB at A0, 1.26 at A2, 3.33 at C4, 8.67 at C5 and 5.59 at C7
+/// (`TUNING_REPORT.md` §5, Milestone A update) against the recordings' 1.24,
+/// 4.73, 3.96, 5.33 and 5.85. A spread fitted to the compass median therefore
+/// undershoots the bass by a factor of five and *overshoots* C5 and C6 — which
+/// is what `notes.pan_spread` exists to fix, and what this inverts.
+///
+/// Both ends are measurements on the engine, so nothing here models the
+/// diffuse field, the key's own pan or the polarizations' decay ratio: they are
+/// in the two numbers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyDriftLine {
+    pub key: u8,
+    /// Drift the engine shows at spread 0 and at spread [`MAX_PAN_SPREAD`], dB.
+    pub at_zero_db: f64,
+    pub at_ceiling_db: f64,
+}
+
+impl KeyDriftLine {
+    /// The spread whose renders drift as far as a recording that drifted
+    /// `measured_db`, for this key.
+    ///
+    /// Clamped into the engine's range at both ends. A key whose line has no
+    /// slope — the bass, where the pan has almost nowhere left to move —
+    /// cannot be inverted, and asks for the ceiling if the recording drifts
+    /// more than the engine does and for nothing if it does not. Saying so is
+    /// better than dividing by a slope of 0.02 dB and writing a spread of 60.
+    pub fn spread_for(&self, measured_db: f64) -> f64 {
+        if !measured_db.is_finite() {
+            return 0.0;
+        }
+        let slope = (self.at_ceiling_db - self.at_zero_db) / MAX_PAN_SPREAD;
+        if slope <= MIN_USABLE_SLOPE {
+            return if measured_db > self.at_zero_db {
+                MAX_PAN_SPREAD
+            } else {
+                0.0
+            };
+        }
+        ((measured_db - self.at_zero_db) / slope).clamp(0.0, MAX_PAN_SPREAD)
+    }
+}
+
+/// Slope, in dB of drift per unit of spread, below which a key's line carries
+/// no information. A tenth of the compass-wide [`DRIFT_PER_SPREAD_DB`]: below
+/// that, a 1 dB error in the measured drift moves the answer by more than the
+/// whole range of the parameter.
+pub const MIN_USABLE_SLOPE: f64 = 0.83;
+
+/// Fits `notes.pan_spread` — one spread per key — from the drift measured on
+/// the recordings and the two lines measured on the engine.
+///
+/// `measured` and the two engine columns are sparse (a library samples a
+/// subset of the compass); the answer is all 88 keys, filled in by the same
+/// monotone-cubic interpolation across the compass every other per-note table
+/// uses. Keys the recordings never covered therefore inherit their neighbours'
+/// spread rather than the compass median, which is the whole point: the median
+/// is what overshot.
+pub fn pan_spread_table(measured: &[(u8, f64)], lines: &[KeyDriftLine]) -> Result<Vec<f32>> {
+    let mut points: Vec<(u8, f64)> = Vec::new();
+    for &(key, drift_db) in measured {
+        let Some(line) = lines.iter().find(|l| l.key == key) else {
+            continue;
+        };
+        let target = drift_db.clamp(MEASURED_DRIFT_BAND.0, MEASURED_DRIFT_BAND.1);
+        points.push((key, line.spread_for(target)));
+    }
+    if points.is_empty() {
+        return Err(crate::error::Error::Estimate(
+            "no key had both a measured drift and an engine line".into(),
+        ));
+    }
+    points.sort_by_key(|&(key, _)| key);
+    points.dedup_by_key(|&mut (key, _)| key);
+    // Linear, not logarithmic: a spread of zero is a legitimate answer for a
+    // key whose image the recordings say does not move, and log of zero is not.
+    Ok(crate::estimate::compass::interpolate_keys(&points, false)?
+        .into_iter()
+        .map(|s| s.clamp(0.0, MAX_PAN_SPREAD) as f32)
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +292,82 @@ mod tests {
             pan_spread_for_drift(DRIFT_AT_ZERO_DB + 0.5 * MAX_PAN_SPREAD * DRIFT_PER_SPREAD_DB);
         assert!((spread - 0.5 * MAX_PAN_SPREAD).abs() < 1e-12, "{spread}");
         assert_eq!(pan_spread_for_drift(100.0), MAX_PAN_SPREAD);
+    }
+
+    /// The per-key inversion is the per-key line, and the compass-wide
+    /// constant is not: at C5 the engine moves twice as far per unit of spread
+    /// as the median key, so the same recorded drift asks for half the spread.
+    #[test]
+    fn a_key_is_inverted_on_its_own_line_and_not_on_the_compass_median() {
+        // The Milestone A columns of `TUNING_REPORT.md` §5, as lines.
+        let c5 = KeyDriftLine {
+            key: 72,
+            at_zero_db: 0.32,
+            at_ceiling_db: 8.67,
+        };
+        let a2 = KeyDriftLine {
+            key: 45,
+            at_zero_db: 0.32,
+            at_ceiling_db: 1.26,
+        };
+        // C5's recording drifts 5.33 dB. The compass line says 0.40 — the
+        // ceiling — and C5's own line says 0.24.
+        assert!((pan_spread_for_drift(5.33) - MAX_PAN_SPREAD).abs() < 1.0e-12);
+        let own = c5.spread_for(5.33);
+        assert!((own - 0.240).abs() < 0.005, "{own}");
+        // A2's recording drifts 4.73 dB, which its own line cannot reach at
+        // all: it gets the ceiling, and honestly.
+        assert_eq!(a2.spread_for(4.73), MAX_PAN_SPREAD);
+        assert_eq!(c5.spread_for(0.0), 0.0);
+        assert_eq!(c5.spread_for(f64::NAN), 0.0);
+    }
+
+    /// A key whose image the spread cannot move — the bass, panned to the edge
+    /// already — is not inverted through a slope of nearly zero.
+    #[test]
+    fn a_key_the_spread_cannot_move_is_not_divided_by_its_own_noise() {
+        let a0 = KeyDriftLine {
+            key: 21,
+            at_zero_db: 0.20,
+            at_ceiling_db: 0.24,
+        };
+        assert_eq!(a0.spread_for(1.24), MAX_PAN_SPREAD);
+        assert_eq!(a0.spread_for(0.10), 0.0);
+    }
+
+    #[test]
+    fn the_table_covers_the_compass_and_stays_inside_the_engines_range() {
+        let lines: Vec<KeyDriftLine> = [21u8, 45, 60, 72, 96]
+            .into_iter()
+            .zip([0.24, 1.26, 3.33, 8.67, 5.59])
+            .map(|(key, at_ceiling_db)| KeyDriftLine {
+                key,
+                at_zero_db: 0.32,
+                at_ceiling_db,
+            })
+            .collect();
+        let measured: Vec<(u8, f64)> = [21u8, 45, 60, 72, 96]
+            .into_iter()
+            .zip([1.24, 4.73, 3.96, 5.33, 5.85])
+            .collect();
+        let table = pan_spread_table(&measured, &lines).unwrap();
+        assert_eq!(table.len(), 88);
+        // Every target is inside the band the report is willing to claim.
+        assert!(table.iter().all(|&s| (0.0..=MAX_PAN_SPREAD as f32).contains(&s)));
+        // The measured keys keep their own answers: the interpolant passes
+        // through its data, like every other per-note table.
+        for (key, drift) in measured {
+            let line = lines.iter().find(|l| l.key == key).unwrap();
+            let index = usize::from(key - 21);
+            let target = drift.clamp(MEASURED_DRIFT_BAND.0, MEASURED_DRIFT_BAND.1);
+            assert!(
+                (f64::from(table[index]) - line.spread_for(target)).abs() < 1.0e-6,
+                "key {key}"
+            );
+        }
+        // And the finding that motivated the field: C5 asks for much less than
+        // the bass, where the global scalar had put them at the same 0.4.
+        assert!(table[usize::from(72u8 - 21)] < table[usize::from(21u8 - 21)]);
     }
 
     /// The drift is a magnitude, so a note that swings the other way asks for

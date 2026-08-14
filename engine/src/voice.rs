@@ -7,6 +7,7 @@
 //! pedal sound right.
 
 use crate::calibrate::MechanismCalibration;
+use crate::duplex::DuplexBank;
 use crate::hammer::{Hammer, MAX_SKEW_SAMPLES};
 use crate::noise::{self, Burst, EventModel, NoiseShapes};
 use crate::pedal::PedalState;
@@ -65,6 +66,10 @@ pub struct Voice {
     /// apart. Decided at construction: the audio path only reads it.
     spread: bool,
     string: PianoString,
+    /// The key's duplex and aliquot segments. Empty for every key of a preset
+    /// that has no `notes.duplex` table, and then never touched.
+    duplex: DuplexBank,
+    duplex_out: [f32; BLOCK],
     hammer: Hammer,
     held: bool,
     damper_current: f32,
@@ -109,8 +114,7 @@ impl Voice {
         // side is which alternates with the key, or the spread would tilt the
         // whole instrument: every voice would put its aftersound on the same
         // side of itself and the sum of 88 of them is a lateral bias.
-        let spread = preset.voicing.polarization_pan_spread
-            * if key % 2 == 0 { 1.0 } else { -1.0 };
+        let spread = preset.pan_spread(key) * if key % 2 == 0 { 1.0 } else { -1.0 };
         let mut voice = Voice {
             key,
             index: key_index(key).expect("voice key must be within A0..C8"),
@@ -119,6 +123,8 @@ impl Voice {
             pan_horizontal: pan + spread,
             spread: spread != 0.0,
             string: PianoString::new(preset.string_params(key), &preset.voicing),
+            duplex: DuplexBank::new(preset.duplex_modes(key)),
+            duplex_out: [0.0; BLOCK],
             hammer,
             held: false,
             damper_current: 0.0,
@@ -174,14 +180,28 @@ impl Voice {
         self.held
     }
 
-    /// A voice can be skipped entirely when nothing is ringing and no hammer
-    /// pulse is in flight.
+    /// A voice makes no sound when nothing is ringing, no hammer pulse is in
+    /// flight, and its undamped segments have gone quiet too.
     pub fn is_idle(&self) -> bool {
+        self.strings_idle() && self.duplex.is_idle()
+    }
+
+    /// The strings' own half of [`Voice::is_idle`].
+    ///
+    /// Kept apart because the segments are never damped and the strings are:
+    /// a duplex bank that is still ringing must not drag the note's eighty
+    /// partials through another second of blocks with it.
+    fn strings_idle(&self) -> bool {
         !self.hammer.is_active() && self.string.is_idle()
     }
 
     pub fn string(&self) -> &PianoString {
         &self.string
+    }
+
+    /// The key's undamped segments, for tests and reporting.
+    pub fn duplex(&self) -> &DuplexBank {
+        &self.duplex
     }
 
     /// A key press hard enough to reach escapement: the damper lifts and the
@@ -258,7 +278,11 @@ impl Voice {
     /// voice reaches the board — one `add_voice` at the key's pan, or two, one
     /// per polarization.
     ///
-    /// Returns false when the voice had no *string* to render, in which case
+    /// The key's duplex segments join that mono sum, so they reach the board
+    /// and the bus with the note; they are rendered whether or not the strings
+    /// are, since nothing damps them.
+    ///
+    /// Returns false when the voice had nothing at all to render, in which case
     /// `out` was not touched — the caller must not feed it to the bus. The
     /// board may still have been added to: a key released long after its note
     /// died makes its mechanism noise from exactly that state, and the noise
@@ -269,7 +293,18 @@ impl Voice {
     /// played.
     pub fn process(&mut self, out: &mut [f32], bus: &ResonanceBus, board: &mut Soundboard) -> bool {
         debug_assert_eq!(out.len(), BLOCK);
-        if self.is_idle() && !(bus.is_active() && self.damper_target < 1.0) {
+        // The strings run while they are ringing, while a hammer is in flight,
+        // and whenever the bus can reach them.
+        let strings_live = !self.strings_idle() || (bus.is_active() && self.damper_target < 1.0);
+        // The segments have no damper at all, so the damper does not appear
+        // here: they run while they still hold something, and whenever anything
+        // can drive them — this key's own strings, or the bus with another
+        // key's note on it. A key with no segments never takes this path at
+        // all, which is what keeps a preset without them exactly the instrument
+        // it was.
+        let duplex_live = !self.duplex.is_empty()
+            && (strings_live || bus.is_active() || !self.duplex.is_idle());
+        if !strings_live && !duplex_live {
             // A key released long after its note died still thumps, and a
             // silently prepared key still lifts its damper audibly. Neither
             // wakes the strings: the noise reaches the board directly, so a
@@ -285,59 +320,95 @@ impl Voice {
         }
         out.fill(0.0);
 
-        if self.damper_current != self.damper_target {
-            let delta = self.damper_target - self.damper_current;
-            self.damper_current += delta.clamp(-self.damper_step, self.damper_step);
-            self.string.set_damper(self.damper_current);
-        }
-
-        // Under una corda the hammer misses one string of the group; the missed
-        // string keeps ringing from whatever is already in its banks.
-        let struck = if self.hammer.una_corda() {
-            (self.string.string_count() - 1).max(1)
-        } else {
-            self.string.string_count()
-        };
-        if self.hammer.is_active() {
-            for s in 0..struck {
-                // Small timing skew across the group: the hammer is not
-                // perfectly square to the strings.
-                let skew = s * MAX_SKEW_SAMPLES / self.string.string_count().max(1);
-                let share = self.string.strike_share(s);
-                self.hammer
-                    .add_pulse(self.string.excitation_mut(s), skew, share);
+        if strings_live {
+            if self.damper_current != self.damper_target {
+                let delta = self.damper_target - self.damper_current;
+                self.damper_current += delta.clamp(-self.damper_step, self.damper_step);
+                self.string.set_damper(self.damper_current);
             }
-            self.hammer.advance(BLOCK);
-        }
 
-        // Undamped strings pick up the rest of the instrument.
-        if self.damper_current < 1.0 {
-            let mut drive = [0.0f32; BLOCK];
-            bus.drive(&self.previous_out, &mut drive);
-            let gain = 1.0 - self.damper_current;
-            self.string.add_excitation_all(&drive, gain);
-        }
-
-        if self.spread {
-            self.horizontal_out.fill(0.0);
-            self.string.process_split(out, &mut self.horizontal_out);
-            // The felt is one piece of cloth on one string: it sees the whole
-            // of it, both planes at once, so the limiter is computed from the
-            // sum and applied to the two halves as a common gain.
-            self.felt_limit_split(out);
-            board.add_voice(out, self.pan_vertical);
-            board.add_voice(&self.horizontal_out, self.pan_horizontal);
-            // ... and the mono sum, for the resonance bus and the next block's
-            // coupling, is the two of them back together.
-            for (o, &h) in out.iter_mut().zip(&self.horizontal_out) {
-                *o += h;
+            // Under una corda the hammer misses one string of the group; the
+            // missed string keeps ringing from whatever is already in its banks.
+            let struck = if self.hammer.una_corda() {
+                (self.string.string_count() - 1).max(1)
+            } else {
+                self.string.string_count()
+            };
+            if self.hammer.is_active() {
+                for s in 0..struck {
+                    // Small timing skew across the group: the hammer is not
+                    // perfectly square to the strings.
+                    let skew = s * MAX_SKEW_SAMPLES / self.string.string_count().max(1);
+                    let share = self.string.strike_share(s);
+                    self.hammer
+                        .add_pulse(self.string.excitation_mut(s), skew, share);
+                }
+                self.hammer.advance(BLOCK);
             }
-        } else {
-            self.string.process(out);
-            self.felt_limit(out);
-            board.add_voice(out, self.pan);
         }
-        self.track_felt_reference(out);
+
+        // One drive buffer, read by the strings and by the segments both: there
+        // is one bus path through the bridge admittance and this is it. The
+        // strings take it scaled by how far their damper is off them; the
+        // segments take all of it, always, because nothing dampens them.
+        let mut drive = [0.0f32; BLOCK];
+        let strings_driven = strings_live && self.damper_current < 1.0;
+        let duplex_driven = duplex_live && bus.is_active();
+        if strings_driven || duplex_driven {
+            bus.drive(self.index, &self.previous_out, &mut drive);
+        }
+
+        if strings_live {
+            // Undamped strings pick up the rest of the instrument.
+            if strings_driven {
+                let gain = 1.0 - self.damper_current;
+                self.string.add_excitation_all(&drive, gain);
+            }
+
+            if self.spread {
+                self.horizontal_out.fill(0.0);
+                self.string.process_split(out, &mut self.horizontal_out);
+                // The felt is one piece of cloth on one string: it sees the
+                // whole of it, both planes at once, so the limiter is computed
+                // from the sum and applied to the two halves as a common gain.
+                self.felt_limit_split(out);
+                board.add_voice(out, self.pan_vertical);
+                board.add_voice(&self.horizontal_out, self.pan_horizontal);
+                // ... and the mono sum, for the resonance bus and the next
+                // block's coupling, is the two of them back together.
+                for (o, &h) in out.iter_mut().zip(&self.horizontal_out) {
+                    *o += h;
+                }
+            } else {
+                self.string.process(out);
+                self.felt_limit(out);
+                board.add_voice(out, self.pan);
+            }
+            // Before the segments are added: what the felt limits against is
+            // the speaking length's own swing, and the felt never touches them.
+            self.track_felt_reference(out);
+        }
+
+        if duplex_live {
+            // Driven by the bridge force the key has just produced — `out`, the
+            // whole mono sum, felt limiter and all — and by the bus. The
+            // segments are read before they are added, so nothing here is a
+            // path from a segment straight back into itself.
+            self.duplex_out.fill(0.0);
+            self.duplex.add(
+                out,
+                duplex_driven.then_some(&drive[..]),
+                &mut self.duplex_out,
+            );
+            // They radiate from the key's own end of the bridge, and they are
+            // one signal: the polarization spread is a property of the speaking
+            // length's two planes and the segments have no part in it.
+            board.add_voice(&self.duplex_out, self.pan);
+            for (o, &d) in out.iter_mut().zip(&self.duplex_out) {
+                *o += d;
+            }
+        }
+
         self.add_noise(board);
         self.previous_out.copy_from_slice(out);
         self.previous_silent = false;
@@ -479,6 +550,10 @@ impl Voice {
         self.held = false;
         self.hammer.reset();
         self.string.reset();
+        // The one thing that stops a segment. `AllOff` is a panic button, not a
+        // gesture: no key and no pedal reaches this.
+        self.duplex.reset();
+        self.duplex_out.fill(0.0);
         self.noise.reset();
         self.noise_out.fill(0.0);
         self.horizontal_out.fill(0.0);
@@ -519,6 +594,8 @@ fn soft_limit(x: f32, threshold: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset::{DuplexMode, MAX_DUPLEX_GAIN_DB};
+    use crate::types::{key_index, NUM_KEYS};
 
     fn voice(key: u8) -> Voice {
         voice_from(key, &Preset::default())
@@ -657,6 +734,31 @@ mod tests {
         assert!(a < voice_from(60, &preset).pan() && b > voice_from(61, &preset).pan());
     }
 
+    /// A per-key table overrides the global scalar key by key, and a preset
+    /// without one is the compass the scalar describes. The measurement behind
+    /// it: at the global ceiling the engine's drift is 0.24 dB at A0 and
+    /// 8.67 dB at C5 against the recordings' 1.24 and 5.33
+    /// (`TUNING_REPORT.md` §5), so one number cannot fit both ends.
+    #[test]
+    fn a_per_key_spread_overrides_the_global_one_key_by_key() {
+        let mut preset = Preset::default();
+        preset.voicing.polarization_pan_spread = 0.4;
+        preset.notes.pan_spread = (0..NUM_KEYS).map(|i| 0.01 * (i % 8) as f32).collect();
+        assert!(preset.validate().is_ok());
+        for key in [21u8, 60, 61, 108] {
+            let v = voice_from(key, &preset);
+            let want = preset.notes.pan_spread[usize::from(key - 21)]
+                * if key % 2 == 0 { 1.0 } else { -1.0 };
+            let (pan_v, pan_h) = v.polarization_pans();
+            assert_eq!(pan_v, v.pan() - want);
+            assert_eq!(pan_h, v.pan() + want);
+        }
+        // A key the table gives zero is mono again even though the global
+        // scalar is at its ceiling — the table is an override, not an offset.
+        let zeroed = voice_from(21, &preset);
+        assert_eq!(zeroed.polarization_pans(), (zeroed.pan(), zeroed.pan()));
+    }
+
     /// The spread must not reach the sympathetic bus: the halo is one mono
     /// signal and a note's stereo image cannot be allowed to change what the
     /// rest of the instrument picks up from it.
@@ -777,6 +879,225 @@ mod tests {
         assert!((nominal / damper_step(1) - DAMPER_RAMP_RANGE).abs() < 0.05);
     }
 
+    // ------------------------------------------------- the duplex segments
+
+    /// The key the segment tests use. C6 and not something above the damper
+    /// break, because the whole question is what survives a damper landing.
+    const DUPLEX_KEY: u8 = 84;
+
+    /// Where this key's segments sit: an aliquot on the third partial, as a
+    /// well-scaled rear duplex is, and a second segment a quarter of a semitone
+    /// off the fifth, as Öberg & Askenfelt's scatter puts it.
+    ///
+    /// The placement matters more than it looks. A segment is a resonator with
+    /// a bandwidth under two hertz, and the bridge force one string puts out is
+    /// a sum of its own partials, so a segment that sits *between* them is
+    /// driven only by the attack transient and answers 30–40 dB lower. That is
+    /// what an aliquot is *for*, and it is why the two frequencies here are
+    /// taken from the note's own series rather than written as round numbers.
+    fn duplex_hz() -> [f32; 2] {
+        let p = Preset::default().string_params(DUPLEX_KEY);
+        [p.partial_freq(3), p.partial_freq(5) * 2.0f32.powf(25.0 / 1200.0)]
+    }
+
+    fn duplex_preset(gain_db: f32) -> Preset {
+        let mut preset = Preset::default();
+        preset.notes.duplex = vec![Vec::new(); NUM_KEYS];
+        preset.notes.duplex[key_index(DUPLEX_KEY).unwrap()] = duplex_hz()
+            .iter()
+            .map(|&hz| DuplexMode {
+                hz,
+                gain_db,
+                t60_s: 1.5,
+            })
+            .collect();
+        preset
+            .validate()
+            .expect("a two-segment treble key is a legal preset");
+        preset
+    }
+
+    /// The Öberg & Askenfelt signature: play a treble key staccato and the
+    /// segments go on sounding after the damper has stopped the speaking
+    /// length. Nothing damps them, so the note does not end when the key does.
+    #[test]
+    fn a_struck_treble_keys_duplex_rings_on_after_a_staccato_release() {
+        let pedals = PedalState::new();
+        // Plays the gesture and returns the note's own peak and what is still
+        // sounding half a second after the key came up — by which time this
+        // key's damper, whose release T60 is about a tenth of a second, has
+        // long since finished with the speaking length.
+        let staccato = |preset: &Preset| {
+            let mut v = voice_from(DUPLEX_KEY, preset);
+            let bus = bus();
+            let mut board = board();
+            let mut out = [0.0f32; BLOCK];
+            v.note_on(110, &pedals);
+            let mut struck = 0.0f32;
+            for _ in 0..20 {
+                // ~50 ms: a staccato.
+                if !v.process(&mut out, &bus, &mut board) {
+                    out.fill(0.0);
+                }
+                struck = struck.max(out.iter().fold(0.0f32, |m, &x| m.max(x.abs())));
+            }
+            v.note_off(100, &pedals, 0);
+            for _ in 0..(0.5 * SAMPLE_RATE / BLOCK as f32) as usize {
+                if !v.process(&mut out, &bus, &mut board) {
+                    out.fill(0.0);
+                }
+            }
+            (struck, rms(&out), v)
+        };
+        let (_, plain, _) = staccato(&Preset::default());
+        let (struck, voiced, v) = staccato(&duplex_preset(MAX_DUPLEX_GAIN_DB));
+        assert!(
+            voiced > plain * 30.0,
+            "after a staccato release the segments left {voiced:e} against the \
+             damped string's {plain:e}"
+        );
+        // ... and it is the segments that are left, not a string the damper
+        // failed to stop.
+        assert!(v.string.is_idle(), "the damper did not stop the string");
+        assert!(!v.duplex.is_idle(), "the segments were damped with the string");
+        assert!(!v.is_idle(), "a voice with ringing segments called itself idle");
+
+        // The level, stated rather than merely ordered. `TUNING_REPORT.md` §5
+        // measures the release resonances at -31 dB (C3) and -39 dB (C5)
+        // relative to a strike of the same key, ringing 1-2 s. An aliquot at
+        // the top of the schema's range measures -61 dB here, which is an RMS
+        // against a peak (about 9 dB of the difference) half a second into the
+        // segments' own 1.5 s decay (another 20): a band, not a number, because
+        // what this pins is that the model reaches the right neighbourhood from
+        // one string's bridge force alone.
+        let level = crate::types::amp_to_db(voiced / struck);
+        assert!(
+            (-70.0..-40.0).contains(&level),
+            "the segments are {level:.1} dB under the note that drove them"
+        );
+    }
+
+    /// Neither of the two pedals that are *not* dampers may touch them: una
+    /// corda moves the hammer sideways and sostenuto catches damper levers, and
+    /// a duplex segment has no damper lever to catch.
+    #[test]
+    fn una_corda_and_sostenuto_do_not_damp_the_segments() {
+        let preset = duplex_preset(MAX_DUPLEX_GAIN_DB);
+        let mut plain = PedalState::new();
+        let mut both = PedalState::new();
+        both.set_una_corda(true);
+        both.set_sostenuto(true, &[false; NUM_KEYS]);
+
+        let ring = |pedals: &PedalState| {
+            let mut v = voice_from(DUPLEX_KEY, &preset);
+            v.note_on(110, pedals);
+            render(&mut v, 20);
+            v.note_off(100, pedals, 0);
+            render(&mut v, (0.5 * SAMPLE_RATE / BLOCK as f32) as usize);
+            v.duplex.is_idle()
+        };
+        assert!(!ring(&plain), "the segments never rang");
+        assert!(!ring(&both), "una corda or sostenuto damped the segments");
+        plain.set_sustain(0.0);
+    }
+
+    /// ... and `AllOff` does, because it is a panic button and not a gesture.
+    #[test]
+    fn all_off_stops_the_segments() {
+        let pedals = PedalState::new();
+        let mut v = voice_from(DUPLEX_KEY, &duplex_preset(MAX_DUPLEX_GAIN_DB));
+        v.note_on(110, &pedals);
+        render(&mut v, 20);
+        assert!(!v.duplex.is_idle());
+        v.reset();
+        assert!(v.duplex.is_idle(), "AllOff left the segments ringing");
+        assert!(v.is_idle());
+        assert_eq!(render(&mut v, 4), 0.0);
+    }
+
+    /// The cost of never being damped, paid where it belongs. A voice whose
+    /// segments are still ringing must not drag the note's eighty partials
+    /// through the block with them — and a voice whose segments have gone quiet
+    /// must be back to writing no samples at all, which is what keeps 88
+    /// undamped banks affordable.
+    #[test]
+    fn ringing_segments_do_not_keep_the_strings_awake_and_go_quiet_by_themselves() {
+        let pedals = PedalState::new();
+        let mut v = voice_from(DUPLEX_KEY, &duplex_preset(MAX_DUPLEX_GAIN_DB));
+        v.note_on(110, &pedals);
+        render(&mut v, 20);
+        v.note_off(100, &pedals, 0);
+        render(&mut v, (0.5 * SAMPLE_RATE / BLOCK as f32) as usize);
+        assert!(!v.is_idle() && v.strings_idle(), "the strings should be asleep");
+
+        // Four T60s of nothing at all: the only thing that can stop a segment
+        // is its own decay, and it has to actually get there.
+        let quiet = bus();
+        let mut board = board();
+        let mut out = [0.0f32; BLOCK];
+        for _ in 0..(6.0 * SAMPLE_RATE / BLOCK as f32) as usize {
+            v.process(&mut out, &quiet, &mut board);
+        }
+        assert!(v.is_idle(), "the segments never decayed to silence");
+        // ... and the voice is back on the branch that touches nothing.
+        let mut untouched = [7.0f32; BLOCK];
+        assert!(!v.process(&mut untouched, &quiet, &mut board));
+        assert!(
+            untouched.iter().all(|&x| x == 7.0),
+            "an idle voice with silent segments wrote samples"
+        );
+    }
+
+    /// An instrument that is not being played is silent whether or not its keys
+    /// have segments: the same bit-exact silence, from the same branch.
+    #[test]
+    fn an_idle_voice_with_silent_segments_renders_nothing_at_all() {
+        let mut v = voice_from(DUPLEX_KEY, &duplex_preset(MAX_DUPLEX_GAIN_DB));
+        assert!(v.is_idle());
+        let mut board = board();
+        let mut out = [7.0f32; BLOCK];
+        assert!(!v.process(&mut out, &bus(), &mut board));
+        assert!(out.iter().all(|&x| x == 7.0));
+        let (mut l, mut r) = ([1.0f32; BLOCK], [1.0f32; BLOCK]);
+        board.begin_block();
+        assert!(!v.process(&mut out, &bus(), &mut board));
+        board.process(&mut l, &mut r);
+        assert!(l.iter().chain(r.iter()).all(|&x| x == 0.0));
+    }
+
+    /// The segments answer the *bus* — another key's note — with the key's own
+    /// string damped and silent. This is most of what the feature is for, and
+    /// it is the path that must not become a second bus: the drive is the one
+    /// `ResonanceBus::drive` produces, admittance and all.
+    #[test]
+    fn a_damped_keys_segments_still_answer_the_bus() {
+        let preset = duplex_preset(0.0);
+        let mut v = voice_from(DUPLEX_KEY, &preset);
+        assert_eq!(v.string.damper(), 1.0, "the key should rest damped");
+
+        // A bus carrying one of the segments' own frequencies and nothing else.
+        let mut loud = ResonanceBus::from_preset(&preset);
+        let mut board = board();
+        let mut out = [0.0f32; BLOCK];
+        let mut n = 0usize;
+        for _ in 0..40 {
+            let mut tone = [0.0f32; BLOCK];
+            for x in tone.iter_mut() {
+                *x = 0.05 * (std::f32::consts::TAU * duplex_hz()[0] * n as f32 / SAMPLE_RATE).sin();
+                n += 1;
+            }
+            loud.contribute(&tone);
+            loud.begin_block();
+            assert!(v.process(&mut out, &loud, &mut board), "the voice slept");
+        }
+        assert!(!v.duplex.is_idle(), "the segments did not answer the bus");
+        assert!(v.string.is_idle(), "the damped string answered too");
+        assert!(
+            out.iter().any(|&x| x != 0.0),
+            "the answer never reached the voice's output"
+        );
+    }
+
     #[test]
     fn restrike_does_not_reset_the_ringing_string() {
         let pedals = PedalState::new();
@@ -788,3 +1109,4 @@ mod tests {
         assert!(v.string().energy() >= before * 0.5);
     }
 }
+

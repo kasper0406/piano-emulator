@@ -8,10 +8,15 @@
 //!                          +-- 88 Voice: Hammer pulse -> PianoString
 //!                          |              (unison group x 2 polarizations
 //!                          |               of ModalBank), damped per PedalState
+//!                          |              + DuplexBank: the segments past the
+//!                          |                bridge and the agraffe, driven by
+//!                          |                the string and by the bus, never
+//!                          |                damped by anything
 //!                          |              + Burst: the key's own mechanism
 //!                          |                noise, straight to the board
 //!                          |
-//!                          +-- ResonanceBus: sum of all strings, fed back
+//!                          +-- ResonanceBus: sum of all strings through the
+//!                          |                 bridge admittance B(f), fed back
 //!                          |                 into the undamped ones
 //!                          |
 //!                          +-- Burst x2: the sustain pedal's tray, centred
@@ -31,6 +36,7 @@
 
 pub mod audio;
 pub mod calibrate;
+pub mod duplex;
 pub mod engine;
 pub mod hammer;
 pub mod midi;

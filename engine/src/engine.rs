@@ -83,7 +83,7 @@ impl Engine {
         let engine = Engine {
             voices,
             pedals: PedalState::new(),
-            resonance: ResonanceBus::new(preset.voicing.resonance_coupling),
+            resonance: ResonanceBus::from_preset(preset),
             soundboard: Soundboard::new(&preset.soundboard),
             events: consumer,
             voice_out: [0.0; BLOCK],

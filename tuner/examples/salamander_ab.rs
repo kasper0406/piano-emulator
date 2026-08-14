@@ -12,6 +12,9 @@
 //! * **A pedal phrase**, where what is being listened to is the sympathetic
 //!   halo and the decay of a released chord — the two things the estimated
 //!   decay curve changes most.
+//! * **`halo_demo.wav`**, on the estimated preset alone: the phrase the
+//!   sympathetic milestone exists for — staccato treble with no pedal, a
+//!   silently held bass struck into from above, and a pedal-down wash.
 //!
 //! Level matching is done on the RMS of the first second, which is the note's
 //! prompt sound: a decay that differs between the two presets must be *heard*
@@ -32,7 +35,9 @@
 use std::path::{Path, PathBuf};
 
 use piano_emulator::preset::Preset;
-use piano_emulator::render::{demo_sequence, render_to_buffer, RenderEvent, DEMO_DURATION_S};
+use piano_emulator::render::{
+    demo_sequence, halo_sequence, render_to_buffer, RenderEvent, DEMO_DURATION_S, HALO_DURATION_S,
+};
 use piano_emulator::types::{Event, PedalEvent};
 use piano_tuner::{audio, SampleLibrary, SAMPLE_RATE};
 
@@ -109,6 +114,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[(
             "mechanism_demo".to_string(),
             render_to_buffer(salamander, &mechanism_phrase(), MECHANISM_DURATION_S),
+        )],
+    )?;
+
+    // The halo, likewise on the estimated preset, because the bridge
+    // admittance and the duplex segments only exist there: `halo_sequence` is
+    // staccato treble with no pedal, a silently held bass struck into from
+    // above, and a pedal-down wash — the three ways this milestone's energy
+    // reaches a listener. `render.rs` owns the phrase so that
+    // `piano-emulator render halo.wav halo` plays exactly this file.
+    write_matched(
+        &out,
+        &[(
+            "halo_demo".to_string(),
+            render_to_buffer(salamander, &halo_sequence(), HALO_DURATION_S),
         )],
     )?;
     println!("wrote {}", out.display());

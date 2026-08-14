@@ -66,6 +66,17 @@ pub enum MechanismKind {
     PedalDown,
     /// The same tray coming up.
     PedalUp,
+    /// What the *strings* are still doing when the key comes up: a release
+    /// region that keeps its pitch, `harmL*`/`harmS*`/`harmV3*` in Salamander.
+    ///
+    /// Not a mechanism noise at all — it is the sympathetic halo and the
+    /// undamped duplex, recorded on their own — but it arrives the same way a
+    /// mechanism recording does (a release region that is not a struck note),
+    /// so it is indexed with them rather than being dropped on the floor. It
+    /// is what `TUNING_REPORT.md` §5's `harmLC3` = −31 dB and `harmLC5` =
+    /// −39 dB were measured from, and what `estimate::duplex` and
+    /// `estimate::halo` read.
+    StringResonance,
 }
 
 /// One recording of the mechanism rather than of a string.
@@ -81,6 +92,11 @@ pub struct MechanismSample {
     /// `amp_veltrack`, as a percentage, where the group sets one. The SFZ law
     /// is `40 log10(v / 127)` dB scaled by this over a hundred.
     pub amp_veltrack: Option<f64>,
+    /// The velocity band the region covers, inclusive. Salamander's release
+    /// resonances come in three tiers over the same key, which is the only
+    /// place this matters so far.
+    pub lovel: u8,
+    pub hivel: u8,
 }
 
 /// Every recording an SFZ instrument maps: the struck notes grouped by key, and
@@ -175,6 +191,8 @@ impl SampleLibrary {
                     key: region.key(),
                     volume_db: region.volume.unwrap_or(0.0),
                     amp_veltrack: region.amp_veltrack,
+                    lovel: region.lovel.unwrap_or(1),
+                    hivel: region.hivel.unwrap_or(127),
                 });
                 continue;
             }
@@ -378,7 +396,17 @@ impl Opcodes {
             });
         }
         let released = self.trigger.as_deref().is_some_and(|t| t == "release");
-        (released && self.pitch_keytrack == Some(0)).then_some(MechanismKind::KeyOff)
+        if !released {
+            return None;
+        }
+        // A release region told not to transpose is an unpitched noise — the
+        // damper landing. One that keeps its pitch is the strings, still
+        // ringing: same trigger, opposite content.
+        Some(if self.pitch_keytrack == Some(0) {
+            MechanismKind::KeyOff
+        } else {
+            MechanismKind::StringResonance
+        })
     }
 
     /// Which key this region is a recording of.
@@ -533,10 +561,15 @@ mod tests {
         assert_eq!(key_off[0].path, Path::new("/lib/samples/rel1.flac"));
         assert_eq!(key_off[0].volume_db, -37.0);
         assert_eq!(key_off[0].amp_veltrack, Some(82.0));
-        assert!(library
-            .mechanism()
-            .iter()
-            .all(|s| !s.path.ends_with("harmC4.flac")));
+        // The string resonance in the release group above them is not a
+        // key-off — it has a pitch to track — but it is indexed, as its own
+        // kind: it is the recording of the halo, and the halo is a parameter.
+        assert!(key_off.iter().all(|s| !s.path.ends_with("harmC4.flac")));
+        let resonance = library.mechanism_of(MechanismKind::StringResonance);
+        assert_eq!(resonance.len(), 1);
+        assert_eq!(resonance[0].path, Path::new("/lib/samples/harmC4.flac"));
+        assert_eq!(resonance[0].key, Some(60));
+        assert_eq!(resonance[0].volume_db, -4.0);
 
         // The pedal, told apart by which way its gate on CC 64 opens.
         let down = library.mechanism_of(MechanismKind::PedalDown);
@@ -554,7 +587,7 @@ mod tests {
         assert_eq!(library.nearest_layer(60, 200), None);
         assert_eq!(library.velocity_span(), Some((13, 81)));
         // A pilot run over three notes still carries the whole mechanism.
-        assert_eq!(library.restricted_to(&[]).mechanism().len(), 4);
+        assert_eq!(library.restricted_to(&[]).mechanism().len(), 5);
     }
 
     #[test]

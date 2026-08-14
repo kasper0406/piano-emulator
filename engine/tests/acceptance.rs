@@ -54,6 +54,35 @@ fn silent_mechanism(mut preset: Preset) -> Preset {
     preset
 }
 
+/// The strongest sympathetic coupling this preset may legally ask for.
+///
+/// `resonance::MAX_COUPLING` stopped being the answer the day `voicing.bridge`
+/// arrived: the bound is on the *loop*, `resonance_coupling * max|B|`
+/// (`DECISIONS.md` 149), and the duplex adds a second one on top of it (156).
+/// On `presets/salamander-c5.toml`, whose fitted bridge peaks at 26.7 dB, the
+/// scalar ceiling makes a loop gain of 1.08 and the validator refuses it — so
+/// a test that wants "as coupled as the schema allows" has to ask the preset
+/// rather than the constant, or it fails on every voiced instrument for a
+/// reason that has nothing to do with what it is measuring.
+///
+/// Found by asking the validator instead of re-deriving its arithmetic, which
+/// is the point: this is a test helper, and a second copy of the bound here
+/// would be a second thing to keep in step. A quarter is close enough to the
+/// ceiling for the measurements below, which want a strongly coupled
+/// instrument and not a precisely coupled one.
+fn strongest_legal_coupling(preset: &Preset) -> f32 {
+    let mut probe = preset.clone();
+    let mut candidate = piano_emulator::resonance::MAX_COUPLING;
+    for _ in 0..40 {
+        probe.voicing.resonance_coupling = candidate;
+        if probe.validate().is_ok() {
+            return candidate;
+        }
+        candidate *= 0.75;
+    }
+    panic!("no sympathetic coupling at all is legal for this preset")
+}
+
 // ---------------------------------------------------------------- helpers
 
 fn peak(signal: &[f32]) -> f32 {
@@ -434,7 +463,7 @@ fn a_prepared_string_rings_on_after_the_note_that_excited_it() {
     const PREPARED: u8 = 48; // C3
     const EXCITER: u8 = 67; // G4, which lands on C3's third partial
     let mut preset = silent_mechanism(preset());
-    preset.voicing.resonance_coupling = piano_emulator::resonance::MAX_COUPLING;
+    preset.voicing.resonance_coupling = strongest_legal_coupling(&preset);
     preset.validate().expect("a strongly coupled instrument is a legal preset");
 
     let render = |prepare: bool| {
@@ -466,6 +495,107 @@ fn a_prepared_string_rings_on_after_the_note_that_excited_it() {
         after > ringing - 30.0,
         "the prepared string was at {ringing:.0} dBFS under the note and {after:.0} dBFS \
          a second and a half after it stopped: it was cut off, not left to decay"
+    );
+}
+
+/// The other half of what the duplex segments are for: a key that is never
+/// touched answers another key's note through the bridge, with its own strings
+/// under their dampers the whole time.
+///
+/// C5's segments are tuned to C6's second partial — an aliquot's placement —
+/// and C6 is struck *staccato* with the pedal up. C5's speaking length is
+/// damped throughout and cannot ring at all, so whatever C5 contributes came
+/// through the resonance bus, through the bridge admittance, into a bank that
+/// has no damper; and because it has no damper it is still contributing a
+/// second after C6's own damper landed.
+///
+/// The coupling is raised to the maximum a preset may ask for, for the same
+/// reason `a_prepared_string_rings_on_after_the_note_that_excited_it` raises it:
+/// the shipped level puts one key's sympathetic contribution near the engine's
+/// own audibility floor, which is `TUNING_REPORT.md`'s backlog item 5 — a
+/// stage-2 coupling level — and not a property of this path.
+#[test]
+fn a_duplex_segment_answers_another_keys_note_through_the_bridge() {
+    use piano_emulator::engine::Engine;
+    use piano_emulator::preset::{DuplexMode, MAX_DUPLEX_GAIN_DB};
+    use piano_emulator::types::NUM_KEYS;
+
+    const ANSWERS: u8 = 72; // C5, damped from the first sample to the last
+    const STRUCK: u8 = 84; // C6
+
+    let mut voiced = silent_mechanism(preset());
+    // The base preset may already carry a duplex table — the measured one
+    // carries a hundred segments — and the control has to differ from the
+    // instrument under test by exactly the one segment this test adds, so
+    // both sides start with none.
+    voiced.notes.duplex = vec![Vec::new(); NUM_KEYS];
+    let mut plain = voiced.clone();
+    voiced.notes.duplex[key_index(ANSWERS).unwrap()] = vec![DuplexMode {
+        hz: string_params(STRUCK).partial_freq(2),
+        gain_db: MAX_DUPLEX_GAIN_DB,
+        t60_s: 1.5,
+    }];
+    // The segment is part of the loop, so the ceiling is asked of the preset
+    // that has it, and the control is given the same number.
+    let coupling = strongest_legal_coupling(&voiced);
+    voiced.voicing.resonance_coupling = coupling;
+    plain.voicing.resonance_coupling = coupling;
+    voiced.validate().expect("one segment on one key is a legal preset");
+    plain.validate().expect("the control is a legal preset");
+
+    let run = |preset: &Preset| {
+        let (mut engine, _tx) = Engine::new(preset);
+        engine.handle_event(Event::NoteOn {
+            key: STRUCK,
+            vel: 120,
+        });
+        let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
+        let mut out = Vec::new();
+        let mut answered = 0.0f32;
+        for b in 0..(1.6 * SAMPLE_RATE / BLOCK as f32) as usize {
+            if b == (0.3 * SAMPLE_RATE / BLOCK as f32) as usize {
+                engine.handle_event(Event::NoteOff {
+                    key: STRUCK,
+                    vel: 64,
+                });
+            }
+            engine.process(&mut l, &mut r);
+            out.extend(l.iter().zip(&r).map(|(a, b)| a + b));
+            let voice = engine.voice(key_index(ANSWERS).unwrap());
+            answered = answered.max(voice.duplex().energy());
+            assert_eq!(voice.string().damper(), 1.0, "C5's damper came off");
+            assert!(voice.string().energy() < 1.0e-12, "C5's string rang");
+        }
+        (answered, out)
+    };
+
+    let (answered, with) = run(&voiced);
+    let (nothing, without) = run(&plain);
+    assert_eq!(nothing, 0.0, "the control key has no segments to ring");
+    assert!(
+        answered > 0.0,
+        "C5's segments picked up nothing from C6 at all"
+    );
+
+    // ... and it reaches the output. The difference between the two renders is
+    // this one bank, since nothing else about the two presets differs.
+    let alone: Vec<f32> = with.iter().zip(&without).map(|(a, b)| a - b).collect();
+    let note = db(rms(window(&with, 0.05, 0.25)));
+    let during = db(rms(window(&alone, 0.05, 0.25)));
+    let after = db(rms(window(&alone, 0.9, 1.2)));
+    assert!(
+        during > note - 55.0,
+        "C6 sounded at {note:.0} dBFS and C5's segments answered at {during:.0}"
+    );
+    // A second after C6's damper landed, C5's undamped segments are not merely
+    // audible in what is left of the instrument — they *are* what is left. The
+    // two measurements come out equal to a tenth of a decibel, having stood
+    // 42 dB apart while C6 was sounding.
+    let remaining = db(rms(window(&with, 0.9, 1.2)));
+    assert!(
+        after > remaining - 3.0,
+        "a second after the note stopped the segments were at {after:.0} dBFS \
+         against the whole instrument's {remaining:.0}"
     );
 }
 
@@ -504,6 +634,124 @@ fn thirty_seconds_of_dense_playing_stays_safe() {
     // ... and an engine that was told nothing renders digital silence.
     let (sl, sr) = render_to_buffer(&preset(), &[], 2.0);
     assert!(sl.iter().chain(sr.iter()).all(|&v| v == 0.0));
+}
+
+/// The bridge admittance's stability contract, exercised rather than argued.
+///
+/// `Preset::validate` refuses any preset whose `resonance_coupling * max|B(f)|`
+/// exceeds `MAX_BRIDGE_LOOP_GAIN`, and the derivation behind that bound is in
+/// `resonance.rs`. This is the gate the derivation is worth nothing without:
+/// the *most extreme preset the bound still admits* — forty stacked resonances
+/// and a backbone that swings 34 dB, with the coupling then set to put the
+/// effective loop gain exactly on the ceiling — playing a minute of dense
+/// pedal-down music with every damper up and every string driven.
+///
+/// A minute and not thirty seconds because a marginally unstable loop grows
+/// exponentially but slowly: at the T60s in the bass an instability with a
+/// doubling time of several seconds is invisible in a short render and
+/// deafening in a long one. Release only, because a minute of 88-voice
+/// polyphony through a hundred-section filter is 20-30x slower unoptimised.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a minute of 88 voices needs --release")]
+fn the_most_extreme_bridge_a_preset_may_ask_for_stays_bounded_for_a_minute() {
+    use piano_emulator::preset::{BridgeAnchor, BridgePeak, BridgeVoicing};
+    use piano_emulator::resonance::{BridgeFilter, MAX_BRIDGE_LOOP_GAIN, MAX_COUPLING};
+
+    // A backbone that swings the full width of the schema, and forty
+    // resonances spread over the bridge's modal region, alternating sign so
+    // they are separate modes rather than one stack (a stack is refused, which
+    // `resonance::tests::stacked_peaks_are_refused_by_the_loop_gain_check`
+    // covers). Sharp: half of them at the schema's `Q` ceiling.
+    let bridge = BridgeVoicing {
+        backbone: [
+            (20.0, -18.0),
+            (60.0, 4.0),
+            (160.0, 12.0),
+            (400.0, -6.0),
+            (1_100.0, 8.0),
+            (2_600.0, -12.0),
+            (6_000.0, 6.0),
+            (16_000.0, -22.0),
+        ]
+        .into_iter()
+        .map(|(hz, gain_db)| BridgeAnchor { hz, gain_db })
+        .collect(),
+        peaks: (0..40)
+            .map(|i| BridgePeak {
+                // 23 Hz to 15 kHz, geometrically — so a peak lands on or very
+                // near a partial of nearly every key in the compass.
+                hz: 23.0 * (15_000.0f32 / 23.0).powf(i as f32 / 39.0),
+                q: if i % 2 == 0 { 50.0 } else { 3.0 },
+                gain_db: if i % 3 == 0 { -16.0 } else { 14.0 },
+            })
+            .collect(),
+        // ... and the largest share of the strings' own damping the schema
+        // will hand to those resonances, so the render also exercises the
+        // partials whose decay the admittance has slowed by the clamp's full
+        // factor of four (`string::RADIATED_FACTOR_RANGE`) — the longest-ringing
+        // strings this schema can describe, under the densest playing.
+        radiated_share: piano_emulator::preset::MAX_RADIATED_SHARE,
+    };
+
+    // Put the loop exactly on the ceiling: whatever this filter's realised
+    // maximum turns out to be, the coupling is the largest one the validator
+    // will accept with it. That is the worst case the contract permits, and it
+    // is derived from the filter rather than guessed at.
+    let max_b = BridgeFilter::new(&bridge).max_magnitude();
+    let mut preset = preset();
+    preset.voicing.bridge = Some(bridge);
+    preset.voicing.resonance_coupling = (MAX_BRIDGE_LOOP_GAIN / max_b).min(MAX_COUPLING);
+    preset
+        .validate()
+        .expect("the extreme bridge must still be a legal preset");
+    let effective = preset.voicing.resonance_coupling * max_b;
+    println!(
+        "bridge peaks at {:.1} dB; coupling {:.4} puts the loop at {effective:.3}",
+        db(max_b),
+        preset.voicing.resonance_coupling
+    );
+    assert!(effective > 0.9 * MAX_BRIDGE_LOOP_GAIN.min(MAX_COUPLING * max_b));
+
+    // Dense pedal-down playing: the pedal never comes up, so every one of the
+    // 88 strings is undamped and driven for the whole minute, and the notes
+    // are never released, so nothing is ever culled.
+    let mut events = vec![RenderEvent::new(
+        0.0,
+        Event::Pedal(PedalEvent::Sustain(1.0)),
+    )];
+    let mut state = 0x2545_f491u32;
+    // 2400 notes over the first 48 seconds — 50 a second — which leaves the
+    // last twelve as decay. The first version of this test spaced them 25 ms
+    // apart, which put the last note at exactly 60.0 s and left the "after the
+    // playing stopped" window still being played into: it passed on the
+    // default preset by six hundredths of a decibel and failed on the measured
+    // one by eight, neither of which was about stability.
+    for i in 0..2400 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let key = 21 + (state >> 16) as u8 % 88;
+        let vel = 40 + (state >> 8) as u8 % 87;
+        events.push(RenderEvent::new(i as f32 * 0.02, Event::NoteOn { key, vel }));
+    }
+    let (l, r) = render_to_buffer(&preset, &events, 60.0);
+
+    assert!(
+        l.iter().chain(r.iter()).all(|v| v.is_finite()),
+        "the bus diverged to a non-finite sample"
+    );
+    assert!(peak(&l).max(peak(&r)) <= 1.0, "clipped past 0 dBFS");
+    assert!(rms(&l) > 1.0e-3, "the extreme bridge made no sound at all");
+    // Bounded is not enough on its own — a loop sitting just under unity would
+    // ride the limiter and come out as a minute of full-scale mush. The last
+    // five seconds are seven seconds of decay past the last note, so they have
+    // to be far *quieter* than the playing that fed them: a stable instrument
+    // is 15 dB down by then and this one is, on both presets.
+    let late = db(rms(window(&l, 55.0, 60.0)));
+    let during = db(rms(window(&l, 20.0, 25.0)));
+    assert!(
+        late < during - 10.0,
+        "seven seconds after the playing stopped the instrument is at {late:.1} dB \
+         against {during:.1} dB during it: the loop is feeding itself"
+    );
 }
 
 // ------------------------------------------------------- 7. the mechanism
@@ -981,5 +1229,177 @@ fn the_worst_case_fits_the_performance_budget() {
         ratio < 0.8,
         "worst case took {:.1}% of one core (design goal 50%)",
         100.0 * ratio
+    );
+}
+
+/// The same worst case with the most duplex the schema allows — six segments on
+/// every one of the 88 keys, none of which any damper can ever stop — measured
+/// against the same run without them so the difference is the segments and not
+/// the machine.
+///
+/// Two costs are being measured at once and both are the point. The segments
+/// themselves are 528 resonators, which is small beside the ~14 000 string
+/// partials of a full keyboard. What could have been large is the *waking*: a
+/// bank that is never damped keeps its voice out of the branch that renders
+/// nothing, so an instrument whose segments all ring is an instrument whose 88
+/// voices all run. `Voice::process` splits the two decisions — the strings and
+/// the segments live or sleep separately — and this is the measurement that
+/// says the split works.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "timing is only meaningful in --release")]
+fn the_worst_case_with_a_duplex_on_every_key_fits_the_performance_budget() {
+    use piano_emulator::preset::{DuplexMode, MAX_DUPLEX_MODES};
+    use piano_emulator::types::{index_to_note, NUM_KEYS};
+
+    const AUDIO_S: f32 = 10.0;
+    let mut events = vec![RenderEvent::new(
+        0.0,
+        Event::Pedal(PedalEvent::Sustain(1.0)),
+    )];
+    for (i, key) in (21u8..=108).enumerate() {
+        let t = i as f32 * 0.02;
+        events.push(RenderEvent::new(t, Event::NoteOn { key, vel: 90 }));
+        events.push(RenderEvent::new(t + 0.1, Event::NoteOff { key, vel: 64 }));
+    }
+
+    // Six segments per key, spread over the band a duplex occupies and rising
+    // across the compass, at a level and a decay in the middle of the schema.
+    let mut voiced = preset();
+    voiced.notes.duplex = (0..NUM_KEYS)
+        .map(|i| {
+            let position = i as f32 / (NUM_KEYS - 1) as f32;
+            (0..MAX_DUPLEX_MODES)
+                .map(|k| DuplexMode {
+                    hz: 1_500.0
+                        * 2.0f32.powf(1.5 * position + k as f32 * 0.31 + i as f32 * 0.0037),
+                    gain_db: -20.0,
+                    t60_s: 1.5,
+                })
+                .collect()
+        })
+        .collect();
+    voiced
+        .validate()
+        .expect("six scattered segments on every key is a legal preset");
+    assert_eq!(voiced.duplex_modes(index_to_note(0)).len(), MAX_DUPLEX_MODES);
+
+    let measure = |preset: &Preset| {
+        // Best of three: the number is a floor on the cost, not an average of
+        // whatever else the machine was doing.
+        let mut best = f32::INFINITY;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let (l, r) = render_to_buffer(preset, &events, AUDIO_S);
+            let ratio = start.elapsed().as_secs_f32() / AUDIO_S;
+            assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()));
+            assert!(peak(&l).max(peak(&r)) <= 1.0, "clipped past 0 dBFS");
+            assert!(rms(&l) > 1.0e-3, "the glissando made no sound");
+            best = best.min(ratio);
+        }
+        best
+    };
+    let bare = measure(&preset());
+    let with_duplex = measure(&voiced);
+    println!(
+        "worst case: {:.1}% of one core without segments, {:.1}% with six on every key \
+         (+{:.2} points)",
+        100.0 * bare,
+        100.0 * with_duplex,
+        100.0 * (with_duplex - bare)
+    );
+    assert!(
+        with_duplex < 0.5,
+        "the worst case with a full duplex took {:.1}% of one core (design goal 50%)",
+        100.0 * with_duplex
+    );
+
+    // And the case the waking would show up in most sharply: one note, held,
+    // with every other key's dampers down. Nothing but the bus can reach the
+    // other 87 voices, and it reaches their segments whether or not their
+    // strings are damped — so this is 87 banks running for one note. It has to
+    // stay a rounding error beside the worst case above, or a preset with
+    // segments would make sparse playing cost what a glissando does.
+    let sparse = vec![RenderEvent::new(0.0, Event::NoteOn { key: 60, vel: 110 })];
+    let sparse_measure = |preset: &Preset| {
+        let mut best = f32::INFINITY;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let (l, _) = render_to_buffer(preset, &sparse, AUDIO_S);
+            best = best.min(start.elapsed().as_secs_f32() / AUDIO_S);
+            assert!(l.iter().all(|v| v.is_finite()));
+        }
+        best
+    };
+    let (one_bare, one_voiced) = (sparse_measure(&preset()), sparse_measure(&voiced));
+    println!(
+        "one held note: {:.2}% of one core without segments, {:.2}% with them",
+        100.0 * one_bare,
+        100.0 * one_voiced
+    );
+    assert!(
+        one_voiced < bare / 4.0,
+        "one note with a full duplex cost {:.1}% of one core against a whole \
+         keyboard's {:.1}%",
+        100.0 * one_voiced,
+        100.0 * bare
+    );
+}
+
+/// The same worst case on the instrument that actually ships with a duplex:
+/// `presets/salamander-c5.toml`, whose 100 measured segments over 23 keys are
+/// never damped, and whose bridge filter runs on every block.
+///
+/// The test above bounds the schema's ceiling with a synthetic table; this one
+/// bounds the file a user will really load, which is a different question and
+/// the one the design goal is written about. It is also the only performance
+/// measurement that has the fitted admittance in it — a voiced bridge wakes
+/// voices a flat bus lets sleep (`DECISIONS.md` 152), so the measured preset
+/// costs more than the default even before the segments are counted.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "timing is only meaningful in --release")]
+fn the_worst_case_with_the_measured_presets_duplex_fits_the_performance_budget() {
+    const AUDIO_S: f32 = 10.0;
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/salamander-c5.toml");
+    let measured = Preset::load(&path).expect("presets/salamander-c5.toml loads");
+    let segments: usize = (0..88)
+        .map(|i| measured.duplex_modes(piano_emulator::types::index_to_note(i)).len())
+        .sum();
+    assert!(
+        segments > 0,
+        "the measured preset has no duplex table, so this measures nothing"
+    );
+
+    let mut events = vec![RenderEvent::new(
+        0.0,
+        Event::Pedal(PedalEvent::Sustain(1.0)),
+    )];
+    for (i, key) in (21u8..=108).enumerate() {
+        let t = i as f32 * 0.02;
+        events.push(RenderEvent::new(t, Event::NoteOn { key, vel: 90 }));
+        events.push(RenderEvent::new(t + 0.1, Event::NoteOff { key, vel: 64 }));
+    }
+
+    // Best of three: a floor on the cost rather than an average of whatever
+    // else the machine was doing.
+    let mut best = f32::INFINITY;
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        let (l, r) = render_to_buffer(&measured, &events, AUDIO_S);
+        let ratio = start.elapsed().as_secs_f32() / AUDIO_S;
+        assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()));
+        assert!(peak(&l).max(peak(&r)) <= 1.0, "clipped past 0 dBFS");
+        assert!(rms(&l) > 1.0e-3, "the glissando made no sound");
+        best = best.min(ratio);
+    }
+    println!(
+        "worst case on presets/salamander-c5.toml ({segments} duplex segments, voiced bridge): \
+         {:.1}% of one core",
+        100.0 * best
+    );
+    assert!(
+        best < 0.5,
+        "the worst case on the measured preset took {:.1}% of one core (design goal 50%)",
+        100.0 * best
     );
 }

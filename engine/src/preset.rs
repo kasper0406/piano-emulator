@@ -32,7 +32,10 @@
 //! A few fields describe a refinement of the model that has a neutral setting —
 //! `notes.inharmonicity_b4` and `notes.contact_width` at zero,
 //! `voicing.unison_sigma_scale` at one, `voicing.polarization_pan_spread` at
-//! zero. Those are `#[serde(default)]` on the way in and skipped on the way out
+//! zero, `[voicing.bridge]` absent (the flat sympathetic bus), `notes.duplex`
+//! absent (no aliquot segments), `notes.pan_spread` absent (the one global
+//! spread applies to the whole compass).
+//! Those are `#[serde(default)]` on the way in and skipped on the way out
 //! while they hold the neutral value, so a file that predates the field keeps
 //! playing the instrument it always described and the engine keeps writing that
 //! same file back byte for byte — including `presets/default.toml`, which is
@@ -50,15 +53,16 @@
 //! not know would break every preset already written. Silence is available, and
 //! has to be asked for, by writing the section with `level_db` far down.
 
+use crate::duplex::MAX_DUPLEX_LOOP_GAIN;
 use crate::hammer::HammerParams;
-use crate::resonance::MAX_COUPLING;
+use crate::resonance::{BridgeFilter, MAX_BRIDGE_LOOP_GAIN, MAX_COUPLING};
 use crate::soundboard::MAX_PAN_SPREAD;
 use crate::string::{
     StringParams, MAX_CONTACT_WIDTH, MAX_SIGMA_SCALE, MAX_UNISON_COUPLING, MIN_SIGMA_SCALE,
 };
 use crate::types::{
-    db_to_amp, index_to_note, interp_anchors, key_index, key_position, note_to_freq, LOWEST_KEY,
-    MAX_UNISON, NUM_KEYS,
+    amp_to_db, db_to_amp, index_to_note, interp_anchors, key_index, key_position, note_to_freq,
+    LOWEST_KEY, MAX_UNISON, NUM_KEYS,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -127,6 +131,12 @@ pub struct Voicing {
     /// single-buffer render path with them.
     #[serde(default, skip_serializing_if = "is_zero", serialize_with = "short::scalar")]
     pub polarization_pan_spread: f32,
+    /// The bridge admittance `B(f)` on the sympathetic bus's drive path.
+    ///
+    /// Absent — the default — is the unity filter, which is the flat bus the
+    /// engine has always had, bit for bit. See [`BridgeVoicing`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<BridgeVoicing>,
     /// One entry per unison group size, 1 to [`MAX_UNISON`] strings.
     pub unison_layout: Vec<UnisonLayout>,
     /// Decay-rate multipliers for the individual strings of a unison, one row
@@ -182,6 +192,177 @@ pub struct UnisonSigmaScale {
     #[serde(serialize_with = "short::list")]
     pub scale: Vec<f32>,
 }
+
+/// The bridge's driving-point admittance, as the shape of one filter.
+///
+/// A string does not terminate on a node: it terminates on a bridge whose
+/// mobility `Y(f)` decides how fast each partial leaves into the board and, via
+/// the board the whole instrument shares, how strongly one note's partials
+/// reach another's (`PHYSICS.md` §4). The engine's sympathetic bus used to be
+/// spectrally flat, so its halo was the same colour everywhere and no partial's
+/// decay depended on where it sat. This section is that filter's shape.
+///
+/// It is written in two parts because the board *is* two things, split at Ege &
+/// Boutillon's transition frequency `f_lim ≈ 1.1 kHz` (half a wavelength = the
+/// mean rib spacing): below it a homogeneous plate with discrete, well
+/// separated modes, above it waves that localise between the ribs and leave
+/// only a smooth characteristic mobility. So:
+///
+/// * [`BridgeVoicing::backbone`] is the mean mobility — measured at roughly
+///   `1.3e-3 s/kg` over 100–1000 Hz, falling in the treble — as anchors
+///   interpolated in **log frequency**, which is the smooth half;
+/// * [`BridgeVoicing::peaks`] are the discrete resonances, sharp and separated
+///   below ~500 Hz, which is the modal half.
+///
+/// The whole thing is one shared filter on one mono signal, so its cost does
+/// not scale with polyphony ([`crate::resonance::BridgeFilter`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeVoicing {
+    /// Mean mobility, as gains at frequencies interpolated in log `f`.
+    /// 2 to [`MAX_BRIDGE_ANCHORS`] anchors, strictly ascending in `hz`.
+    pub backbone: Vec<BridgeAnchor>,
+    /// Discrete bridge resonances, at most [`MAX_BRIDGE_PEAKS`] of them.
+    /// Empty — the default — leaves the backbone alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peaks: Vec<BridgePeak>,
+    /// Share of each partial's decay rate that is loss **into the board**, and
+    /// therefore follows the admittance's own fluctuation: `Re Y` in the
+    /// string's damping, which is the half of `PHYSICS.md` §4 that the bus
+    /// cannot produce.
+    ///
+    /// # Why this is a share and not a rate
+    ///
+    /// `notes.sigma0` and `notes.sigma1` are *measured* — fitted to recorded
+    /// decays — so the mean loss into the board is already inside them, once.
+    /// Adding a damping proportional to `|B(f)|` would count it twice and
+    /// retune the whole compass's T60. What the smooth fitted law cannot carry
+    /// is the mode-to-mode *fluctuation* of the board's mobility, and that is
+    /// exactly [`BridgeVoicing::peaks`]. So the partial's decay rate becomes
+    ///
+    /// ```text
+    /// sigma_k <- sigma_k * (1 + share * (|P(f_k)| - 1))
+    /// ```
+    ///
+    /// with `P` the peaks alone — the backbone is the mean mobility and stays
+    /// where it is, in the fit. A partial on a +6 dB board mode then decays
+    /// `1 + share` times faster and one in a −6 dB trough about `1 − share/2`
+    /// times slower, which is the double-decay asymmetry Weinreich and
+    /// Woodhouse describe, and `share` is the physical quantity Woodhouse
+    /// quotes: the body-loss/air-loss ratio, above 0 dB (i.e. a share above
+    /// one half) everywhere over ~160 Hz.
+    ///
+    /// Absent, or zero, the factor is exactly `1.0` for every partial and every
+    /// string in the instrument is built bit for bit as it was before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "is_zero", serialize_with = "short::scalar")]
+    pub radiated_share: f32,
+}
+
+/// One anchor of the admittance backbone.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeAnchor {
+    #[serde(serialize_with = "short::scalar")]
+    pub hz: f32,
+    #[serde(serialize_with = "short::scalar")]
+    pub gain_db: f32,
+}
+
+/// One discrete bridge resonance.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgePeak {
+    #[serde(serialize_with = "short::scalar")]
+    pub hz: f32,
+    /// `f / bandwidth`. The board's low modes are sharp; the ceiling is what
+    /// keeps a resonance from becoming an oscillator in `f32`.
+    #[serde(serialize_with = "short::scalar")]
+    pub q: f32,
+    /// Peak gain, in dB, over the backbone. Negative is an anti-resonance.
+    #[serde(serialize_with = "short::scalar")]
+    pub gain_db: f32,
+}
+
+/// Bounds on a `[voicing.bridge]` section. They are the schema, so the tuner's
+/// copy states the same numbers; none of them is what makes the filter *safe*,
+/// which is [`Preset::validate`]'s loop-gain check against the realised
+/// response.
+pub const MAX_BRIDGE_ANCHORS: usize = 24;
+pub const MAX_BRIDGE_PEAKS: usize = 40;
+/// Lowest and highest frequency an anchor or a peak may sit at. The bottom is
+/// under the lowest partial the instrument has (A0 at 27.5 Hz); the top is
+/// where the board has stopped being a radiator and a `Q`-50 resonator at
+/// 48 kHz is still comfortably resolved.
+pub const MIN_BRIDGE_HZ: f32 = 20.0;
+pub const MAX_BRIDGE_HZ: f32 = 16_000.0;
+/// Range of any bridge gain. The measured mobility fluctuates by ±10–15 dB
+/// over the midrange, so ±20 dB of headroom is generous and −40 dB is a
+/// through-going null.
+pub const MIN_BRIDGE_GAIN_DB: f32 = -40.0;
+pub const MAX_BRIDGE_GAIN_DB: f32 = 20.0;
+pub const MIN_BRIDGE_Q: f32 = 0.5;
+pub const MAX_BRIDGE_Q: f32 = 50.0;
+/// Largest share of a partial's decay the admittance may be given
+/// ([`BridgeVoicing::radiated_share`]). A share of 1 would let a deep enough
+/// anti-resonance cancel a partial's damping altogether; nine tenths keeps the
+/// factor positive whatever the peaks say, and the factor is clamped besides
+/// ([`RADIATED_FACTOR_RANGE`](crate::string::RADIATED_FACTOR_RANGE)).
+pub const MAX_RADIATED_SHARE: f32 = 0.9;
+
+/// One duplex or aliquot segment of a key, as a resonance.
+///
+/// A string does not end at the bridge or at the agraffe: the front segment
+/// (capo bar to tuning pin) and the rear segment (bridge to hitch pin) are
+/// short, high-pitched, and — this is the point — **have no dampers**. They are
+/// driven only through the bridge, and they ring on after the speaking length
+/// has been stopped (`PHYSICS.md` §3).
+///
+/// Each entry is one measured segment resonance, not a ratio. Öberg &
+/// Askenfelt measured every main and duplex string over D4–C8 on a
+/// concert-condition grand and found real rear-duplex tuning generally *sharp*
+/// of the nominal partial, with average and median deviations approaching
+/// +50 cents (single keys at +190 and −100) and a spread *within* one trichord
+/// averaging ~25 cents. That scatter is the sound, so the schema stores
+/// frequencies and a preset must not derive them from `k·f0`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DuplexMode {
+    /// Frequency of the segment, Hz.
+    #[serde(serialize_with = "short::scalar")]
+    pub hz: f32,
+    /// Level of the segment at its own frequency, in dB relative to the bridge
+    /// force driving it — i.e. the *resonant* gain, normalised so that
+    /// lengthening `t60_s` makes the segment ring longer without making it
+    /// louder. See [`crate::duplex`].
+    #[serde(serialize_with = "short::scalar")]
+    pub gain_db: f32,
+    /// How long the segment rings, seconds to −60 dB. Deliberately short:
+    /// nothing ever damps these banks, so their own decay is the only thing
+    /// that lets a voice go back to sleep.
+    #[serde(serialize_with = "short::scalar")]
+    pub t60_s: f32,
+}
+
+/// Bounds on a `notes.duplex` row. As with the bridge, these are the schema and
+/// the tuner's copy states the same numbers; what makes the segments *safe* is
+/// [`Preset::validate`]'s loop-gain check against their realised response.
+pub const MAX_DUPLEX_MODES: usize = 6;
+/// Frequency range of a segment. The lowest duplex Öberg & Askenfelt measured
+/// is a few hundred hertz (the segments are a small fraction of the speaking
+/// length even at D4); the top is inside the band the engine still renders.
+pub const MIN_DUPLEX_HZ: f32 = 200.0;
+pub const MAX_DUPLEX_HZ: f32 = 18_000.0;
+/// Level range. `+6 dB` is a segment that answers its own frequency twice as
+/// hard as the bridge drives it, which is past any measured duplex; −60 dB is
+/// inaudible under any playing.
+pub const MIN_DUPLEX_GAIN_DB: f32 = -60.0;
+pub const MAX_DUPLEX_GAIN_DB: f32 = 6.0;
+/// Decay range. The ceiling is the real constraint of the feature: an undamped
+/// bank that rings for 3 s keeps its voice awake for 3 s after every note that
+/// touches it, and `PHYSICS.md` §3 asks for 0.5–2 s for exactly that reason.
+pub const MIN_DUPLEX_T60_S: f32 = 0.05;
+pub const MAX_DUPLEX_T60_S: f32 = 3.0;
 
 /// One point of the damper's frequency response.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -397,6 +578,32 @@ pub struct NoteTables {
     /// Felt nonlinearity exponent p.
     #[serde(serialize_with = "short::list")]
     pub hammer_exponent: Vec<f32>,
+    /// The key's duplex and aliquot segments: the undamped lengths of string
+    /// beyond the bridge and the agraffe, up to [`MAX_DUPLEX_MODES`] of them
+    /// per key ([`DuplexMode`]).
+    ///
+    /// Empty — the default, and absent from the file — is the instrument with
+    /// no segments at all, which is the engine as it was. A table that is
+    /// present has one row per key, and a row may be empty: the bottom of the
+    /// compass has no duplex worth the name, and Öberg & Askenfelt's survey
+    /// starts at D4.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplex: Vec<Vec<DuplexMode>>,
+    /// Per-key override of [`Voicing::polarization_pan_spread`].
+    ///
+    /// The global scalar is one number for the whole compass, and the compass
+    /// does not want one number: at the engine's ceiling of 0.4 the drift it
+    /// produces is 0.24 dB at A0 and 8.67 dB at C5 against the recordings'
+    /// 1.24 and 5.33 (`TUNING_REPORT.md` §5, Milestone A update), so a spread
+    /// that fits the bass overshoots the treble by 3 dB. Empty — the default,
+    /// and absent from the file — means the global scalar applies to every
+    /// key, which is the engine as it was.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "short::list"
+    )]
+    pub pan_spread: Vec<f32>,
 }
 
 impl Preset {
@@ -485,6 +692,16 @@ impl Preset {
                 0.0,
                 MAX_CONTACT_WIDTH,
             )?;
+        }
+        // The per-key stereo spread is either absent — the global scalar
+        // applies — or a whole compass of them, each inside the same range the
+        // scalar is held to, because each one reaches `Soundboard::add_voice`
+        // as a pan displacement in exactly the same way.
+        if !n.pan_spread.is_empty() {
+            table_length("pan_spread", n.pan_spread.len())?;
+            for (i, &s) in n.pan_spread.iter().enumerate() {
+                within(&format!("notes.pan_spread[{i}]"), s, 0.0, MAX_PAN_SPREAD)?;
+            }
         }
         if n.unison.len() != NUM_KEYS {
             return Err(PresetError::invalid(format!(
@@ -652,6 +869,8 @@ impl Preset {
                 )));
             }
         }
+        let max_b = self.validate_bridge()?;
+        self.validate_duplex(max_b)?;
         if v.damper_weight.is_empty() {
             return Err(PresetError::invalid("voicing.damper_weight is empty"));
         }
@@ -755,6 +974,285 @@ impl Preset {
         Ok(())
     }
 
+    /// Checks the bridge admittance's shape *and* what it does to the coupling
+    /// loop.
+    ///
+    /// The shape checks are the usual ones — a resonator at or past Nyquist is
+    /// a pole outside the unit circle, a `Q` of zero divides by zero, anchors
+    /// out of order read the wrong interpolation pair. The loop check is the
+    /// new one, and it is the reason this filter can exist at all.
+    ///
+    /// # Why a loop gain has to be computed rather than assumed
+    ///
+    /// `resonance.rs`'s stability argument was written for a *flat* bus: a
+    /// string answers a steady drive at one of its own partials with at most
+    /// about one signal unit per unit drive, so the tightest loop
+    /// string → bus → string has gain `≈ coupling`, and bounding `coupling`
+    /// bounded the loop. With `B` in the path the same loop has gain
+    /// `≈ coupling · |B(f)|` at the frequency where it closes, and `B` is
+    /// allowed gain well over one at its resonances — a preset could put +20 dB
+    /// on every one of forty cascaded peaks and multiply the loop by a
+    /// thousand. So the quantity that has to be bounded is not `coupling` but
+    /// the **effective** coupling `coupling · max|B(f)|`, and `max|B|` is a
+    /// property of the *realised* filter (the fitted shelf cascade and the
+    /// peaking sections that were actually built), not of the numbers in the
+    /// file. It is therefore measured, by evaluating the realised transfer
+    /// function on a 512-point log grid from 20 Hz to 20 kHz **and scanning
+    /// finely through every resonance** — a cascade *adds* decibels, so the
+    /// maximum of two overlapping peaks lies between their centres, where
+    /// neither the grid nor the centres look; `BridgeFilter::max_magnitude`
+    /// documents the construction, entirely inside this schema, that hides
+    /// 15.6 dB from a grid and a list of centres.
+    ///
+    /// The bound itself: with the worst-case string admittance of ~1 unit per
+    /// unit drive, a loop closes when `coupling · max|B| · (coincident
+    /// partials) ≥ 1`. [`MAX_BRIDGE_LOOP_GAIN`] is a quarter of that with a
+    /// single coincidence, i.e. 12 dB of margin against the worst string in the
+    /// instrument and 4× more against any realistic cluster. `MAX_COUPLING`
+    /// still bounds `coupling` on its own, so a unity `B` is exactly as
+    /// constrained as it was, and `DRIVE_CEILING` remains the hard backstop
+    /// that holds whatever the tables say.
+    ///
+    /// Returns the measured `max|B|`, so that the duplex check and
+    /// [`Preset::max_safe_coupling`] read the same number this refused on
+    /// rather than measuring the filter a second time.
+    fn validate_bridge(&self) -> Result<f32, PresetError> {
+        let Some(bridge) = &self.voicing.bridge else {
+            return Ok(1.0);
+        };
+        let n = bridge.backbone.len();
+        if !(2..=MAX_BRIDGE_ANCHORS).contains(&n) {
+            return Err(PresetError::invalid(format!(
+                "voicing.bridge.backbone has {n} anchors, expected 2..={MAX_BRIDGE_ANCHORS}"
+            )));
+        }
+        for (i, a) in bridge.backbone.iter().enumerate() {
+            within(
+                &format!("voicing.bridge.backbone[{i}].hz"),
+                a.hz,
+                MIN_BRIDGE_HZ,
+                MAX_BRIDGE_HZ,
+            )?;
+            within(
+                &format!("voicing.bridge.backbone[{i}].gain_db"),
+                a.gain_db,
+                MIN_BRIDGE_GAIN_DB,
+                MAX_BRIDGE_GAIN_DB,
+            )?;
+        }
+        // The backbone is interpolated in log f between neighbours, so the
+        // anchors have to be strictly ascending: out of order it reads the
+        // wrong pair, and two at one frequency divide by a zero span.
+        if let Some(i) = bridge.backbone.windows(2).position(|w| w[0].hz >= w[1].hz) {
+            return Err(PresetError::invalid(format!(
+                "voicing.bridge.backbone[{}] is at {} Hz, not above the {} Hz before it",
+                i + 1,
+                bridge.backbone[i + 1].hz,
+                bridge.backbone[i].hz
+            )));
+        }
+        if bridge.peaks.len() > MAX_BRIDGE_PEAKS {
+            return Err(PresetError::invalid(format!(
+                "voicing.bridge.peaks has {} entries, expected at most {MAX_BRIDGE_PEAKS}",
+                bridge.peaks.len()
+            )));
+        }
+        for (i, p) in bridge.peaks.iter().enumerate() {
+            within(
+                &format!("voicing.bridge.peaks[{i}].hz"),
+                p.hz,
+                MIN_BRIDGE_HZ,
+                MAX_BRIDGE_HZ,
+            )?;
+            within(
+                &format!("voicing.bridge.peaks[{i}].q"),
+                p.q,
+                MIN_BRIDGE_Q,
+                MAX_BRIDGE_Q,
+            )?;
+            within(
+                &format!("voicing.bridge.peaks[{i}].gain_db"),
+                p.gain_db,
+                MIN_BRIDGE_GAIN_DB,
+                MAX_BRIDGE_GAIN_DB,
+            )?;
+        }
+
+        within(
+            "voicing.bridge.radiated_share",
+            bridge.radiated_share,
+            0.0,
+            MAX_RADIATED_SHARE,
+        )?;
+
+        // Everything above is well-formed; this is whether it is *safe*.
+        let filter = BridgeFilter::new(bridge);
+        let max_b = filter.max_magnitude();
+        if !max_b.is_finite() {
+            return Err(PresetError::invalid(format!(
+                "voicing.bridge has a response of {max_b} somewhere in the audio band"
+            )));
+        }
+        let loop_gain = self.voicing.resonance_coupling * max_b;
+        if loop_gain > MAX_BRIDGE_LOOP_GAIN {
+            return Err(PresetError::invalid(format!(
+                "voicing.bridge peaks at {:.1} dB, which with resonance_coupling = {} makes a \
+                 sympathetic loop gain of {loop_gain}, past the {MAX_BRIDGE_LOOP_GAIN} the bus \
+                 is stable under",
+                amp_to_db(max_b),
+                self.voicing.resonance_coupling
+            )));
+        }
+        Ok(max_b)
+    }
+
+    /// Checks the duplex segments' shape *and* what 88 permanently undamped
+    /// banks do to the coupling loop.
+    ///
+    /// The shape checks are the usual ones. The loop check is the one that
+    /// matters, and it is a different loop from the bridge's: a duplex bank is
+    /// never damped by anything, so a marginal loop through it has forever to
+    /// grow, and there are 88 of them all reading and writing the same bus.
+    ///
+    /// # The bound
+    ///
+    /// Segment `j` puts `D_j(f)` of signal on the bus per unit of drive at `f`
+    /// (its realised response, [`crate::duplex::magnitude`]), and gets back
+    /// `coupling · B(f)` of every other segment's output one block later, plus
+    /// `coupling · (B(f) − own_gain_j)` of its own — the bus subtracts a voice's
+    /// own contribution, exactly when the bridge is flat and to within the
+    /// admittance's own tilt when it is not (`resonance.rs`). So the tightest
+    /// loop any frequency can close is
+    ///
+    /// ```text
+    /// coupling · max|B| · ( sum_j |D_j(f)| + max_j |D_j(f)| )
+    /// ```
+    ///
+    /// — the sum being every segment in the instrument that answers at that
+    /// frequency and the extra term being the self-path's worst case. It is
+    /// evaluated at every segment's own centre frequency, which is where a sum
+    /// of resonances peaks, and bounded by
+    /// [`MAX_DUPLEX_LOOP_GAIN`](crate::duplex::MAX_DUPLEX_LOOP_GAIN) — a
+    /// quarter of unity, the same margin the bridge is held to.
+    ///
+    /// What this refuses is the preset that tunes every key's segments to the
+    /// *same* frequency, which is 88 undamped resonators in one loop and is
+    /// also, per Öberg & Askenfelt, not what a piano does: real duplex tuning
+    /// scatters by tens of cents, and two Q-of-several-thousand resonators tens
+    /// of cents apart contribute nothing to each other's loop. A preset whose
+    /// segments are measured passes this by two orders of magnitude.
+    fn validate_duplex(&self, max_b: f32) -> Result<(), PresetError> {
+        let table = &self.notes.duplex;
+        if table.is_empty() {
+            return Ok(());
+        }
+        if table.len() != NUM_KEYS {
+            return Err(PresetError::invalid(format!(
+                "notes.duplex has {} rows, expected {NUM_KEYS} (or none at all)",
+                table.len()
+            )));
+        }
+        for (i, row) in table.iter().enumerate() {
+            if row.len() > MAX_DUPLEX_MODES {
+                return Err(PresetError::invalid(format!(
+                    "notes.duplex[{i}] has {} segments, expected at most {MAX_DUPLEX_MODES}",
+                    row.len()
+                )));
+            }
+            for (k, m) in row.iter().enumerate() {
+                within(
+                    &format!("notes.duplex[{i}][{k}].hz"),
+                    m.hz,
+                    MIN_DUPLEX_HZ,
+                    MAX_DUPLEX_HZ,
+                )?;
+                within(
+                    &format!("notes.duplex[{i}][{k}].gain_db"),
+                    m.gain_db,
+                    MIN_DUPLEX_GAIN_DB,
+                    MAX_DUPLEX_GAIN_DB,
+                )?;
+                within(
+                    &format!("notes.duplex[{i}][{k}].t60_s"),
+                    m.t60_s,
+                    MIN_DUPLEX_T60_S,
+                    MAX_DUPLEX_T60_S,
+                )?;
+            }
+        }
+
+        // Everything above is well-formed; this is whether it is *safe*.
+        let worst = self.duplex_response();
+        let loop_gain = self.voicing.resonance_coupling * max_b * worst;
+        if loop_gain > MAX_DUPLEX_LOOP_GAIN {
+            return Err(PresetError::invalid(format!(
+                "notes.duplex answers {worst} per unit of drive where its segments crowd \
+                 together, which with resonance_coupling = {} and a bridge peaking at \
+                 {:.1} dB makes an undamped loop gain of {loop_gain}, past the \
+                 {MAX_DUPLEX_LOOP_GAIN} the bus is stable under",
+                self.voicing.resonance_coupling,
+                amp_to_db(max_b)
+            )));
+        }
+        Ok(())
+    }
+
+    /// The worst `sum_j |D_j(f)| + max_j |D_j(f)|` over the frequencies the
+    /// duplex table can close a loop at, i.e. the bracketed factor of
+    /// [`Preset::validate_duplex`]'s bound. Zero when there is no table.
+    fn duplex_response(&self) -> f32 {
+        let table = &self.notes.duplex;
+        let mut worst = 0.0f32;
+        for probe in table.iter().flatten() {
+            let (mut total, mut largest) = (0.0f32, 0.0f32);
+            for row in table {
+                let d = crate::duplex::magnitude(row, probe.hz);
+                total += d;
+                largest = largest.max(d);
+            }
+            worst = worst.max(total + largest);
+        }
+        worst
+    }
+
+    /// The largest `voicing.resonance_coupling` this preset may run at without
+    /// breaking either loop bound — the *whole* contract in one number.
+    ///
+    /// It is the smallest of three things: [`MAX_COUPLING`], which bounds the
+    /// scalar on its own and is what a flat bus has always been held to;
+    /// `MAX_BRIDGE_LOOP_GAIN / max|B|`, the string → bus → string loop
+    /// ([`Preset::validate_bridge`]); and, when the preset has segments,
+    /// `MAX_DUPLEX_LOOP_GAIN / (max|B| · duplex response)`, the undamped loop
+    /// through them ([`Preset::validate_duplex`]).
+    ///
+    /// `validate` refuses anything above this; [`ResonanceBus`] clamps to it, so
+    /// that a *live* change to the coupling cannot walk a loaded preset past
+    /// the bound its bridge was validated against. Measuring the realised
+    /// filter costs a few milliseconds, so this is a construction-time call —
+    /// never one the audio path makes.
+    ///
+    /// [`ResonanceBus`]: crate::resonance::ResonanceBus
+    /// [`MAX_COUPLING`]: crate::resonance::MAX_COUPLING
+    /// [`MAX_BRIDGE_LOOP_GAIN`]: crate::resonance::MAX_BRIDGE_LOOP_GAIN
+    /// [`MAX_DUPLEX_LOOP_GAIN`]: crate::duplex::MAX_DUPLEX_LOOP_GAIN
+    pub fn max_safe_coupling(&self) -> f32 {
+        let max_b = match &self.voicing.bridge {
+            Some(bridge) => BridgeFilter::new(bridge).max_magnitude(),
+            None => 1.0,
+        };
+        self.coupling_ceiling(max_b)
+    }
+
+    /// [`Preset::max_safe_coupling`] with `max|B|` already measured.
+    pub(crate) fn coupling_ceiling(&self, max_b: f32) -> f32 {
+        let mut ceiling = MAX_COUPLING.min(MAX_BRIDGE_LOOP_GAIN / max_b);
+        let duplex = self.duplex_response();
+        if duplex > 0.0 {
+            ceiling = ceiling.min(MAX_DUPLEX_LOOP_GAIN / (max_b * duplex));
+        }
+        ceiling.max(0.0)
+    }
+
     /// The string parameters of one key. Panics if `key` is outside A0..C8 —
     /// callers hold a real key.
     pub fn string_params(&self, key: u8) -> StringParams {
@@ -794,6 +1292,30 @@ impl Preset {
             reflection_gain: self.hammer.reflection_gain,
             velocity_min: self.hammer.velocity_min,
             velocity_max: self.hammer.velocity_max,
+        }
+    }
+
+    /// This key's duplex and aliquot segments, empty when the preset has none.
+    ///
+    /// A preset with no `notes.duplex` table at all and one whose table has an
+    /// empty row for this key are the same instrument here, which is what lets
+    /// the table be absent from the file.
+    pub fn duplex_modes(&self, key: u8) -> &[DuplexMode] {
+        match self.notes.duplex.get(self.index(key)) {
+            Some(row) => row,
+            None => &[],
+        }
+    }
+
+    /// How far apart this key's two polarizations sit in the stereo image.
+    ///
+    /// `notes.pan_spread` when the preset has one, and
+    /// `voicing.polarization_pan_spread` when it does not — so a preset written
+    /// before the table existed behaves exactly as it did.
+    pub fn pan_spread(&self, key: u8) -> f32 {
+        match self.notes.pan_spread.get(self.index(key)) {
+            Some(&spread) => spread,
+            None => self.voicing.polarization_pan_spread,
         }
     }
 
@@ -1142,6 +1664,8 @@ impl Default for Preset {
                 // added since Phase E sits at its neutral value here, and none
                 // of them is written to the file.
                 polarization_pan_spread: 0.0,
+                // ... and the bus it couples through is still the flat one.
+                bridge: None,
                 unison_sigma_scale: unity_sigma_scale(),
                 unison_layout: vec![
                     UnisonLayout {
@@ -1206,6 +1730,12 @@ impl Default for Preset {
                 hammer_mass,
                 hammer_stiffness,
                 hammer_exponent,
+                // No duplex segments: the instrument as it was before they
+                // existed. A preset that has them writes every one of them.
+                duplex: Vec::new(),
+                // No per-key override: `voicing.polarization_pan_spread`
+                // applies to the whole compass, as it always did.
+                pan_spread: Vec::new(),
             },
             // The action as `TUNING_REPORT.md` §5 measured it. Unlike the other
             // fields a preset may leave out, this one's default is not silence:
@@ -1435,6 +1965,63 @@ mod tests {
         );
     }
 
+    fn peak(hz: f32, q: f32, gain_db: f32) -> BridgePeak {
+        BridgePeak { hz, q, gain_db }
+    }
+
+    /// A bridge that does nothing: two anchors at 0 dB, and whatever peaks the
+    /// caller wants on top.
+    fn flat_bridge(peaks: Vec<BridgePeak>) -> BridgeVoicing {
+        BridgeVoicing {
+            backbone: vec![
+                BridgeAnchor {
+                    hz: MIN_BRIDGE_HZ,
+                    gain_db: 0.0,
+                },
+                BridgeAnchor {
+                    hz: MAX_BRIDGE_HZ,
+                    gain_db: 0.0,
+                },
+            ],
+            peaks,
+            radiated_share: 0.0,
+        }
+    }
+
+    fn flat_bridge_with(
+        peaks: Vec<BridgePeak>,
+        break_it: impl Fn(&mut Vec<BridgeAnchor>),
+    ) -> BridgeVoicing {
+        let mut bridge = flat_bridge(peaks);
+        break_it(&mut bridge.backbone);
+        bridge
+    }
+
+    fn segment(hz: f32) -> DuplexMode {
+        DuplexMode {
+            hz,
+            gain_db: -30.0,
+            t60_s: 1.0,
+        }
+    }
+
+    /// A legal one-segment-per-key duplex table — scattered, as a real one is —
+    /// with one field of one segment broken by the caller.
+    fn duplex_with(break_it: impl Fn(&mut DuplexMode)) -> Vec<Vec<DuplexMode>> {
+        let mut table: Vec<Vec<DuplexMode>> = (0..NUM_KEYS)
+            .map(|i| vec![segment(2_000.0 + 13.0 * i as f32)])
+            .collect();
+        break_it(&mut table[7][0]);
+        table
+    }
+
+    /// One anchor is not a curve: the backbone needs two to interpolate.
+    fn one_anchor_bridge() -> BridgeVoicing {
+        let mut bridge = flat_bridge(Vec::new());
+        bridge.backbone.truncate(1);
+        bridge
+    }
+
     #[test]
     fn malformed_presets_are_rejected() {
         let short_table = {
@@ -1453,7 +2040,7 @@ mod tests {
 
         // Every one of these would reach the DSP as a divide by zero, a NaN,
         // or a resonator pole outside the unit circle.
-        let breakages: [fn(&mut Preset); 52] = [
+        let breakages: [fn(&mut Preset); 88] = [
             |p: &mut Preset| p.notes.f0_hz[3] = 0.0,
             |p: &mut Preset| p.notes.sigma0[3] = -1.0,
             |p: &mut Preset| p.notes.inharmonicity_b[3] = -1e-4,
@@ -1519,6 +2106,71 @@ mod tests {
             |p: &mut Preset| {
                 p.voicing.unison_sigma_scale[2].scale.pop();
             },
+            // A bridge admittance reaches a cascade of biquads on the audio
+            // path and, unlike everything else here, is allowed gain over one:
+            // what has to be refused is a shape that is malformed *and* a
+            // shape that is well formed but takes the coupling loop past the
+            // point where it sustains itself.
+            |p: &mut Preset| p.voicing.bridge = Some(one_anchor_bridge()),
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(BridgeVoicing {
+                    backbone: (0..MAX_BRIDGE_ANCHORS + 1)
+                        .map(|i| BridgeAnchor {
+                            hz: 20.0 + i as f32,
+                            gain_db: 0.0,
+                        })
+                        .collect(),
+                    peaks: Vec::new(),
+                    radiated_share: 0.0,
+                })
+            },
+            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[1].hz = 10.0)),
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[1].hz = 20_000.0))
+            },
+            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[1].hz = 20.0)),
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| {
+                    b[0].hz = MAX_BRIDGE_HZ;
+                    b[1].hz = MIN_BRIDGE_HZ;
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[0].hz = f32::NAN))
+            },
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[0].gain_db = 30.0))
+            },
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[0].gain_db = -60.0))
+            },
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[0].gain_db = f32::NAN))
+            },
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(flat_bridge(
+                    (0..MAX_BRIDGE_PEAKS + 1)
+                        .map(|i| BridgePeak {
+                            hz: 100.0 + i as f32,
+                            q: 5.0,
+                            gain_db: 0.0,
+                        })
+                        .collect(),
+                ))
+            },
+            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge(vec![peak(19.0, 5.0, 0.0)])),
+            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge(vec![peak(17_000.0, 5.0, 0.0)])),
+            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge(vec![peak(200.0, 0.2, 0.0)])),
+            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge(vec![peak(200.0, 80.0, 0.0)])),
+            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge(vec![peak(200.0, f32::NAN, 0.0)])),
+            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge(vec![peak(200.0, 5.0, 25.0)])),
+            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge(vec![peak(200.0, 5.0, f32::NAN)])),
+            // Well formed, in range, and past the loop bound: `MAX_COUPLING`
+            // with a +20 dB resonance is an effective coupling of 0.5.
+            |p: &mut Preset| {
+                p.voicing.resonance_coupling = MAX_COUPLING;
+                p.voicing.bridge = Some(flat_bridge(vec![peak(200.0, 5.0, 20.0)]));
+            },
             // The polarizations may be spread across the stage, not past it.
             |p: &mut Preset| p.voicing.polarization_pan_spread = 0.5,
             |p: &mut Preset| p.voicing.polarization_pan_spread = -0.1,
@@ -1541,6 +2193,57 @@ mod tests {
             // The level anchors are interpolated across the compass, so they
             // have to be in order.
             |p: &mut Preset| p.noise.key_off.level_db[1].key = 21,
+            // The duplex table is per key, so it is all 88 keys or none: a
+            // short one would silently give the top of the compass no segments.
+            |p: &mut Preset| p.notes.duplex = vec![Vec::new(); NUM_KEYS - 1],
+            |p: &mut Preset| {
+                p.notes.duplex = duplex_with(|_| {});
+                p.notes.duplex[7] = (0..=MAX_DUPLEX_MODES)
+                    .map(|k| segment(4_000.0 + 11.0 * k as f32))
+                    .collect();
+            },
+            |p: &mut Preset| p.notes.duplex = duplex_with(|m| m.hz = MIN_DUPLEX_HZ - 1.0),
+            |p: &mut Preset| p.notes.duplex = duplex_with(|m| m.hz = MAX_DUPLEX_HZ + 1.0),
+            |p: &mut Preset| p.notes.duplex = duplex_with(|m| m.hz = f32::NAN),
+            |p: &mut Preset| p.notes.duplex = duplex_with(|m| m.gain_db = 12.0),
+            |p: &mut Preset| p.notes.duplex = duplex_with(|m| m.gain_db = -80.0),
+            |p: &mut Preset| p.notes.duplex = duplex_with(|m| m.gain_db = f32::NAN),
+            |p: &mut Preset| p.notes.duplex = duplex_with(|m| m.t60_s = 0.0),
+            // A segment that outlives the note keeps its voice awake for as
+            // long as it rings, which is why the ceiling is a hard one.
+            |p: &mut Preset| p.notes.duplex = duplex_with(|m| m.t60_s = MAX_DUPLEX_T60_S + 1.0),
+            |p: &mut Preset| p.notes.duplex = duplex_with(|m| m.t60_s = f32::NAN),
+            // Well formed, in range, and past the loop bound: six segments on
+            // one frequency on every key of the instrument, never damped.
+            |p: &mut Preset| {
+                p.notes.duplex = vec![
+                    vec![
+                        DuplexMode {
+                            hz: 4_000.0,
+                            gain_db: MAX_DUPLEX_GAIN_DB,
+                            t60_s: MAX_DUPLEX_T60_S,
+                        };
+                        MAX_DUPLEX_MODES
+                    ];
+                    NUM_KEYS
+                ];
+            },
+            // The per-key stereo spread is the same all-or-nothing table, and
+            // each entry reaches a pan position on the audio thread.
+            |p: &mut Preset| p.notes.pan_spread = vec![0.1; NUM_KEYS - 1],
+            |p: &mut Preset| p.notes.pan_spread = vec![0.1; NUM_KEYS + 1],
+            |p: &mut Preset| {
+                p.notes.pan_spread = vec![0.1; NUM_KEYS];
+                p.notes.pan_spread[9] = MAX_PAN_SPREAD + 0.01;
+            },
+            |p: &mut Preset| {
+                p.notes.pan_spread = vec![0.1; NUM_KEYS];
+                p.notes.pan_spread[9] = -0.01;
+            },
+            |p: &mut Preset| {
+                p.notes.pan_spread = vec![0.1; NUM_KEYS];
+                p.notes.pan_spread[9] = f32::NAN;
+            },
         ];
         for break_it in breakages {
             let mut p = Preset::default();
@@ -1564,6 +2267,9 @@ mod tests {
             "contact_width",
             "unison_sigma_scale",
             "polarization_pan_spread",
+            "voicing.bridge",
+            "duplex",
+            "pan_spread",
             // The mechanism's default is the measured table rather than
             // silence, but it is skipped on the same terms and for the same
             // reason: the file is the tuner's interface.
@@ -1573,6 +2279,13 @@ mod tests {
         }
         let back = Preset::from_toml(&text).expect("a preset without them still loads");
         assert_eq!(back, Preset::default());
+        assert_eq!(back.voicing.bridge, None);
+        assert!(back.notes.duplex.is_empty());
+        assert!(back.notes.pan_spread.is_empty());
+        for key in LOWEST_KEY..=HIGHEST_KEY {
+            assert!(back.duplex_modes(key).is_empty());
+            assert_eq!(back.pan_spread(key), back.voicing.polarization_pan_spread);
+        }
         assert!(back.notes.inharmonicity_b4.iter().all(|&b| b == 0.0));
         assert!(back.notes.contact_width.iter().all(|&w| w == 0.0));
         assert_eq!(back.voicing.polarization_pan_spread, 0.0);
@@ -1618,14 +2331,199 @@ mod tests {
         preset.voicing.polarization_pan_spread = 0.22;
         preset.voicing.unison_sigma_scale[2].scale = vec![0.85, 1.0, 1.15];
         preset.voicing.unison_sigma_scale[1].scale = vec![0.9, 1.1];
+        preset.notes.pan_spread = (0..NUM_KEYS)
+            .map(|i| 0.05 + 0.003 * i as f32)
+            .collect();
         assert!(preset.validate().is_ok());
 
         let text = preset.to_toml();
         assert!(text.contains("polarization_pan_spread = 0.22"));
+        assert!(text.contains("pan_spread = ["));
+        // The per-key table wins over the global scalar wherever it exists.
+        assert_eq!(preset.pan_spread(LOWEST_KEY), 0.05);
+        assert_eq!(preset.pan_spread(HIGHEST_KEY), preset.notes.pan_spread[87]);
         assert_eq!(text.matches("[[voicing.unison_sigma_scale]]").count(), MAX_UNISON);
         assert!(text.contains("0.0125"));
         // Bit-exact, like every other number in a preset.
         assert_eq!(Preset::from_toml(&text).expect("round trip parses"), preset);
+    }
+
+    /// A voiced bridge is written in full, reads back bit for bit, and — the
+    /// point of the section — describes the shape `PHYSICS.md` §4 asks for:
+    /// sharp separated peaks below ~500 Hz on a mean mobility that fluctuates
+    /// over the midrange and falls in the treble.
+    #[test]
+    fn a_voiced_bridge_round_trips_and_is_the_shape_the_physics_asks_for() {
+        let mut preset = Preset::default();
+        preset.voicing.bridge = Some(BridgeVoicing {
+            backbone: [
+                (30.0, -14.0),
+                (100.0, -1.5),
+                (250.0, 2.0),
+                (600.0, -3.0),
+                (1_100.0, 0.0),
+                (2_000.0, -5.0),
+                (4_000.0, -2.0),
+                (10_000.0, -14.0),
+            ]
+            .into_iter()
+            .map(|(hz, gain_db)| BridgeAnchor { hz, gain_db })
+            .collect(),
+            peaks: [
+                (58.0, 22.0, 9.0),
+                (91.0, 26.0, 7.0),
+                (133.0, 24.0, -5.0),
+                (188.0, 30.0, 8.0),
+                (247.0, 28.0, 6.0),
+                (331.0, 32.0, -6.0),
+                (426.0, 30.0, 5.0),
+                (1_450.0, 6.0, -4.0),
+                (3_800.0, 4.0, 3.0),
+            ]
+            .into_iter()
+            .map(|(hz, q, gain_db)| BridgePeak { hz, q, gain_db })
+            .collect(),
+            // Half of each partial's decay follows the board's own modes,
+            // which also puts the field through the round trip below.
+            radiated_share: 0.5,
+        });
+        assert!(
+            preset.validate().is_ok(),
+            "a realistic bridge did not validate: {:?}",
+            preset.validate().err()
+        );
+
+        let text = preset.to_toml();
+        assert_eq!(text.matches("[[voicing.bridge.backbone]]").count(), 8);
+        assert_eq!(text.matches("[[voicing.bridge.peaks]]").count(), 9);
+        assert_eq!(Preset::from_toml(&text).expect("round trip parses"), preset);
+
+        // The realised filter, not the anchors: a mean mobility that stays
+        // inside a few dB of unity through the midrange, discrete resonances
+        // standing well clear of it below 500 Hz, and a treble that falls away.
+        let filter = BridgeFilter::new(preset.voicing.bridge.as_ref().unwrap());
+        let db = |hz| amp_to_db(filter.magnitude(hz));
+        assert!(db(188.0) - db(160.0) > 5.0, "the 188 Hz mode is not a peak");
+        assert!(db(247.0) - db(290.0) > 4.0, "the 247 Hz mode is not a peak");
+        assert!(db(331.0) < db(290.0) - 3.0, "the 331 Hz anti-resonance is not a dip");
+        assert!(db(10_000.0) < db(600.0) - 8.0, "the treble does not fall");
+        // ... and it is a bridge, not an amplifier: the loop bound is what the
+        // whole design rests on, so check there is real margin left at the
+        // default coupling.
+        let max_b = filter.max_magnitude();
+        assert!(amp_to_db(max_b) < 14.0, "peaks at {:.1} dB", amp_to_db(max_b));
+        assert!(preset.voicing.resonance_coupling * max_b < MAX_BRIDGE_LOOP_GAIN / 2.0);
+    }
+
+    /// A duplex layout of the shape the measurements describe: segments only
+    /// from D4 up (where Öberg & Askenfelt's survey starts), two per key, rising
+    /// smoothly across the compass and scattered by tens of cents — deliberately
+    /// *not* at `k f0`, which is the paper's central negative finding.
+    pub(crate) fn measured_duplex() -> Vec<Vec<DuplexMode>> {
+        let mut state = 0x2545_f491u32;
+        (0..NUM_KEYS)
+            .map(|i| {
+                let key = index_to_note(i);
+                if key < 62 {
+                    return Vec::new();
+                }
+                let position = key_position(key);
+                [(2_200.0f32, -26.0f32), (3_600.0, -32.0)]
+                    .into_iter()
+                    .map(|(base, gain_db)| {
+                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        // ±60 cents, which is the spread the paper reports
+                        // within a single trichord at its widest.
+                        let cents = (state >> 16) as f32 / 65_535.0 * 120.0 - 60.0;
+                        DuplexMode {
+                            hz: base * 2.0f32.powf(1.5 * position + cents / 1200.0),
+                            gain_db,
+                            t60_s: 1.2,
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A voiced duplex is written in full, reads back bit for bit, and leaves
+    /// the loop bound a wide margin — which is what a *measured* layout does,
+    /// because sharp resonances scattered by tens of cents never crowd.
+    #[test]
+    fn a_voiced_duplex_round_trips_and_stays_far_inside_the_loop_bound() {
+        let mut preset = Preset::default();
+        preset.notes.duplex = measured_duplex();
+        assert!(
+            preset.validate().is_ok(),
+            "a measured duplex layout did not validate: {:?}",
+            preset.validate().err()
+        );
+        // Present from D4 up and nowhere below it, and never on a partial.
+        assert!(preset.duplex_modes(60).is_empty());
+        assert_eq!(preset.duplex_modes(62).len(), 2);
+        assert_eq!(preset.duplex_modes(108).len(), 2);
+        for key in 62..=108u8 {
+            let f0 = preset.f0(key);
+            for m in preset.duplex_modes(key) {
+                let k = (m.hz / f0).round().max(1.0);
+                let cents = 1200.0 * (m.hz / (k * f0)).log2();
+                assert!(cents.abs() > 1.0, "key {key} put a segment on partial {k}");
+            }
+        }
+
+        let text = preset.to_toml();
+        assert!(text.contains("duplex = "), "the segments were not written");
+        assert_eq!(Preset::from_toml(&text).expect("round trip parses"), preset);
+
+        // The margin, stated rather than assumed: a measured layout is two
+        // orders of magnitude under the bound, so the check is a guard against
+        // the pathological preset and not a constraint on a real one.
+        let worst = preset
+            .notes
+            .duplex
+            .iter()
+            .flatten()
+            .map(|probe| {
+                let d: f32 = preset
+                    .notes
+                    .duplex
+                    .iter()
+                    .map(|row| crate::duplex::magnitude(row, probe.hz))
+                    .sum();
+                d
+            })
+            .fold(0.0f32, f32::max);
+        let loop_gain = preset.voicing.resonance_coupling * 2.0 * worst;
+        assert!(
+            loop_gain < MAX_DUPLEX_LOOP_GAIN / 50.0,
+            "a measured duplex sits at a loop gain of {loop_gain}"
+        );
+    }
+
+    /// ... and the pathological one is refused: 88 undamped banks tuned to a
+    /// single frequency is the loop the bound exists for.
+    #[test]
+    fn a_duplex_tuned_to_one_frequency_across_the_compass_is_refused() {
+        let mut preset = Preset::default();
+        preset.notes.duplex = vec![
+            vec![DuplexMode {
+                hz: 4_000.0,
+                gain_db: MAX_DUPLEX_GAIN_DB,
+                t60_s: MAX_DUPLEX_T60_S,
+            }];
+            NUM_KEYS
+        ];
+        assert!(preset.validate().is_err(), "88 co-tuned segments validated");
+        // The same segments scattered by a quarter of a semitone per key — far
+        // less than the paper's own spread — are perfectly legal.
+        for (i, row) in preset.notes.duplex.iter_mut().enumerate() {
+            row[0].hz = 4_000.0 * 2.0f32.powf(i as f32 * 25.0 / 1200.0);
+        }
+        assert!(
+            preset.validate().is_ok(),
+            "a scattered duplex was refused: {:?}",
+            preset.validate().err()
+        );
     }
 
     #[test]

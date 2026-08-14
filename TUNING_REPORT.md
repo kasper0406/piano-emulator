@@ -261,6 +261,31 @@ Three readings:
   recorded, −21…−54 dB rendered). There is no large missing hammer-noise transient inside the
   struck-note samples. The action noise is a separate recording — §5.
 
+> **Update (sympathetic milestone).** The table above was re-measured with the same code on the engine as it
+> stands now, at C4/C6/C7 and velocities 40/68/90/108, before and after the bridge admittance, the duplex segments
+> and the re-fitted coupling. **`between@1s` did not move by more than a tenth of a decibel anywhere**: C4 −47.0,
+> C6 −47.6, C7 −48.1, before and after alike, against the recordings' −44.3, −26.4 and −3.5 re-measured beside
+> them. Section 5's `harm*` half *did* move — the release-resonance halo rose from −87.1 to −50.9 dB at C3 and
+> from −137.4 to −72.8 at C5, against targets of −31 and −39 — so the milestone raised the halo without raising
+> this column. The reason is that this column has a floor: with the sympathetic coupling and the duplex removed
+> altogether, and with the board path, the body modes and the diffuse field removed one at a time, it stays at
+> −47.2 / −47.6 / −48.0, while changing only the analysis window from 43 ms to 1365 ms moves it from −45.9 to
+> −10.5 at C7. It is the leakage of the note's own decaying partials outside the guard band, and at 85 ms it sits
+> at about −48 dB. The recordings are 3 to 44 dB above that floor, so the finding this section reports stands
+> unchanged; what does not stand is using the number as a fitting target, which is what `estimate::halo`'s
+> `between C6` and `between C7` rows do. `DECISIONS.md` 167–169.
+>
+> **Update (review pass): the gap is real above the floor, and it is not on the coupling.** On a 341 ms window,
+> where the leakage floor lifts, C7 fortissimo one second in reads **−17.0 dB recorded against the engine's
+> −38.5**, and C6 −20.5 against −49.0 — so 21.5 and 28.5 dB of genuine deficit, measurable. Taking each engine
+> path to its limit and re-measuring (`independent_audit.rs` section 10) says which one owns it: the sympathetic
+> coupling **removed entirely** gives −38.6 at C7 and raised to the largest value the stability contract will ever
+> certify gives −38.5 — 0.1 dB of authority over this statistic, in either direction, which is also what the loop
+> bound predicts (no legal preset can put more than 0.25 of effective coupling anywhere, and this one already runs
+> 0.06–0.17). The board's **diffuse field** owns it: `soundboard.fdn_t60` ×4 gives −21.5 at C7 and −20.9 at C6,
+> within 4.5 and 0.4 dB of the recordings. Backlog item 5's cost line ("the level is a coupling parameter,
+> `resonance.rs`") is therefore wrong and is corrected below. `DECISIONS.md` 184.
+
 ### Phantom partials: confirmed, quadratic, and quiet
 
 `f_i + f_j` stands flat of transverse partial `i+j` by only `3 f0 B i j (i+j) / 2` hertz, which for
@@ -338,6 +363,16 @@ note release; the pedal-down rumble is a −36 dB, six-second, 70 Hz event on ev
 `harm*` samples are a direct measurement of the halo §4 found missing in the treble, and give a
 target for the sympathetic-coupling fit: −31 dB at C3, −39 dB at C5, ringing for 1–2 s.
 
+> **Correction (review pass): the `harm*` rows are not a sympathetic-coupling target.** Split into the
+> struck key's own partials and everything else, **80 % of `harmLC3`'s energy is at C3's own partials** — a
+> damper takes a few tenths of a second to stop a wound string and the recording contains that decay. The
+> engine's *whole* post-release signal, damper working and nothing subtracted, reads **−24.1 dB with a 76 %
+> own-partial share against the recording's −30.7 dB and 80 %**: like for like it is 6.6 dB louder than this
+> target, not 29 dB quieter as a coupling-only residual makes it look. At C5 the same measurement leaves
+> **20 dB of genuine deficit** (−54.6 against −34.5). The *duration* half survives at both keys and belongs to
+> the damper rather than to the coupling: measured identically on both, the release tail falls 20 dB in
+> **0.50 s / 0.60 s** recorded and **0.15 s / 0.10 s** rendered. `DECISIONS.md` 183.
+
 > **Update (Milestone A).** The engine plays all of them, and the column above is the parameter
 > set (`DECISIONS.md` 108–115). Two corrections since: the levels in this table are ratios measured
 > at the *microphone*, so the engine's reference — a velocity-90 strike of the same key — is now
@@ -396,7 +431,7 @@ engineering time plus the real-time budget (worst case is currently 39.5 % of on
 | 2 | One `B` per note | §1: ratio 0.63–0.75 in the wound bass, 1.24–1.45 in the low tenor; up to 78 cents of misplaced partial | **High** in the bottom 1.5 octaves | **S** — one extra per-note coefficient in `StringParams::partial_freq`, a preset field, and the two-band fit that already exists in `residual.rs`; setup-time only | Sign flips across the break, so the parameter must be signed |
 | 3 | Unison strings share one damping law | §6: measured fundamental drifts up to 32 cents (F#3), 0.2 cents in the engine | **Medium**, note-specific | **S** — per-string sigma scale in `PianoString::new`, one preset field; setup-time only | Estimable from the beat envelope's decay asymmetry |
 | 4 | Stereo image cannot move | §5: 1.2–6.2 dB drift against 0.02–0.14 dB | **Medium** on held chords | **S** for the drift — the two polarizations are already separate `process_add` calls; give them separate pan positions (one extra block buffer per voice). **L** for the full per-partial pattern: per-mode L/R gains is a second accumulation in the modal loop, ~+20–30 % of the string cost | Take the S; the spread is not diagnostic (engine 2–21 dB already) |
-| 5 | Treble/aftersound halo far too quiet | §4: C7 at 1 s, −3.5 dB between-partial energy against the engine's −48; `harm*` samples at −31 to −43 dB | **High** in the top two octaves | **M** — the level is a coupling parameter (`resonance.rs`, one per-register field) but *cannot* be fitted from isolated notes; it is stage 2's first job, with the `harm*` samples as an independent check | Also the reason Phase D's treble decays needed a floor detector |
+| 5 | Treble/aftersound halo far too quiet | §4: at a 341 ms window C7 at 1 s is −17.0 dB recorded against the engine's −38.5, C6 −20.5 against −49.0 | **High** in the top two octaves | **M** — ~~a coupling parameter~~ **the board's late field**: the coupling has 0.1 dB of authority over this number even at the stability contract's ceiling, `soundboard.fdn_t60` has 17–28 dB (`DECISIONS.md` 184). A fit against the recordings, after §9's question — how much of their late field is the instrument and how much the room | Also the reason Phase D's treble decays needed a floor detector |
 | 6 | Excitation spectrum smoother than the piano's | §3: 5–10 dB scatter against 2–5 dB control; not shared between notes | **Medium** (note-to-note character) | **L** — per-note per-partial gain table, ~40 numbers × 88 keys, and the microphone-comb confound of `DECISIONS.md` 93 | The cheap global-admittance version is refuted by measurement (§3) |
 | 7 | No phantom partials | §4: confirmed quadratic, −60 to −95 dB | **Low** | **L** — a per-sample nonlinearity in the string or an explicit combination bank | Defer. The measurement's value is that it closes the question |
 

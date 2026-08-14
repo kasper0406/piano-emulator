@@ -16,9 +16,9 @@ use std::process::ExitCode;
 const USAGE: &str = "usage:
   piano-emulator [--preset <file.toml>]
       play interactively (audio out + REPL)
-  piano-emulator render <out.wav> [demo | <file.mid>] [--preset <file.toml>] [--duration <s>]
-      render offline: a compass sweep by default, the built-in demo, or a
-      standard MIDI file
+  piano-emulator render <out.wav> [demo | halo | <file.mid>] [--preset <file.toml>] [--duration <s>]
+      render offline: a compass sweep by default, the built-in demo, the
+      sympathetic-resonance phrase, or a standard MIDI file
   piano-emulator preset <out.toml> [--preset <file.toml>]
       write out a preset — the built-in default unless one is given";
 
@@ -46,6 +46,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let source = match options.positional.get(2).map(String::as_str) {
                 None => RenderSource::Default,
                 Some(a) if a.eq_ignore_ascii_case("demo") => RenderSource::Demo,
+                Some(a) if a.eq_ignore_ascii_case("halo") => RenderSource::Halo,
                 Some(a) => RenderSource::Midi(PathBuf::from(a)),
             };
             if options.positional.len() > 3 {

@@ -8,8 +8,8 @@ use crate::engine::EventSender;
 use crate::midi;
 use crate::preset::Preset;
 use crate::render::{
-    demo_sequence, default_sequence, render_to_wav, RenderEvent, DEFAULT_DURATION_S,
-    DEMO_DURATION_S,
+    default_sequence, demo_sequence, halo_sequence, render_to_wav, RenderEvent,
+    DEFAULT_DURATION_S, DEMO_DURATION_S, HALO_DURATION_S,
 };
 use crate::types::{Event, PedalEvent, DEFAULT_RELEASE_VELOCITY, HIGHEST_KEY, LOWEST_KEY};
 use std::io::{self, BufRead, Write};
@@ -91,6 +91,9 @@ pub enum RenderSource {
     Default,
     /// The built-in musical demo.
     Demo,
+    /// The sympathetic-resonance phrase: staccato treble, a silently held
+    /// bass struck into from above, and a pedal-down wash.
+    Halo,
     /// A standard MIDI file.
     Midi(PathBuf),
 }
@@ -101,6 +104,7 @@ impl RenderSource {
         match self {
             RenderSource::Default => Ok((default_sequence(), DEFAULT_DURATION_S)),
             RenderSource::Demo => Ok((demo_sequence(), DEMO_DURATION_S)),
+            RenderSource::Halo => Ok((halo_sequence(), HALO_DURATION_S)),
             RenderSource::Midi(path) => match midi::load(path) {
                 Ok(performance) => {
                     let duration = performance.duration_s();
@@ -130,7 +134,8 @@ const HELP: &str = "commands (notes are names like C4, F#3, Bb2; A4 = 440 Hz)
   ped uc <0|1>             una corda
   demo                     play the built-in demo
   render <out.wav> [what]  render offline: a compass sweep by default,
-                           'demo', or a standard MIDI file (*.mid)
+                           'demo', 'halo' (the sympathetic phrase), or a
+                           standard MIDI file (*.mid)
   panic                    all notes and pedals off
   help                     this list
   quit                     exit";
@@ -200,7 +205,7 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
         "ped" | "pedal" => parse_pedal(&args),
         "demo" => Ok(Command::Demo),
         "render" => {
-            const USAGE: &str = "usage: render <out.wav> [demo | <file.mid>]";
+            const USAGE: &str = "usage: render <out.wav> [demo | halo | <file.mid>]";
             let Some(path) = args.first() else {
                 return Err(USAGE.into());
             };
@@ -210,6 +215,7 @@ pub fn parse_command(line: &str) -> Result<Command, String> {
             let source = match args.get(1) {
                 None => RenderSource::Default,
                 Some(a) if a.eq_ignore_ascii_case("demo") => RenderSource::Demo,
+                Some(a) if a.eq_ignore_ascii_case("halo") => RenderSource::Halo,
                 Some(a) if is_midi_path(a) => RenderSource::Midi(PathBuf::from(a)),
                 Some(_) => return Err(USAGE.into()),
             };
@@ -487,6 +493,13 @@ mod tests {
             Ok(Command::Render {
                 path: PathBuf::from("out.wav"),
                 source: RenderSource::Demo
+            })
+        );
+        assert_eq!(
+            parse_command("render out.wav HALO"),
+            Ok(Command::Render {
+                path: PathBuf::from("out.wav"),
+                source: RenderSource::Halo
             })
         );
         assert_eq!(

@@ -43,6 +43,7 @@ pub mod numeric;
 pub mod pipeline;
 pub mod preset;
 pub mod residual;
+pub mod response;
 pub mod stft;
 pub mod survey;
 pub mod synth;

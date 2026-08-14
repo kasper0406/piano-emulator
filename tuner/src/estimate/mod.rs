@@ -19,6 +19,8 @@
 //!
 //! recordings of the action ──> noise::fit_noise ───> the [noise] section
 //! stereo recordings of notes ─> directivity::balance_drift -> pan spread
+//! release resonances ────────> duplex::residual_modes ──> notes.duplex
+//! engine renders (stage 2) ──> halo::refine ───────────> coupling, [voicing.bridge]
 //! ```
 //!
 //! Nothing here reads audio or does a transform; everything reads
@@ -31,6 +33,8 @@
 pub mod compass;
 pub mod decay;
 pub mod directivity;
+pub mod duplex;
+pub mod halo;
 pub mod hammer;
 pub mod inharmonic;
 pub mod noise;
@@ -39,7 +43,15 @@ pub mod strike;
 pub mod unison;
 
 pub use compass::{interpolate_keys, CompassCurve};
-pub use directivity::{balance_drift, pan_spread_for_drift, BalanceDrift, DirectivityConfig};
+pub use directivity::{
+    balance_drift, pan_spread_for_drift, pan_spread_table, BalanceDrift, DirectivityConfig,
+    KeyDriftLine,
+};
+pub use duplex::{duplex_row, residual_modes, DuplexConfig, ResidualMode};
+pub use halo::{
+    between_partials, peaks_from_body_modes, refine as refine_halo, BetweenPartials, HaloConfig,
+    HaloError, HaloTarget, HaloVoicing,
+};
 pub use decay::{DecayConfig, DecayCurve, DecayFit, DecayReport, Exponential, PolarizationSplit};
 pub use hammer::{
     contact_pulse, fit_hammer, fit_velocity_map, ContactConfig, FeltParams, ForcePulse, HammerConfig,

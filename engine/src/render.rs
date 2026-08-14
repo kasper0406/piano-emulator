@@ -106,10 +106,31 @@ impl Sequence {
         self
     }
 
+    /// A note let go at a stated release velocity, for phrases where how fast
+    /// the damper falls is part of what is being heard.
+    fn note_released(&mut self, at: f32, key: u8, vel: u8, dur: f32, rel: u8) -> &mut Self {
+        self.events.push(RenderEvent::new(at, Event::NoteOn { key, vel }));
+        self.events
+            .push(RenderEvent::new(at + dur, Event::NoteOff { key, vel: rel }));
+        self
+    }
+
     fn chord(&mut self, at: f32, keys: &[u8], vel: u8, dur: f32) -> &mut Self {
         for &key in keys {
             self.note(at, key, vel, dur);
         }
+        self
+    }
+
+    /// A key pressed below escapement: the damper lifts and nothing is struck.
+    fn hold(&mut self, at: f32, key: u8) -> &mut Self {
+        self.events.push(RenderEvent::new(at, Event::KeyDown { key }));
+        self
+    }
+
+    fn release(&mut self, at: f32, key: u8, rel: u8) -> &mut Self {
+        self.events
+            .push(RenderEvent::new(at, Event::NoteOff { key, vel: rel }));
         self
     }
 
@@ -212,6 +233,87 @@ pub fn demo_sequence() -> Vec<RenderEvent> {
     s.finish()
 }
 
+/// Length of [`halo_sequence`] including the final decay.
+pub const HALO_DURATION_S: f32 = 30.0;
+
+/// The phrase the sympathetic milestone exists for: everything you can hear
+/// that is *not* the string the hammer hit.
+///
+/// Three movements, each isolating one path:
+///
+/// 1. **Staccato in the treble, no pedal, nothing else held.** Above G6 a grand
+///    has no dampers, and a duplex has none anywhere, so what rings on after
+///    the keys are let go — hard, at release velocity 112, so the dampers that
+///    do exist land at once — is the top of the instrument and the segments
+///    beyond the bridge. On a preset with neither, this movement goes silent
+///    between the notes.
+/// 2. **A silently held bass under treble strikes.** The bass keys are pressed
+///    below escapement (`Event::KeyDown`): their dampers lift and they sound
+///    nothing, so every bit of bass in this movement arrived through the
+///    bridge from the treble chords above it. The keys are then let go while
+///    the bloom is still ringing, which cuts it off — that is the proof it was
+///    sympathetic and not a tail of the chord.
+///
+///    The two chords are chosen so that every struck partial *coincides* with
+///    a partial of a held string: C2/C3/E3/G3 held under C5-E5-G5 and C6-E6-G6,
+///    where C5 is C3's fourth partial and C2's eighth, E5 is E3's fourth, G5 is
+///    G3's fourth, and so on. This is not decoration. A string driven off its
+///    own partials answers at the driving frequency and at the amplitude its
+///    off-resonance mobility allows, which is nothing; the halo is a resonance,
+///    and a phrase that does not line the frequencies up does not have one.
+/// 3. **The pedal-down wash.** A chord rolled across five octaves with every
+///    damper up, released immediately, so what is left is the whole instrument
+///    ringing on its own; then the pedal comes up and lands 88 dampers at once.
+pub fn halo_sequence() -> Vec<RenderEvent> {
+    let mut s = Sequence::new();
+
+    // 1. Staccato treble, released as fast as the model allows.
+    for (i, &key) in [88u8, 91, 93, 96, 93, 91, 88, 96].iter().enumerate() {
+        s.note_released(0.30 + i as f32 * 0.42, key, 104, 0.10, 112);
+    }
+    // The same figure an octave down, where the dampers do work: the contrast
+    // between a note that stops and one that cannot is the point.
+    for (i, &key) in [76u8, 79, 81, 84].iter().enumerate() {
+        s.note_released(3.90 + i as f32 * 0.42, key, 100, 0.10, 112);
+    }
+
+    // 2. The silent bass, struck into twice from above, on frequencies it can
+    //    answer: C2, C3, E3, G3 under a C major triad two octaves up.
+    for key in [36u8, 48, 52, 55] {
+        s.hold(6.20, key);
+    }
+    s.chord(6.80, &[72, 76, 79], 118, 0.14);
+    s.chord(9.30, &[84, 88, 91], 118, 0.14);
+    // Let the held keys go while the bloom is still sounding: it stops, and
+    // that is what says it was the held strings and not a tail of the chord.
+    for key in [36u8, 48, 52, 55] {
+        s.release(12.60, key, 64);
+    }
+    // And once more with a sustained drive rather than a transient one: G4 is
+    // held down long enough for the exchange to build.
+    for key in [36u8, 48] {
+        s.hold(13.40, key);
+    }
+    s.note(13.80, 67, 112, 1.60);
+    for key in [36u8, 48] {
+        s.release(17.20, key, 64);
+    }
+
+    // 3. The pedal-down wash: dampers all up, a chord rolled across the
+    //    compass, keys released at once, then the pedal.
+    s.pedal(18.00, PedalEvent::Sustain(1.0));
+    for (i, &key) in [33u8, 40, 45, 52, 57, 60, 64, 69, 72, 76, 81, 88]
+        .iter()
+        .enumerate()
+    {
+        s.note(18.20 + i as f32 * 0.09, key, 96 + (i as u8).min(20), 0.35);
+    }
+    s.chord(20.20, &[45, 57, 64, 69], 120, 0.30);
+    s.pedal(26.50, PedalEvent::Sustain(0.0));
+
+    s.finish()
+}
+
 /// Default sequence for `render <file.wav>`: a sweep of the whole compass in
 /// minor thirds followed by a chromatic octave, which is what you want to hear
 /// when checking that the instrument is even across the keyboard.
@@ -264,5 +366,46 @@ mod tests {
         assert!(events.windows(2).all(|w| w[0].time_s <= w[1].time_s));
         assert!(events.last().unwrap().time_s < DEMO_DURATION_S);
         assert!(default_sequence().last().unwrap().time_s < DEFAULT_DURATION_S);
+    }
+
+    /// The halo phrase has to be a phrase about the halo: every note in its
+    /// first two movements is let go before the next one starts, so anything
+    /// still sounding between them arrived some other way, and the bass keys
+    /// it holds are never struck.
+    #[test]
+    fn the_halo_sequence_never_strikes_the_keys_whose_bloom_it_is_listening_to() {
+        let events = halo_sequence();
+        assert!(events.windows(2).all(|w| w[0].time_s <= w[1].time_s));
+        assert!(events.last().unwrap().time_s < HALO_DURATION_S);
+
+        let held: Vec<(u8, f32)> = events
+            .iter()
+            .filter_map(|e| match e.event {
+                Event::KeyDown { key } => Some((key, e.time_s)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(held.len(), 6, "the phrase presses six keys silently");
+        for (key, down) in held {
+            // The key may well be struck later in the piece — the wash in
+            // movement 3 plays half the compass. What must not happen is a
+            // strike *while* it is being held, which would make the sound it
+            // then radiates its own and not the halo.
+            let up = events
+                .iter()
+                .find(|e| {
+                    e.time_s > down
+                        && matches!(e.event, Event::NoteOff { key: released, .. } if released == key)
+                })
+                .map_or(f32::INFINITY, |e| e.time_s);
+            assert!(
+                !events.iter().any(|e| {
+                    (down..=up).contains(&e.time_s)
+                        && matches!(e.event, Event::NoteOn { key: struck, .. } if struck == key)
+                }),
+                "key {key} is struck while it is being held silently, so what it radiates \
+                 between {down} s and {up} s is not the halo"
+            );
+        }
     }
 }

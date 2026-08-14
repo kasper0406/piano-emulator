@@ -313,10 +313,19 @@ fn line_loss(m: usize, voicing: &SoundboardVoicing) -> (f32, f32) {
     // T60 means -60 dB, i.e. a factor exp(-6.907) over T60 seconds.
     let passes = |t60: f32| (-6.907 * m as f32 / (t60 * SAMPLE_RATE)).exp();
     let g_lf = passes(voicing.fdn_t60_lf);
-    let rho = passes(voicing.fdn_t60_hf) / g_lf;
+    // How much *more* the line must lose at `fdn_hf_hz` than at DC. A board
+    // whose treble outlives its bass is not a board, so the ratio is clamped
+    // at unity rather than refused: `rho >= 1` asks for a one-pole gain that
+    // rises with frequency, which this form cannot make.
+    let rho = (passes(voicing.fdn_t60_hf) / g_lf).min(1.0);
     // Solve |(1-a) / (1 - a e^-jw)| = rho for a in (0, 1).
     let cw = (std::f32::consts::TAU * voicing.fdn_hf_hz / SAMPLE_RATE).cos();
     let d = 1.0 - rho * rho;
+    // Equal T60s make the loss flat, and the closed form below 0/0. The pole
+    // that realises a flat gain is a = 0, which is what the limit approaches.
+    if d <= f32::EPSILON {
+        return (g_lf, 0.0);
+    }
     let b = 1.0 - rho * rho * cw;
     (g_lf, (b - (b * b - d * d).sqrt()) / d)
 }
@@ -506,6 +515,47 @@ mod tests {
             let mag = g * (1.0 - a) / (1.0 - 2.0 * a * w.cos() + a * a).sqrt();
             let hf_db = 20.0 * mag.log10() * round_trips(voicing.fdn_t60_hf);
             assert!((hf_db + 60.0).abs() < 0.5, "line {m}: {hf_db} dB over T60_HF");
+        }
+    }
+
+    /// A preset that asks for the same T60 at both ends of the spectrum is
+    /// legal, and used to render `NaN`.
+    ///
+    /// `rho` — how much more the line loses at `fdn_hf_hz` than at DC — is 1
+    /// there, and the pole that realises it came out of a `0/0`. Every sample
+    /// the board produced after the first block was `NaN`, and
+    /// `Preset::validate` had no reason to object: both numbers are positive
+    /// and either one alone is fine. Found by an end-to-end sweep, not by the
+    /// unit tests, because nothing had ever asked for a flat diffuse field.
+    #[test]
+    fn a_flat_diffuse_field_is_a_flat_gain_rather_than_a_division_by_zero() {
+        let mut voicing = voicing();
+        for (lf, hf) in [(0.4f32, 0.4f32), (0.05, 0.05), (0.1, 0.4), (3.0, 3.0)] {
+            voicing.fdn_t60_lf = lf;
+            voicing.fdn_t60_hf = hf;
+            for m in FDN_DELAYS {
+                let (g, a) = line_loss(m, &voicing);
+                assert!(
+                    g.is_finite() && a.is_finite(),
+                    "T60 {lf}/{hf}, line {m}: gain {g}, pole {a}"
+                );
+                assert!((0.0..1.0).contains(&a), "T60 {lf}/{hf}, line {m}: pole {a}");
+                assert!((0.0..1.0).contains(&g), "T60 {lf}/{hf}, line {m}: gain {g}");
+            }
+            let mut sb = Soundboard::new(&voicing);
+            sb.set_board_mix(1.0);
+            let mut impulse = [0.0f32; BLOCK];
+            impulse[0] = 1.0;
+            let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
+            for b in 0..400 {
+                sb.begin_block();
+                sb.add_voice(if b == 0 { &impulse } else { &[0.0; BLOCK] }, 0.0);
+                sb.process(&mut l, &mut r);
+                assert!(
+                    l.iter().chain(r.iter()).all(|v| v.is_finite()),
+                    "T60 {lf}/{hf}: block {b} of the diffuse field is not finite"
+                );
+            }
         }
     }
 

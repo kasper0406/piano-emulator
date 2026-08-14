@@ -75,6 +75,27 @@ delete the entry.
 
 ## 3. Duplex scaling and aliquot segments
 
+> **Built (sympathetic milestone), and it does not yet sound.** `engine/src/duplex.rs` is the bank, held by
+> `Voice` rather than by `PianoString` because everything in `string.rs` is damped and these are the one part of the
+> instrument that never is (`DECISIONS.md` 153). Both drives are there — the key's own bridge force and the
+> sympathetic bus — the schema takes measured frequencies as this entry demands, and the estimator recovers 100
+> segments over 23 keys of Salamander at a median +27 cents off the nearest partial, which is the scatter Öberg &
+> Askenfelt describe (161). Three findings qualify it. (a) `gain_db` is normalised to the segment's *steady*
+> response so that level and length are independent measurements, and `ModalBank`'s cull then zeroes the state
+> before that steady response can build: a segment asked to ring 1.4 s rings 0.21 s, and the gap between what the
+> file says and what the render does is 93.7 dB (162). (b) 88 permanently undamped banks close a loop that never
+> dies, so the level the measured table ships at was set by the loop budget rather than by the measurement (163).
+> (c) End to end, the segments of `presets/salamander-c5.toml` contribute **−148.6 dB** relative to the note that
+> drives them (170). The prediction of this entry — treble shimmer surviving a staccato release — is reachable at
+> the schema's ceiling and unreachable at the measured setting, and the fix is the cull or the normalisation, not
+> the estimator. Re-measured in the review pass and unchanged (−84.6 dB during the note, −244 dB at the segment
+> frequencies 0.4 s after the release, −57.7 dB during at the largest boost the validator accepts). The reason is
+> item 157 read the other way round: `gain_db` is normalised to the segment's response *at its own frequency*, and
+> a struck string's bridge force is a sum of decaying sinusoids at its own partials, so a resonator a hertz wide
+> sitting between them is handed almost nothing to answer. Raising the table cannot fix that and the loop bound
+> would refuse it anyway; what the segments need is a drive with energy where they are — the hammer's own broadband
+> knock through the bridge — which is a build, not a number.
+
 **Physics.** The string does not end at the bridge or the agraffe. The front segment (capo bar/agraffe to tuning pin)
 and the rear segment (bridge to hitch pin) are short, undamped, high-pitched strings sharing the bridge with the
 speaking length — on aliquot grands the rear one is nominally tuned to a partial of it. They are driven only through
@@ -108,6 +129,37 @@ T60 > 0.3 s, write the strongest 2–6 per key.
 > and its level is explicitly a stage-2 coupling parameter. But the report *refutes* using one global admittance
 > curve to explain excitation-spectrum roughness: that residual is per-note, not shared across notes at the same
 > frequency. Build the admittance filter for coupling and decay shaping; do not expect it to fix excitation spectra.
+>
+> **Built (sympathetic milestone), with one prediction confirmed and one refuted.** `B(f)` is a fitted shelf
+> backbone plus RBJ peaking sections on the resonance bus (`DECISIONS.md` 148–150), stability is a validated
+> contract rather than a hope (149), and it costs 0.2 % of a core. *Frequency-selective excitation is exactly
+> true*: a ±12 dB resonance moves the energy one string delivers to another by +11.8 / −11.6 dB, at A0, C4 and C6
+> alike (151). *The decay-rate coupling does not fall out free* and cannot, because with `own` subtracted nothing
+> in the loop is proportional to the string's own motion — the struck string's own level moves under 0.4 dB at the
+> loop ceiling while its halo moves 12 dB, and the residual self-term shifts frequency rather than damping. `Re Y`
+> belongs in `string.rs`'s `partial_sigma`, and a test pins its absence until it lands (151). What the fitted
+> filter bought, end to end: the release-resonance halo rose 36 dB at C3 and 65 dB at C5 and stopped dying inside
+> a second (169), and this section's own headline statistic — between-partial energy at one second — did not move
+> at all, because it is sitting on the analysis window's leakage floor at about −48 dB and no engine path moves it
+> (168). The treble halo this entry was written about is still 21 dB (C6) to 44 dB (C7) short of the recordings.
+>
+> **Both halves resolved (review pass).** *The decay-rate coupling is built*, and where this entry says it belongs:
+> `Re Y` is in `string.rs`'s per-partial damping as `[voicing.bridge].radiated_share`, the share of a partial's
+> fitted decay that is loss into the board, modulated by the *peaks* alone — the backbone is the mean mobility and
+> is already inside the fitted `sigma(f)`, so putting it in again would count it twice. A partial 2.7 cents off a
+> board mode now comes back at T60 11.33 s against 14.60 s with a unity bridge, and 11.42 s with the coupling
+> switched off, i.e. it is the string's own damping and not loop feedback (`DECISIONS.md` 182). *And the treble
+> halo this entry was written about is not on this path at all*: with the sympathetic coupling raised to the
+> largest value the stability contract will ever certify, C7's between-partial energy one second in moves **0.0 dB**
+> (−38.5 dB, against the recording's −17.0); with the board's diffuse field `T60` multiplied by four it moves
+> **17 dB** at C7 and **28 dB** at C6, to within 4.5 and 0.4 dB of the recordings. The missing aftersound is the
+> late field of §8/§9, not the coupling of §4 — and how much of the recordings' late field is the instrument and
+> how much is the room is exactly §9's question (`DECISIONS.md` 184).
+>
+> The stability contract also had to be repaired to be one: measuring `max|B|` on a log grid plus the peaks' own
+> centres is evadable, because a cascade *adds* decibels and two overlapping resonances put their maximum between
+> their centres — a preset inside this schema hid 15.6 dB there and realised a loop gain of 1.5 while measuring
+> 0.25 (`DECISIONS.md` 179).
 
 **Physics.** A string terminates on a bridge with complex admittance `Y(f)`, not on a node. `Re Y` sets how fast each
 partial loses energy into the board, and because all strings share the board, partials of *different* notes that fall
