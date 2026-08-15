@@ -1323,6 +1323,77 @@ pub fn level_match(a: &Audio, b: &Audio) -> Result<(Audio, Audio)> {
 }
 
 // ---------------------------------------------------------------------------
+// The note-off nonlinearity budget
+// ---------------------------------------------------------------------------
+
+/// Bottom of the band [`note_off_hf`] reads. Above the tenth partial of every
+/// key the phrase set plays below the treble, so what a string is *supposed* to
+/// radiate there is already 40 dB down and what a waveshaper puts there is not.
+pub const NOTE_OFF_HF_HZ: f64 = 10_000.0;
+
+/// The window after a note-off the band is read in, in seconds. Starts two
+/// milliseconds late so the damper's own arrival is inside it, and runs 33 ms,
+/// which covers a nominal release's whole felt interval — 10 ms of arrival plus
+/// the 11 ms it takes to retire — with room either side.
+pub const NOTE_OFF_WINDOW_S: (f64, f64) = (0.002, 0.035);
+
+/// The window before it the reading is referred to: the same length, ending
+/// 5 ms before the key is let go, so it is the note itself and not the release.
+pub const NOTE_OFF_REFERENCE_S: (f64, f64) = (-0.038, -0.005);
+
+/// How much energy above [`NOTE_OFF_HF_HZ`] a damper's landing *adds*, in dB —
+/// the band in [`NOTE_OFF_WINDOW_S`] over the same band in
+/// [`NOTE_OFF_REFERENCE_S`], one reading per note-off given.
+///
+/// This is the statistic a soft limiter driven past its knee is visible in and
+/// almost nothing else is. Folding a waveform puts harmonics of it all the way
+/// to Nyquist; a string's own series is truncated at `MAX_PARTIAL_RATIO` and
+/// rolled off long before this band, and a damper *arriving* can only take
+/// energy out of it. So a real piano reads negative here — the Salamander
+/// recording of the staccato phrase reads a mean of −3.2 dB and never more than
+/// +0.7 — and anything strongly positive is the engine's own arithmetic.
+///
+/// A ratio of two windows of the same signal, so it is scale-free: an engine
+/// render, a recording and a level-matched pair all read the same number. The
+/// caller decides which note-offs are worth reading; a window with a strike or
+/// a pedal move in it is measuring the strike or the pedal.
+pub fn note_off_hf(mono: &[f32], sample_rate: f64, note_offs: &[f64]) -> Vec<f64> {
+    let (from, to) = NOTE_OFF_WINDOW_S;
+    let n = ((to - from) * sample_rate).round() as usize;
+    let size = n.next_power_of_two();
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(size);
+    let first = (NOTE_OFF_HF_HZ * size as f64 / sample_rate).ceil() as usize;
+    let band = |at: f64| -> Option<f64> {
+        let start = (at * sample_rate).round();
+        if start < 0.0 || start as usize + n > mono.len() {
+            return None;
+        }
+        let start = start as usize;
+        let mut buffer = vec![Complex32::new(0.0, 0.0); size];
+        for (i, slot) in buffer.iter_mut().take(n).enumerate() {
+            // Hann, so a partial's own skirt does not leak into the band.
+            let w = 0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos();
+            *slot = Complex32::new((f64::from(mono[start + i]) * w) as f32, 0.0);
+        }
+        fft.process(&mut buffer);
+        let power: f64 = buffer[first..=size / 2]
+            .iter()
+            .map(|c| f64::from(c.norm_sqr()))
+            .sum();
+        (power > 0.0).then_some(power)
+    };
+    note_offs
+        .iter()
+        .filter_map(|&t| {
+            let after = band(t + from)?;
+            let before = band(t + NOTE_OFF_REFERENCE_S.0)?;
+            Some(10.0 * (after / before).log10())
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // The whole comparison
 // ---------------------------------------------------------------------------
 

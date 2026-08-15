@@ -596,6 +596,13 @@ pub fn envelope_tilt(
 ///   normalisation the roughness half had and the reason a fitted row cannot
 ///   smuggle in a loudness change.
 ///
+/// What is written per partial is not the raw ratio: [`write_row`] reads each
+/// cell as a measurement with an error bar, shrinks it toward the row's own
+/// smooth curve by how much the cell's velocity layers agreed about it, and
+/// gives a partial the layers could not reach the curve outright instead of a
+/// `1.0` that would be a tooth. Its header carries the measurement that says
+/// why.
+///
 /// Returns `None` when no layer measured enough partials on both sides.
 pub fn measured_over_rendered(
     recorded: &[Vec<(u32, f64)>],
@@ -644,25 +651,26 @@ pub fn measured_over_rendered(
             per_partial[k as usize - 1].push(r - centre);
         }
     }
-    let measured: Vec<Option<f64>> = per_partial
+    let measured: Vec<Option<Cell>> = per_partial
         .iter()
         .map(|values| {
             (values.len() >= config.min_layers.min(recorded.len().max(1)))
-                .then(|| robust_median(values, config.outlier_db / NEPERS_TO_DB))
+                .then(|| Cell::of(values, config))
                 .flatten()
         })
         .collect();
-    let seen: Vec<f64> = measured.iter().flatten().copied().collect();
+    let seen: Vec<f64> = measured.iter().flatten().map(|c| c.centre).collect();
     if seen.is_empty() {
         return None;
     }
     // Pinned so the median partial is unmoved, which is what keeps the note's
     // loudness where the decay and level fits put it.
     let offset = median(seen.iter().copied()).expect("seen is not empty");
-    let mut gains: Vec<f32> = measured
+    let written = write_row(&measured, offset, config);
+    let mut gains: Vec<f32> = written
         .iter()
         .map(|value| match value {
-            Some(ln) => ((ln - offset).exp() as f32).clamp(MIN_PARTIAL_GAIN, MAX_PARTIAL_GAIN),
+            Some(ln) => (ln.exp() as f32).clamp(MIN_PARTIAL_GAIN, MAX_PARTIAL_GAIN),
             None => 1.0,
         })
         .collect();
@@ -670,6 +678,176 @@ pub fn measured_over_rendered(
         gains.pop();
     }
     (!gains.is_empty()).then_some(gains)
+}
+
+/// One partial's correction as the velocity layers measured it: where they
+/// agree it is, and how far apart they are about that.
+#[derive(Clone, Copy, Debug)]
+struct Cell {
+    /// Robust median of the layers' levelled log ratios, nepers.
+    centre: f64,
+    /// Variance of that median, nepers squared — how much of the cell is the
+    /// measurement rather than the piano.
+    variance: f64,
+}
+
+impl Cell {
+    fn of(values: &[f64], config: &ShapingConfig) -> Option<Cell> {
+        let centre = robust_median(values, config.outlier_db / NEPERS_TO_DB)?;
+        let n = values.len().max(1) as f64;
+        let spread =
+            (values.iter().map(|v| (v - centre).powi(2)).sum::<f64>() / n).sqrt();
+        // The standard error of a median is about 1.25 times a mean's.
+        Some(Cell {
+            centre,
+            variance: (1.25 * spread).powi(2) / n,
+        })
+    }
+}
+
+/// The row as written: every partial's correction shrunk toward the smooth
+/// curve by how much its own velocity layers agreed about it, and every partial
+/// the layers could not reach given the smooth curve outright.
+///
+/// # Why the measured cells cannot be written as measured either
+///
+/// `DECISIONS.md` 231's argument for this field is that the per-partial pattern
+/// is **the same in every velocity layer** — that is what makes it a property of
+/// the string and the bridge rather than of the blow, and it is the entire
+/// justification for a velocity-independent table carrying it. A cell whose
+/// layers disagree by twenty decibels is not that pattern; it is three noisy
+/// numbers, and their median is a noisy number. Writing it anyway puts the
+/// tracker's own scatter into the instrument: measured on the fitted keys, the
+/// engine's rendered spectrum came out **4 dB more jagged than the recording it
+/// was fitted to**, while the 58 keys with no row at all came out 5 dB
+/// *smoother* — a compass that lurches every third key, which is what a listener
+/// finds as one note that does not fit.
+///
+/// So each cell is read as a measurement with an error bar and combined with the
+/// row's own smooth curve the way two measurements of the same thing are:
+/// `written = p(k) + w (m_k − p(k))`, with `w = t² / (t² + v_k)`, `v_k` the
+/// variance of the cell's own median over its layers and `t²` the variance the
+/// row's departures from the curve have in excess of it. A cell its layers agree
+/// on keeps all of itself; a cell they disagree on keeps the part of itself the
+/// row can vouch for. Nothing is thresholded and no cell is discarded.
+///
+/// The curve is the same Huber-weighted degree-2 polynomial in `ln k` that
+/// [`envelope_tilt`] fits, now weighted by `1 / v_k` so that a cell nobody
+/// agrees about does not bend it either.
+fn write_row(measured: &[Option<Cell>], offset: f64, config: &ShapingConfig) -> Vec<Option<f64>> {
+    let deviation = |cell: &Cell| cell.centre - offset;
+    let points: Vec<(f64, f64, f64)> = measured
+        .iter()
+        .enumerate()
+        .filter_map(|(i, cell)| {
+            cell.map(|c| (((i + 1) as f64).ln(), deviation(&c), c.variance))
+        })
+        .collect();
+    let raw = |i: usize| measured[i].map(|c| deviation(&c));
+    // Too few points to fit a curve to: the cells stand as measured, which is
+    // what the treble's three-partial rows get and is the only honest answer
+    // there.
+    if points.len() < config.envelope_degree + 2 {
+        return (0..measured.len()).map(raw).collect();
+    }
+    let (Some(lo), Some(hi)) = (
+        measured.iter().position(Option::is_some),
+        measured.iter().rposition(Option::is_some),
+    ) else {
+        return (0..measured.len()).map(raw).collect();
+    };
+    let floor = points
+        .iter()
+        .map(|&(_, _, v)| v)
+        .fold(f64::INFINITY, f64::min)
+        .max(1e-6);
+    let x: Vec<f64> = points.iter().map(|p| p.0).collect();
+    let y: Vec<f64> = points.iter().map(|p| p.1).collect();
+    let precision: Vec<f64> = points.iter().map(|&(_, _, v)| 1.0 / v.max(floor)).collect();
+    let Some(curve) = huber_polyfit(&x, &y, &precision, config) else {
+        return (0..measured.len()).map(raw).collect();
+    };
+    // The variance the row's departures from the curve have beyond what the
+    // layers' own disagreement explains: the signal, as against the noise.
+    let n = points.len() as f64;
+    let excess = points
+        .iter()
+        .map(|&(xk, yk, v)| (yk - poly_eval(&curve, xk)).powi(2) - v)
+        .sum::<f64>()
+        / n;
+    let signal = excess.max(0.0);
+    (0..measured.len())
+        .map(|i| {
+            let at = poly_eval(&curve, ((i + 1) as f64).ln());
+            match measured[i] {
+                Some(cell) => {
+                    let w = if signal + cell.variance > 0.0 {
+                        signal / (signal + cell.variance)
+                    } else {
+                        1.0
+                    };
+                    Some(at + w * (deviation(&cell) - at))
+                }
+                // Interior, and *surrounded*: past the last measured partial
+                // there is nothing to interpolate, a degree-2 polynomial in
+                // `ln k` extrapolates by tens of decibels, and a row that ends
+                // in genuine `1.0`s is a row that gets trimmed.
+                None => (i > lo && i < hi && run_length(measured, i) <= MAX_FILL_RUN)
+                    .then_some(at),
+            }
+        })
+        .collect()
+}
+
+/// How many partials in a row may be interpolated at once.
+///
+/// A hole with a measurement on each side of it is an interpolation. A run of
+/// three or more is a **gap**, and what a degree-2 polynomial in `ln k` says in
+/// the middle of one is a guess — measured, and it costs: filling the long runs
+/// as well moved the scoreboard's `scale_mf` and `staccato` up 0.14 and 0.13 dB
+/// of log-mel, because the rows that have them are the short treble ones where
+/// the curve has few points to stand on and the partials it reaches are the
+/// 5 kHz bands those two phrases live in. Filling only the short runs keeps C2's
+/// repair — its holes come in ones and twos — and gives that back.
+const MAX_FILL_RUN: usize = 2;
+
+/// How many consecutive unmeasured partials `i` belongs to.
+fn run_length(measured: &[Option<Cell>], i: usize) -> usize {
+    let mut lo = i;
+    while lo > 0 && measured[lo - 1].is_none() {
+        lo -= 1;
+    }
+    let mut hi = i;
+    while hi + 1 < measured.len() && measured[hi + 1].is_none() {
+        hi += 1;
+    }
+    hi - lo + 1
+}
+
+/// [`robust_polyfit`] with prior weights: the Huber iteration multiplies them
+/// rather than replacing them, so a point can be down-weighted for being an
+/// outlier, for being uncertain, or for both.
+fn huber_polyfit(
+    x: &[f64],
+    y: &[f64],
+    prior: &[f64],
+    config: &ShapingConfig,
+) -> Option<Vec<f64>> {
+    let mut weights = prior.to_vec();
+    let mut curve = weighted_polyfit(x, y, &weights, config.envelope_degree)?;
+    for _ in 1..config.irls_iterations.max(1) {
+        for (i, weight) in weights.iter_mut().enumerate() {
+            let residual = (y[i] - poly_eval(&curve, x[i])).abs();
+            *weight = prior[i]
+                * if residual <= config.huber_delta {
+                    1.0
+                } else {
+                    config.huber_delta / residual
+                };
+        }
+        curve = weighted_polyfit(x, y, &weights, config.envelope_degree)?;
+    }
+    Some(curve)
 }
 
 /// The split the engine's composite envelope is built from: what a `sigma` table
@@ -1372,8 +1550,8 @@ mod tests {
         assert!(residual < 0.05, "a second pass still moves partials by {residual:.3} dB");
     }
 
-    /// A partial at the tracker's floor on either side is not a measurement, and
-    /// a layer that measured too few of them is not a layer.
+    /// A partial at the tracker's floor on either side is not a measurement, so
+    /// the ratio measured there does not reach the table.
     #[test]
     fn a_partial_in_the_floor_is_not_given_a_gain() {
         let engine: Vec<f64> = (0..10).map(|k| -1.0 * k as f64).collect();
@@ -1388,7 +1566,74 @@ mod tests {
         let three = |v: &[f64]| vec![flat_spectrum(v), flat_spectrum(v), flat_spectrum(v)];
         let gains = measured_over_rendered(&three(&recorded), &three(&engine), 10, &config)
             .expect("a fit");
-        assert_eq!(gains.get(7).copied().unwrap_or(1.0), 1.0, "{gains:?}");
+        let db = 20.0 * f64::from(gains.get(7).copied().unwrap_or(1.0)).log10();
+        assert!(
+            db.abs() < 1.0,
+            "the floor reading is 79 dB down and reached the table as {db:.2} dB: {gains:?}"
+        );
     }
 
+    /// What that partial gets *instead*, and why `1.0` is not it.
+    ///
+    /// `DECISIONS.md` 267. The row here is a real correction of about −20 dB
+    /// across the low partials with one partial unmeasurable in the middle of
+    /// it. A `1.0` written there is not a missing correction, it is a 20 dB
+    /// tooth in a comb — which is what C2 had fourteen of. The contract is that
+    /// a hole lands between the measured partials on either side of it.
+    #[test]
+    fn an_unmeasured_partial_is_filled_from_the_curve_and_not_left_as_a_tooth() {
+        let engine: Vec<f64> = (0..10).map(|k| -1.0 * k as f64).collect();
+        let mut recorded = engine.clone();
+        // A steep smooth tilt: the engine is 20 dB too loud at k=1 and right by
+        // k=10, which no `1.0` in the middle of can be neutral in.
+        for (k, r) in recorded.iter_mut().enumerate() {
+            *r -= 20.0 * (1.0 - k as f64 / 9.0);
+        }
+        recorded[4] = -90.0; // past the floor: unmeasurable, not a measurement
+        let config = ShapingConfig::default();
+        let three = |v: &[f64]| vec![flat_spectrum(v), flat_spectrum(v), flat_spectrum(v)];
+        let gains = measured_over_rendered(&three(&recorded), &three(&engine), 10, &config)
+            .expect("a fit");
+        let db = |i: usize| 20.0 * f64::from(gains.get(i).copied().unwrap_or(1.0)).log10();
+        let (below, hole, above) = (db(3), db(4), db(5));
+        assert!(
+            below < hole && hole < above,
+            "the hole at k=5 reads {hole:.2} dB, outside its neighbours {below:.2} and {above:.2}"
+        );
+        assert!(
+            (hole - 0.5 * (below + above)).abs() < 1.5,
+            "the hole at k=5 reads {hole:.2} dB, not between {below:.2} and {above:.2}"
+        );
+    }
+
+    /// A cell whose velocity layers disagree is not the velocity-independent
+    /// pattern the field is defined as, and is written closer to the row's own
+    /// smooth curve than one they agree on.
+    #[test]
+    fn a_cell_the_layers_disagree_about_is_shrunk_toward_the_curve() {
+        let engine: Vec<f64> = (0..10).map(|k| -1.0 * k as f64).collect();
+        // Two identical departures from a flat row: k=3 every layer agrees on,
+        // k=7 they scatter about by ±12 dB. Same median, different evidence.
+        let layers: Vec<Vec<(u32, f64)>> = [-12.0, 0.0, 12.0]
+            .iter()
+            .map(|&scatter| {
+                let mut r = engine.clone();
+                r[2] += 8.0;
+                r[6] += 8.0 + scatter;
+                flat_spectrum(&r)
+            })
+            .collect();
+        let config = ShapingConfig::default();
+        let rendered: Vec<Vec<(u32, f64)>> =
+            (0..3).map(|_| flat_spectrum(&engine)).collect();
+        let gains =
+            measured_over_rendered(&layers, &rendered, 10, &config).expect("a fit");
+        let db = |i: usize| 20.0 * f64::from(gains.get(i).copied().unwrap_or(1.0)).log10();
+        assert!(
+            db(2) > db(6) + 3.0,
+            "the agreed cell reads {:.2} dB and the disputed one {:.2}",
+            db(2),
+            db(6)
+        );
+    }
 }

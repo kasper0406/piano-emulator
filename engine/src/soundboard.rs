@@ -40,7 +40,13 @@ pub const MAX_PAN_SPREAD: f32 = 0.4;
 const DC_BLOCK_HZ: f32 = 10.0;
 
 /// Level above which the safety limiter starts to bend the signal (-1 dBFS).
-const LIMIT_THRESHOLD: f32 = 0.891_251;
+///
+/// Public because it is half of a contract rather than an implementation
+/// detail: [`soft_clip`] is the identity under it and strictly expanding over
+/// it, so `|y| > LIMIT_THRESHOLD` in a finished render is exactly "the safety
+/// limiter engaged here" and a budget can be read off the output with no
+/// instrumentation at all (`DECISIONS.md` 42, 264).
+pub const LIMIT_THRESHOLD: f32 = 0.891_251;
 
 /// Stereo position of a key: -1.0 hard left, +1.0 hard right.
 pub fn pan_for_key(key: u8) -> f32 {

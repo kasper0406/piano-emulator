@@ -63,7 +63,54 @@ const DAMPER_RAMP_RANGE: f32 = 5.0;
 /// interaction interval ends where Lehtonen's third one begins, and an interval
 /// that ends in 12 ms is a sound, where one that ends between two samples is a
 /// click.
+///
+/// This is where the felt *ends up*. How fast it may get there is
+/// [`FELT_DEEPEN_S`], and without that rate the "half-pedal sits at the
+/// geometric mean" reading above was true of a half pedal and false of every
+/// ordinary note-off, which reached the bottom of this constant in 10 ms.
 const FELT_CLEARANCE: f32 = 0.01;
+
+/// How long the felt takes to work its way to its full depth into the string.
+///
+/// [`FELT_CLEARANCE`] is where the felt ends up, not where it is a millisecond
+/// after it touches, and the difference between those two readings is the whole
+/// of `DECISIONS.md` 263. A damper is not a gate: what it does to a string is
+/// take energy out of it, and a contact that has only just closed can only take
+/// out what one contact cycle carries. Read as a position alone the threshold
+/// dives 40 dB inside the damper's 10 ms arrival while the string — whose
+/// damping is the same damper's, applied linearly — has lost two of them, so
+/// [`soft_limit`] runs 20 to 41 dB past its own knee on 90 of every 128 samples
+/// and stops being a soft limiter at all. Measured on the six benchmark
+/// phrases before this rate existed: **745 361 samples clipped, median
+/// overdrive 20.2 dB, worst 41.3**, and on the staccato phrase **+19.67 dB** of
+/// energy above 10 kHz added at every damped note-off, where the recording of
+/// the same phrase *loses* 3.24 dB there.
+///
+/// Rate-limiting the engagement is what separates the two gestures the felt is
+/// for from the one it is not, and it separates them the way `PHYSICS.md` §6
+/// does — by how long the damper stays in contact. A half pedal holds the felt
+/// against the string indefinitely and still reaches full depth, so the
+/// half-pedal colour is unchanged (10.4 dB brighter than the same damping
+/// applied linearly, against 10.5 before); a slow release gets 50 ms of it and
+/// keeps its buzz; a nominal release gets 10 ms, which is 5.4 dB of limit and a
+/// genuine soft knee; a MIDI-127 release gets 2 ms and barely 1 dB.
+///
+/// 80 ms is inverted on the recordings and not chosen: it is the fastest the
+/// felt may deepen while the staccato phrase's **worst** note-off still puts no
+/// more energy above 10 kHz than the Salamander recording of that same phrase
+/// does. Read as the level in that band under the phrase's own RMS, so a single
+/// note can be held against a single note, the recording gives mean −72.8 dB
+/// and worst −56.5; 80 ms gives −79.3 and −56.5, and the sweep either side of
+/// it reads 0.4 dB over the recording's worst at 67 ms, 7.1 over at 25 ms and
+/// **16.8 over** with no rate at all. `tuner::realism::note_off_hf` is the
+/// statistic the gate uses and reads the same fact as a *change* across the
+/// note-off, where a damper is obliged to be negative: the recording loses
+/// 3.24 dB over these note-offs and this constant loses 4.10, against the
+/// **+19.67 dB the engine gained** before it existed.
+const FELT_DEEPEN_S: f32 = 0.080;
+
+/// [`FELT_DEEPEN_S`] as engagement per rendered block.
+const FELT_DEEPEN_STEP: f32 = BLOCK as f32 / (FELT_DEEPEN_S * SAMPLE_RATE);
 
 /// Time constant of the peak follower that remembers how loud the note was when
 /// the damper started to arrive.
@@ -606,6 +653,15 @@ impl Voice {
     ///   every sample in between is on a continuous curve. A note that has
     ///   already decayed under the limit leaves it earlier and for free, through
     ///   the `lowest` test below — `PHYSICS.md` §6's third interval, unchanged.
+    /// * **It deepens at a rate and not at a position.** The threshold is
+    ///   exponential in the engagement and the engagement used to be the
+    ///   damper's position outright, so a nominal release drove it through the
+    ///   whole 40 dB of [`FELT_CLEARANCE`] in 10 ms and [`soft_limit`] became a
+    ///   hard clipper — see [`FELT_DEEPEN_S`] for the measurement and what it
+    ///   is inverted on. The engagement now *chases* the damper's position at
+    ///   [`FELT_DEEPEN_STEP`] per block, which is the only thing here that
+    ///   distinguishes a felt held against a string from a felt that has just
+    ///   arrived at one, and it is the distinction `PHYSICS.md` §6 makes.
     /// * **It still tests the damper's direction.** The engine starts the
     ///   damper's lift and the hammer's blow at the same instant, while the
     ///   real action lifts the damper early in the key's travel and has it
@@ -651,6 +707,10 @@ impl Voice {
             (self.felt_engage - self.damper_step).max(0.0)
         };
         let from = self.felt_engage;
+        // The felt only ever *deepens* at [`FELT_DEEPEN_S`]; letting go is the
+        // damper's own business and stays on the ramp item 219 gave it, because
+        // a rising threshold is a limiter doing less and cannot fold anything.
+        let to = to.min(from + FELT_DEEPEN_STEP);
         self.felt_engage = to;
         if from <= 0.0 && to <= 0.0 {
             return None;
