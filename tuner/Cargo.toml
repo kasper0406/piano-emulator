@@ -19,6 +19,10 @@ path = "src/main.rs"
 # links without the engine; on inside this crate's own tests, which have the
 # engine as a dev-dependency anyway.
 engine-events = ["dep:piano-emulator"]
+# Gates the one-shot forensic examples out of the default build graph; see the
+# [[example]] blocks at the end of this file. Implies engine-events, which most
+# of those drivers need to render through the real instrument.
+diagnostics = ["engine-events"]
 
 [dependencies]
 hound = "3.5"
@@ -43,3 +47,75 @@ piano-emulator = { path = "../engine" }
 # stack: an encoder and nothing else. A dev-dependency because the library
 # measures and the examples draw.
 png = "0.17"
+
+# One-shot forensic/audit drivers: gated so `cargo test`/`cargo build` do not
+# compile them on every iteration (they are ~1-2k lines each). Run with
+#   cargo run --release -p piano-tuner --features diagnostics --example <name>
+
+[[example]]
+name = "audit_render"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "drift_line"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "eigenmode_prototype"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "fit_sympathetic"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "gain_level"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "independent_audit"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "jitter_forensics"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "key_probe"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "ladder_analysis"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "limiter_probe"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "output_gain"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "timbre_ladder"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "top_octave"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "verify_ladder"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "verify_milestone_a"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "verify_milestone_b"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "verify_scan"
+required-features = ["diagnostics"]

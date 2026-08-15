@@ -72,6 +72,15 @@ Tests run with plain `cargo test`; add `--release` to include the performance-bu
 cargo test --release
 ```
 
+**Iteration convention:** iterate with plain `cargo test` (the dev profile is
+already `opt-level = 3`, and the release-only perf/calibration gates skip
+themselves) and run `cargo test --release --workspace` once before calling work
+done — the dev cycle is several times faster because release carries thin LTO
+and a single codegen unit for honest perf numbers. The one-shot forensic
+examples in `tuner/examples/` are behind the `diagnostics` feature so routine
+builds skip them; run them with
+`cargo run --release -p piano-tuner --features diagnostics --example <name>`.
+
 ## Presets
 
 Every number that voices the instrument — the per-note tables (tuning, inharmonicity, decay, unison detuning, strike position, impedance, damper and hammer parameters), the global constants (polarization balance, couplings, the bridge admittance, hammer felt, soundboard) and the action's own noises — lives in a preset file. `--preset <file.toml>` voices both the live engine and offline renders from it; without it the built-in default is used, which is exactly `presets/default.toml`.
