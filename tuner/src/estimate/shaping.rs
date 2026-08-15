@@ -61,9 +61,18 @@
 //! rolloff — is absorbed by the envelope before the ratio is taken. What is left
 //! is the same per-partial pattern in all sixteen layers, and the value written
 //! is their median with the outliers dropped. The fitted envelope is a
-//! least-squares one in the log domain, so the residuals it leaves sum to zero:
-//! a row of gains has geometric mean 1 and writing it does not move the note's
-//! loudness.
+//! least-squares one in the log domain, so the residuals it leaves sum to zero
+//! and a row of gains has geometric mean 1.
+//!
+//! **That is not the same as leaving the note's loudness alone**, and
+//! `DECISIONS.md` 272 is the measurement of the difference: a level is a sum of
+//! powers, so a row with a zero log mean and a spread of `s` dB multiplies a
+//! note's power by about `s^2 ln 10 / 40` dB — up to +25 dB of rendered RMS on
+//! the shipped rows. The live fit ([`measured_over_rendered`]) is pinned on the
+//! power instead ([`energy_offset`]) and then on the render itself; the two
+//! functions above it in this file are the history the schema came through and
+//! their geometric means are stated as what they are, not as a level
+//! guarantee.
 
 use crate::estimate::decay::{DecayCurve, DecayReport};
 use crate::estimate::DecayConfig;
@@ -121,6 +130,41 @@ pub struct ShapingConfig {
     /// measuring its own floor on one side or the other and the ratio is a ratio
     /// of two noises.
     pub max_gain_range_db: f64,
+    /// How many robust sigmas of a key's **own** cell distribution a written
+    /// cell may reach, before the schema's rails are applied at all.
+    ///
+    /// The schema's `MIN_PARTIAL_GAIN`/`MAX_PARTIAL_GAIN` are ±26.02 dB, which
+    /// is a limit on what the *file* may say and not a statement about what any
+    /// key measured. Fitted against them, five keys wrote a cell at exactly
+    /// ±26.02 — C7 and D#7 wrote it on their **fundamental** — and a rail is not
+    /// a measurement. The rail here is the key's own: `RAIL_SIGMAS` times
+    /// `1.4826 MAD` of its cells' departures from the row's centre, floored at
+    /// [`ShapingConfig::min_rail_db`] so a key whose cells genuinely agree can
+    /// still carry a real dip.
+    pub rail_sigmas: f64,
+    /// Floor on that rail, in dB: no key is railed tighter than this however
+    /// well its cells agree.
+    pub min_rail_db: f64,
+    /// Fewest cells a row must have before its own MAD is allowed to set the
+    /// rail. Below this a spread is not a distribution — C7 and D#7 have three
+    /// cells each, and three numbers one of which is the outlier have a MAD the
+    /// outlier itself sets. Such a row is railed at
+    /// [`ShapingConfig::min_rail_db`]: with three partials the fit cannot tell a
+    /// per-partial correction from a level, and must not claim to.
+    pub min_rail_cells: usize,
+    /// Partials the step statistic [`temper`] bisects against is taken over.
+    ///
+    /// Twelve, which is `compass_scan`'s own `PARTIALS`: the acceptance
+    /// criterion for this regularisation is that report's `irregular` column, so
+    /// the statistic fitted against is the statistic scored against. Taken over
+    /// all 48 instead, a bass key's target is set by the scatter of its own
+    /// fortieth partial near the tracker's floor — measured, C4's target goes
+    /// 7.6 dB (over twelve) to 13.5 (over forty-eight), and a row licensed at
+    /// 13.5 is the row that renders at 13.9 and was heard.
+    pub step_partials: usize,
+    /// How closely the bisected smoother has to land on the recording's own
+    /// step statistic, in dB, before [`temper`] stops.
+    pub step_tolerance_db: f64,
 }
 
 impl Default for ShapingConfig {
@@ -137,6 +181,11 @@ impl Default for ShapingConfig {
             min_gain_partials: 3,
             max_gain_range_db: 60.0,
             max_decay_residual_db: 4.0,
+            rail_sigmas: 3.0,
+            min_rail_db: 6.0,
+            min_rail_cells: 5,
+            step_partials: 12,
+            step_tolerance_db: 0.05,
         }
     }
 }
@@ -512,9 +561,11 @@ pub fn partial_gains(
 ///
 /// Two properties it keeps, because they are what makes the table legal:
 ///
-/// * **The level does not move.** The difference is offset so that its mean over
-///   the partials both spectra measured is zero, i.e. the multiplier's geometric
-///   mean is 1, exactly as the roughness half is normalised.
+/// * **The geometric mean is 1.** The difference is offset so that its mean over
+///   the partials both spectra measured is zero, exactly as the roughness half
+///   is normalised. This was written as "the level does not move" and it is not
+///   that — see the module header and `DECISIONS.md` 272. Superseded by
+///   [`measured_over_rendered`], which pins the power.
 /// * **It is velocity-independent.** Both envelopes are taken at the reference
 ///   velocity, so what is written is the *mismatch* at that velocity and not the
 ///   blow's own tilt, which is still absorbed on both sides.
@@ -591,17 +642,19 @@ pub fn envelope_tilt(
 ///   velocity-independent mismatch. Every layer's ratio is levelled (its own mean
 ///   over the partials both spectra measured is removed) before the layers are
 ///   combined, so a layer that is simply louder does not tilt the median.
-/// * **The level does not move.** The result is offset so its geometric mean over
-///   the partials it was measured on is exactly 1, which is the same
-///   normalisation the roughness half had and the reason a fitted row cannot
-///   smuggle in a loudness change.
+/// * **The level does not move.** The written row is normalised so that the
+///   *power* it puts through the engine's own rendered spectrum is the power
+///   that was already there — [`energy_offset`]. This is not the geometric mean
+///   the two halves above used, and the difference between the two is the whole
+///   of `DECISIONS.md` 272's leak.
 ///
 /// What is written per partial is not the raw ratio: [`write_row`] reads each
 /// cell as a measurement with an error bar, shrinks it toward the row's own
 /// smooth curve by how much the cell's velocity layers agreed about it, and
 /// gives a partial the layers could not reach the curve outright instead of a
-/// `1.0` that would be a tooth. Its header carries the measurement that says
-/// why.
+/// `1.0` that would be a tooth. [`temper`] then smooths what is left until the
+/// series the row *predicts the engine will render* is no more jagged than the
+/// recording's own. Their headers carry the measurements that say why.
 ///
 /// Returns `None` when no layer measured enough partials on both sides.
 pub fn measured_over_rendered(
@@ -610,6 +663,43 @@ pub fn measured_over_rendered(
     partials: usize,
     config: &ShapingConfig,
 ) -> Option<Vec<f32>> {
+    measured_over_rendered_report(recorded, rendered, partials, config).map(|row| row.gains)
+}
+
+/// One key's fitted gain row and the four numbers that say how it was
+/// disciplined.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GainRow {
+    /// The row itself, trailing 1.0s trimmed.
+    pub gains: Vec<f32>,
+    /// The broadband level the fit found: how much louder the recording is than
+    /// the engine over the partials the row was measured on, in dB, **after**
+    /// the row's shape is taken out. Removed from the row by [`energy_offset`]
+    /// and reported here rather than written — see `DECISIONS.md` 272.
+    pub level_db: f64,
+    /// The rail this key's own cells earned, in dB, and how many cells reached
+    /// it.
+    pub rail_db: f64,
+    pub railed: usize,
+    /// The recording's own mean absolute step between adjacent partials, dB —
+    /// the target [`temper`] bisects against.
+    pub target_step_db: f64,
+    /// The same statistic on the series the row predicts the engine will
+    /// render. Within [`ShapingConfig::step_tolerance_db`] of the target unless
+    /// the smoother ran out of range.
+    pub written_step_db: f64,
+    /// The smoothing the bisection had to use to get there. Zero is a row whose
+    /// raw cells were already no rougher than the recording.
+    pub lambda: f64,
+}
+
+/// The same fit, with the discipline reported.
+pub fn measured_over_rendered_report(
+    recorded: &[Vec<(u32, f64)>],
+    rendered: &[Vec<(u32, f64)>],
+    partials: usize,
+    config: &ShapingConfig,
+) -> Option<GainRow> {
     let mut per_partial: Vec<Vec<f64>> = vec![Vec::new(); partials];
     for (recording, engine) in recorded.iter().zip(rendered) {
         let engine_at: std::collections::BTreeMap<u32, f64> = engine
@@ -651,7 +741,7 @@ pub fn measured_over_rendered(
             per_partial[k as usize - 1].push(r - centre);
         }
     }
-    let measured: Vec<Option<Cell>> = per_partial
+    let mut measured: Vec<Option<Cell>> = per_partial
         .iter()
         .map(|values| {
             (values.len() >= config.min_layers.min(recorded.len().max(1)))
@@ -663,11 +753,42 @@ pub fn measured_over_rendered(
     if seen.is_empty() {
         return None;
     }
-    // Pinned so the median partial is unmoved, which is what keeps the note's
-    // loudness where the decay and level fits put it.
+    // A provisional pin, which decides only where the smooth curve sits: the
+    // level the row is finally written at is [`energy_offset`]'s, taken on the
+    // engine's own spectrum after the shape is settled.
     let offset = median(seen.iter().copied()).expect("seen is not empty");
+    // The key's own rail, before the schema's. A cell past it is not this key's
+    // measurement.
+    let (rail_db, railed) = rail_cells(&mut measured, offset, config);
+
     let written = write_row(&measured, offset, config);
-    let mut gains: Vec<f32> = written
+
+    // The two spectra the discipline is measured against: the reference layer
+    // of each side, which is the velocity the compass strikes at.
+    let reference = |set: &[Vec<(u32, f64)>]| -> Vec<Option<f64>> {
+        let Some(spectrum) = set.get(set.len() / 2) else {
+            return vec![None; partials];
+        };
+        let mut out = vec![None; partials];
+        for &(k, a) in spectrum {
+            if k >= 1 && (k as usize) <= partials && a > 0.0 {
+                out[k as usize - 1] = Some(a.ln());
+            }
+        }
+        out
+    };
+    let recording_line = reference(recorded);
+    let engine_line = reference(rendered);
+
+    let (tempered, target_step, written_step, lambda) =
+        temper(&written, &measured, &engine_line, &recording_line, config);
+
+    // The level, last and on the engine's own spectrum: the row multiplies
+    // amplitudes and a level is a sum of *powers*, so a row pinned in the log
+    // domain moves one and a row pinned here does not.
+    let (levelled, level_db) = energy_offset(&tempered, &engine_line);
+
+    let mut gains: Vec<f32> = levelled
         .iter()
         .map(|value| match value {
             Some(ln) => (ln.exp() as f32).clamp(MIN_PARTIAL_GAIN, MAX_PARTIAL_GAIN),
@@ -677,7 +798,385 @@ pub fn measured_over_rendered(
     while gains.last() == Some(&1.0) {
         gains.pop();
     }
-    (!gains.is_empty()).then_some(gains)
+    (!gains.is_empty()).then_some(GainRow {
+        gains,
+        level_db,
+        rail_db,
+        railed,
+        target_step_db: target_step,
+        written_step_db: written_step,
+        lambda,
+    })
+}
+
+/// Clips every cell to the key's **own** measured spread, and reports the rail
+/// and how many cells reached it.
+///
+/// # Why the schema's rails are the wrong ones to fit against
+///
+/// `MIN_PARTIAL_GAIN`/`MAX_PARTIAL_GAIN` are ±26.02 dB. They are a statement
+/// about what a preset file may contain, and fitting against them makes the
+/// *file format* the estimator's prior. Measured on the shipped preset, five
+/// keys wrote a cell at exactly ±26.02 dB and two of them — C7 and D#7 — wrote
+/// it on the **fundamental**, where it is 26 dB of the note's whole power. A
+/// cell at a rail is not a measurement of the piano, it is the fit running out
+/// of room, and running out of room is what a fit does when the two spectra it
+/// divides disagree for a reason neither of them is about.
+///
+/// The rail used instead is the key's own: `rail_sigmas` times `1.4826 MAD` of
+/// its cells' departures from the row's centre, floored at `min_rail_db` and
+/// capped by the schema. On the shipped rows that is 6 dB at C7 (whose three
+/// cells otherwise read +26.0, 0.0, −1.2) and 24 dB at C2, whose cells really
+/// do span that — which is the point: the rail is measured, so a key with a
+/// genuine deep dip keeps it and a key with one wild cell does not.
+fn rail_cells(measured: &mut [Option<Cell>], offset: f64, config: &ShapingConfig) -> (f64, usize) {
+    let deviations: Vec<f64> = measured
+        .iter()
+        .flatten()
+        .map(|c| c.centre - offset)
+        .collect();
+    let schema = f64::from(MAX_PARTIAL_GAIN).ln().min(-f64::from(MIN_PARTIAL_GAIN).ln());
+    let Some(centre) = median(deviations.iter().copied()) else {
+        return (NEPERS_TO_DB * schema, 0);
+    };
+    let mad = median(deviations.iter().map(|d| (d - centre).abs())).unwrap_or(0.0);
+    let earned = if deviations.len() >= config.min_rail_cells {
+        config.rail_sigmas * 1.4826 * mad
+    } else {
+        0.0
+    };
+    let rail = earned.max(config.min_rail_db / NEPERS_TO_DB).min(schema);
+    let mut railed = 0usize;
+    for cell in measured.iter_mut().flatten() {
+        let deviation = cell.centre - offset;
+        if deviation > rail + centre {
+            cell.centre = offset + centre + rail;
+            railed += 1;
+        } else if deviation < centre - rail {
+            cell.centre = offset + centre - rail;
+            railed += 1;
+        }
+    }
+    (NEPERS_TO_DB * rail, railed)
+}
+
+/// Smooths the written row until the harmonic series it predicts the engine will
+/// render is **no more jagged than the recording's own**, and returns
+/// `(row, target, achieved, lambda)` in dB.
+///
+/// # The measurement this exists for
+///
+/// `renders/compass/COMPASS.md`'s `irregular` — the mean absolute step between
+/// adjacent partial levels — is 4 dB *higher* on the fitted keys than on the
+/// recordings they were fitted to, and 5 dB *lower* on the 58 keys with no row
+/// at all. A listener found the second half of that as one note of a melody that
+/// "sounds different from the rest": C4 renders at 13.9 dB of `irregular`
+/// against its own recording's 7.0 and its unfitted neighbours' 5-6.
+///
+/// The row cannot be blamed for having steps in it — the recording has 5-10 dB
+/// of measured scatter and reproducing it is the entire reason the field exists.
+/// What it can be blamed for is having *more* steps than the recording, because
+/// every one of those is the tracker's noise written into the instrument. So the
+/// criterion is neither "smooth" nor "as rough as the rails allow" but **the
+/// recording's own roughness, per key**, and it is available inside the fit:
+/// both spectra are already in hand.
+///
+/// # How
+///
+/// A Whittaker smoother on the row's log cells — minimise
+/// `sum p_k (d_k - y_k)^2 + lambda sum (d_{k+1} - d_k)^2 / dk` — with `p_k` the
+/// precision the cell earned from its own velocity layers, so a cell the layers
+/// agreed on resists smoothing and a cell they scattered about does not. The one
+/// free number, `lambda`, is not a constant: it is **bisected per key** until
+/// the predicted series `ln e_k + d_k` has the recording's mean absolute step.
+/// A key whose raw cells are already smoother than its recording keeps them
+/// untouched (`lambda = 0`) — the target is the recording's roughness, and this
+/// never removes roughness the recording has.
+///
+/// The statistic is taken over adjacent partials **both** sides measured, so
+/// the recording's own gaps do not count as steps on either side of the
+/// comparison.
+fn temper(
+    written: &[Option<f64>],
+    measured: &[Option<Cell>],
+    engine: &[Option<f64>],
+    recording: &[Option<f64>],
+    config: &ShapingConfig,
+) -> (Vec<Option<f64>>, f64, f64, f64) {
+    // The partial pairs the statistic is defined on: the compass's own range,
+    // and only where both sides measured both members of the pair.
+    let top = written.len().min(config.step_partials).saturating_sub(1);
+    let pairs: Vec<usize> = (0..top)
+        .filter(|&i| {
+            written[i].is_some()
+                && written[i + 1].is_some()
+                && engine.get(i).copied().flatten().is_some()
+                && engine.get(i + 1).copied().flatten().is_some()
+                && recording.get(i).copied().flatten().is_some()
+                && recording.get(i + 1).copied().flatten().is_some()
+        })
+        .collect();
+    let step = |line: &dyn Fn(usize) -> f64| -> f64 {
+        if pairs.is_empty() {
+            return 0.0;
+        }
+        NEPERS_TO_DB * pairs.iter().map(|&i| (line(i + 1) - line(i)).abs()).sum::<f64>()
+            / pairs.len() as f64
+    };
+    let at = |line: &[Option<f64>], i: usize| line.get(i).copied().flatten().unwrap_or(0.0);
+    let target = step(&|i| at(recording, i));
+
+    // The cells the smoother works on, in row order, with their own precisions.
+    let index: Vec<usize> = (0..written.len()).filter(|&i| written[i].is_some()).collect();
+    let y: Vec<f64> = index.iter().map(|&i| written[i].expect("some")).collect();
+    let floor = measured
+        .iter()
+        .flatten()
+        .map(|c| c.variance)
+        .fold(f64::INFINITY, f64::min)
+        .max(1e-6);
+    let precision: Vec<f64> = index
+        .iter()
+        .map(|&i| match measured.get(i).copied().flatten() {
+            Some(cell) => 1.0 / cell.variance.max(floor),
+            // A hole filled from the curve is already smooth and carries no
+            // evidence of its own: it follows its neighbours.
+            None => 1.0 / floor * 1e-3,
+        })
+        .collect();
+
+    let rebuild = |smoothed: &[f64]| -> Vec<Option<f64>> {
+        let mut out = vec![None; written.len()];
+        for (slot, &i) in index.iter().enumerate() {
+            out[i] = Some(smoothed[slot]);
+        }
+        out
+    };
+    let achieved = |smoothed: &[f64]| -> f64 {
+        let row = rebuild(smoothed);
+        step(&|i| at(engine, i) + at(&row, i))
+    };
+
+    if pairs.is_empty() || index.len() < 3 || target <= 0.0 {
+        return (written.to_vec(), target, achieved(&y), 0.0);
+    }
+    let raw = achieved(&y);
+    if raw <= target + config.step_tolerance_db {
+        // Already no rougher than the piano: nothing to take out, and taking
+        // any out would be taking out the measurement.
+        return (written.to_vec(), target, raw, 0.0);
+    }
+    // Bisect in `ln lambda`. The smoother is monotone in it — more weight on the
+    // differences is never a rougher row — so a bisection is exact.
+    let gaps: Vec<f64> = index.windows(2).map(|w| (w[1] - w[0]) as f64).collect();
+    let (mut lo, mut hi) = (1e-4f64, 1e-4f64);
+    let mut best = y.clone();
+    for _ in 0..40 {
+        hi *= 4.0;
+        let smoothed = whittaker(&y, &precision, &gaps, hi);
+        if achieved(&smoothed) <= target {
+            best = smoothed;
+            break;
+        }
+        lo = hi;
+    }
+    if achieved(&best) > target + config.step_tolerance_db {
+        // The smoother saturated: even a straight line through the cells is
+        // rougher than the recording, which happens where the engine's own
+        // series is the jagged one. The row is not the place to fix that.
+        let got = achieved(&best);
+        return (rebuild(&best), target, got, hi);
+    }
+    for _ in 0..60 {
+        let mid = (lo * hi).sqrt();
+        let smoothed = whittaker(&y, &precision, &gaps, mid);
+        let got = achieved(&smoothed);
+        let close = (got - target).abs() <= config.step_tolerance_db;
+        if got > target {
+            lo = mid;
+            if close {
+                best = smoothed;
+            }
+        } else {
+            hi = mid;
+            best = smoothed;
+        }
+        if close {
+            break;
+        }
+    }
+    let got = achieved(&best);
+    (rebuild(&best), target, got, hi)
+}
+
+/// Whittaker–Henderson: minimises `sum p_i (d_i - y_i)^2 + lambda sum (d_{i+1} -
+/// d_i)^2 / gap_i`, by the tridiagonal solve its normal equations are.
+///
+/// The gap divisor is what lets the row have holes in it: two cells four
+/// partials apart are a quarter as strongly tied as two adjacent ones, which is
+/// the same weighting a linear interpolation between them would imply.
+fn whittaker(y: &[f64], precision: &[f64], gaps: &[f64], lambda: f64) -> Vec<f64> {
+    let n = y.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let (mut diag, mut upper, mut lower, mut rhs) =
+        (precision.to_vec(), vec![0.0; n], vec![0.0; n], Vec::with_capacity(n));
+    for i in 0..n {
+        rhs.push(precision[i] * y[i]);
+    }
+    for (i, &gap) in gaps.iter().enumerate() {
+        let w = lambda / gap.max(1.0);
+        diag[i] += w;
+        diag[i + 1] += w;
+        upper[i] = -w;
+        lower[i + 1] = -w;
+    }
+    // Thomas.
+    for i in 1..n {
+        let factor = lower[i] / diag[i - 1];
+        diag[i] -= factor * upper[i - 1];
+        rhs[i] -= factor * rhs[i - 1];
+    }
+    let mut out = vec![0.0; n];
+    out[n - 1] = rhs[n - 1] / diag[n - 1];
+    for i in (0..n - 1).rev() {
+        out[i] = (rhs[i] - upper[i] * out[i + 1]) / diag[i];
+    }
+    out
+}
+
+/// Puts the row at the level that leaves the note's **power** where it was, and
+/// returns the level it took out, in dB.
+///
+/// # The leak this closes
+///
+/// `DECISIONS.md` 231 and every version of this field since have normalised the
+/// row in the *log* domain — geometric mean 1, or the median partial unmoved —
+/// and called that loudness-neutral. It is not, and the gap is Jensen's
+/// inequality. A level is a sum of **powers**: a row of log-gains with mean zero
+/// and spread `s` dB multiplies the note's power by about `s^2 ln 10 / 40` dB.
+/// Measured on the shipped preset, whose rows have log means of +0.1 to +8.3 dB,
+/// the *rendered* strike peak moves by up to **+18.9 dB** and the 0.2-2 s RMS by
+/// **+25.5 dB** (key 96), because the row's spread is 27 dB and one railed cell
+/// sits on the fundamental. That is the whole of the compass's family-2 level
+/// spikes and of `DECISIONS.md` 266's two keys inside the master limiter.
+///
+/// So the row is pinned on the quantity that is actually conserved:
+///
+/// ```text
+/// sum_k (e_k g_k)^2 = sum_k e_k^2
+/// ```
+///
+/// over the partials the row is written for, with `e_k` the engine's own
+/// rendered spectrum — which the fit already has, since it is the denominator of
+/// every cell. Partials the row does not write are unchanged on both sides and
+/// drop out. The scalar this removes is real per-key information — how much
+/// louder the recording is than the engine at this key — and it is *reported*
+/// as [`GainRow::level_db`] rather than written anywhere.
+///
+/// # Where the removed level does *not* go, measured
+///
+/// Two homes were tried for it and both are worse than reporting it.
+///
+/// * **`notes.bridge_gain`.** A per-key level is exactly what that table is, and
+///   the shift would be uniform over the note rather than over the row's own
+///   range. But the shift is not the piano's voicing, and "no smooth trend down
+///   the compass" is now a decomposition rather than three keys' values
+///   (`DECISIONS.md` 282). Over the 28 fitted keys the removed level has a
+///   standard deviation of **4.82 dB**, and a smooth polynomial in key explains
+///   **1.2 % of its variance at degree 1, 21 % at degree 3 and 26 % at
+///   degree 4**; the degree-3 residual's lag-1 autocorrelation across keys three
+///   semitones apart is **+0.08**. It is white. A `bridge_gain` curve is by
+///   construction smooth, so there is no version of this table that can carry
+///   four fifths of the quantity, and interpolating it onto the 58 unsampled
+///   keys is interpolating along a correlation that is not there.
+///
+///   The same holds from the other side. The engine-versus-recording `level`
+///   error over all 88 keys of `renders/compass/COMPASS.md` is 15.38 dB of
+///   common offset plus **3.34 dB rms** of key-to-key error; a degree-1 trend
+///   removes 1.2 % of that and degree 5 removes 26 %. Split on the sampler's own
+///   three-key zones it is 1.61 dB within a zone — the pitch-shift ramp — and
+///   2.26 dB between zones, and the between-zone series has a lag-1
+///   autocorrelation of **−0.09**. So what the fit is chasing is the library's
+///   take-to-take gain, and writing it would hide that inside a physical table
+///   that item 44 calibrated on the *engine's* flattened compass.
+///
+///   Nor is it the recording's own per-key level: across the 28 keys the removed
+///   level correlates with the *recording's* `level` residual against its own
+///   eight nearest same-`N` neighbours at **r = +0.16** raw, **+0.22**
+///   detrended. Carried in full it puts F#5 at `level` z **+6.7** — −32.58 dBFS
+///   against a neighbourhood of −50.45 — where the recording's own F#5 sits at
+///   +0.2, and F#6 at +4.5 against the recording's +0.1.
+/// * **The whole bank.** Padding the row out to the key's every partial with the
+///   removed level makes the row exactly loudness-neutral with no step anywhere.
+///   Measured, it costs more than the step does: the padding writes the level
+///   over partials nothing measured, and `compass_scan`'s `centroid` — a
+///   power-weighted mean partial index — reads it as a colour change. D#4 went
+///   `centroid` z **+7.4 → +9.9** and A1, E3 and F#1 gained flags they did not
+///   have, against a `match` improvement of 1-2 dB at the three keys with the
+///   largest shifts. So an unmeasured partial keeps its `1.0` and the step at
+///   the end of the row is accepted, with this measurement as the reason.
+fn energy_offset(row: &[Option<f64>], engine: &[Option<f64>]) -> (Vec<Option<f64>>, f64) {
+    let weights: Vec<(usize, f64)> = row
+        .iter()
+        .enumerate()
+        .filter_map(|(i, cell)| {
+            cell.and(engine.get(i).copied().flatten())
+                .map(|ln| (i, (2.0 * ln).exp()))
+        })
+        .collect();
+    let before: f64 = weights.iter().map(|&(_, w)| w).sum();
+    let after: f64 = weights
+        .iter()
+        .map(|&(i, w)| w * (2.0 * row[i].expect("some")).exp())
+        .sum();
+    if !(before > 0.0 && after > 0.0) {
+        return (row.to_vec(), 0.0);
+    }
+    let offset = 0.5 * (after / before).ln();
+    (
+        row.iter().map(|cell| cell.map(|ln| ln - offset)).collect(),
+        NEPERS_TO_DB * offset,
+    )
+}
+
+/// The same row with its **roughness** scaled by `keep` and `level_db` added to
+/// every cell.
+///
+/// The decomposition is the one the field's own argument rests on: a degree-2
+/// polynomial in `ln k` is the *tilt* — `DECISIONS.md` 231's 7.5 dB at C4, the
+/// engine's error in its own smooth envelope, and the half of the correction
+/// that a smooth model could in principle absorb — and what is left over is the
+/// per-partial scatter. Only the second is scaled. A loop that flattened the row
+/// as a whole would give back the octave-displaced attack that item 231 exists
+/// to repair, in exchange for the jaggedness this one exists to repair.
+///
+/// `keep = 1` is the row unchanged. `keep = 0` is the tilt alone, which is what
+/// the field was before the roughness half was ever written.
+pub fn flatten_row(row: &[f32], keep: f64, level_db: f64, config: &ShapingConfig) -> Vec<f32> {
+    if row.is_empty() {
+        return Vec::new();
+    }
+    let lift = level_db / NEPERS_TO_DB;
+    let x: Vec<f64> = (1..=row.len()).map(|k| (k as f64).ln()).collect();
+    let y: Vec<f64> = row.iter().map(|&g| f64::from(g).ln()).collect();
+    let curve = (row.len() > config.envelope_degree + 1)
+        .then(|| robust_polyfit(&x, &y, config))
+        .flatten();
+    let mut out: Vec<f32> = x
+        .iter()
+        .zip(&y)
+        .map(|(&x, &y)| {
+            let smooth = curve.as_ref().map_or(0.0, |c| poly_eval(c, x));
+            (((smooth + keep * (y - smooth) + lift).exp()) as f32)
+                .clamp(MIN_PARTIAL_GAIN, MAX_PARTIAL_GAIN)
+        })
+        .collect();
+    while out.last() == Some(&1.0) {
+        out.pop();
+    }
+    out
 }
 
 /// One partial's correction as the velocity layers measured it: where they
@@ -1488,8 +1987,10 @@ mod tests {
     }
 
     /// A known per-partial error between two spectra comes back as the gain that
-    /// cancels it — and comes back with a geometric mean of one, so writing it
-    /// cannot move the note's loudness.
+    /// cancels it — up to the one scalar the row is not allowed to carry, which
+    /// is the level. What is pinned is the *power* the row puts through the
+    /// engine's own spectrum, so the shape comes back exactly and the common
+    /// offset is whatever energy neutrality asks for.
     #[test]
     fn the_full_ratio_returns_the_error_between_the_two_spectra() {
         let engine: Vec<f64> = (0..12).map(|k| -2.0 * k as f64).collect();
@@ -1510,18 +2011,29 @@ mod tests {
         )
         .expect("a fit");
         let db = |g: f32| 20.0 * f64::from(g).log10();
-        // Pinned on the median partial, which the error leaves at zero here.
+        // The shape: every cell is the known error plus one common level.
+        let common = db(gains[0]) - error[0];
         for (k, (&want, &got)) in error.iter().zip(gains.iter()).enumerate() {
             assert!(
-                (db(got) - want).abs() < 0.05,
-                "partial {}: {:.2} dB against {want}",
+                (db(got) - want - common).abs() < 0.05,
+                "partial {}: {:.2} dB against {want} + {common:.2}",
                 k + 1,
                 db(got)
             );
         }
-        let mean: f64 = gains.iter().map(|g| f64::from(*g).ln()).sum::<f64>()
-            / gains.len() as f64;
-        assert!(mean.abs() < 0.15, "geometric mean {:.3}", mean.exp());
+        // ... and that level is the one that leaves the note's *power* where it
+        // was, which is the property `DECISIONS.md` 272 replaced the geometric
+        // mean with. Measured the way a level meter would: the engine's own
+        // partial powers, with and without the row on them.
+        let engine_power: Vec<f64> = engine.iter().map(|db| 10f64.powf(db / 10.0)).collect();
+        let before: f64 = engine_power.iter().sum();
+        let after: f64 = engine_power
+            .iter()
+            .zip(gains.iter())
+            .map(|(p, &g)| p * f64::from(g).powi(2))
+            .sum();
+        let moved = 10.0 * (after / before).log10();
+        assert!(moved.abs() < 0.1, "the row moved the note's power by {moved:.2} dB");
     }
 
     /// Re-entrancy, which is the property the fit is built for: applying the
@@ -1566,10 +2078,17 @@ mod tests {
         let three = |v: &[f64]| vec![flat_spectrum(v), flat_spectrum(v), flat_spectrum(v)];
         let gains = measured_over_rendered(&three(&recorded), &three(&engine), 10, &config)
             .expect("a fit");
-        let db = 20.0 * f64::from(gains.get(7).copied().unwrap_or(1.0)).log10();
+        let db = |i: usize| 20.0 * f64::from(gains.get(i).copied().unwrap_or(1.0)).log10();
+        // Against its neighbours, not against 0 dB: the row carries one common
+        // level now (the energy pin), so "the floor reading did not reach the
+        // table" is "this cell reads what the cells around it read".
         assert!(
-            db.abs() < 1.0,
-            "the floor reading is 79 dB down and reached the table as {db:.2} dB: {gains:?}"
+            (db(7) - db(6)).abs() < 1.0 && (db(7) - db(8)).abs() < 1.0,
+            "the floor reading is 79 dB down and reached the table as {:.2} dB \
+             against {:.2} and {:.2}: {gains:?}",
+            db(7),
+            db(6),
+            db(8)
         );
     }
 
@@ -1603,6 +2122,109 @@ mod tests {
         assert!(
             (hole - 0.5 * (below + above)).abs() < 1.5,
             "the hole at k=5 reads {hole:.2} dB, not between {below:.2} and {above:.2}"
+        );
+    }
+
+    /// The leak `DECISIONS.md` 272 closed, in the one line that states it: a row
+    /// whose *log* mean is zero is not loudness-neutral, and the row this fit
+    /// writes is neutral on the quantity a level is made of.
+    #[test]
+    fn a_log_neutral_row_is_not_level_neutral_and_the_written_one_is() {
+        // A flat engine spectrum and a recording that is the same spectrum with
+        // ±12 dB of alternating scatter on it: a pattern whose geometric mean is
+        // exactly 1 and whose power is 6.8 dB up.
+        let engine: Vec<f64> = vec![0.0; 12];
+        let scatter: Vec<f64> = (0..12)
+            .map(|k| if k % 2 == 0 { 12.0 } else { -12.0 })
+            .collect();
+        let recorded: Vec<f64> = engine.iter().zip(&scatter).map(|(e, s)| e + s).collect();
+        // What the old normalisation would have written, and what it costs.
+        let log_neutral = 10.0
+            * (scatter.iter().map(|db| 10f64.powf(db / 10.0)).sum::<f64>() / 12.0).log10();
+        assert!(
+            log_neutral > 6.0,
+            "a zero-mean ±12 dB row lifts the power by {log_neutral:.2} dB"
+        );
+
+        let config = ShapingConfig::default();
+        let three = |v: &[f64]| vec![flat_spectrum(v), flat_spectrum(v), flat_spectrum(v)];
+        let row = measured_over_rendered_report(&three(&recorded), &three(&engine), 12, &config)
+            .expect("a fit");
+        // The level it took out is that lift, and it is reported rather than
+        // written.
+        assert!(
+            (row.level_db - log_neutral).abs() < 1.5,
+            "the fit reports {:.2} dB of level against the {log_neutral:.2} it took out",
+            row.level_db
+        );
+        let power: f64 = row
+            .gains
+            .iter()
+            .map(|&g| f64::from(g).powi(2))
+            .sum::<f64>()
+            / row.gains.len() as f64;
+        let moved = 10.0 * power.log10();
+        assert!(
+            moved.abs() < 0.5,
+            "the written row moves a flat note's power by {moved:.2} dB"
+        );
+    }
+
+    /// A cell that is nobody's measurement is clipped to the key's own spread,
+    /// not to the schema's ±26 dB.
+    #[test]
+    fn a_cell_past_the_keys_own_spread_is_railed_to_it() {
+        let engine: Vec<f64> = vec![0.0; 12];
+        // Eleven cells inside ±2 dB and one at +40: the key's own MAD says the
+        // twelfth is not this key's measurement.
+        let mut recorded = vec![0.0, 1.5, -1.0, 2.0, -1.5, 1.0, -2.0, 0.5, 1.8, -0.8, 1.2];
+        recorded.push(40.0);
+        let config = ShapingConfig::default();
+        let three = |v: &[f64]| vec![flat_spectrum(v), flat_spectrum(v), flat_spectrum(v)];
+        let row = measured_over_rendered_report(&three(&recorded), &three(&engine), 12, &config)
+            .expect("a fit");
+        assert!(
+            row.rail_db < 10.0 && row.railed >= 1,
+            "rail {:.2} dB, {} railed",
+            row.rail_db,
+            row.railed
+        );
+        let db = |g: f32| 20.0 * f64::from(g).log10();
+        assert!(
+            db(row.gains[11]) < 12.0,
+            "the +40 dB cell reached the table as {:.2} dB",
+            db(row.gains[11])
+        );
+        // ... and the schema's own rails are still the outer bound.
+        for &g in &row.gains {
+            assert!((MIN_PARTIAL_GAIN..=MAX_PARTIAL_GAIN).contains(&g), "{g}");
+        }
+    }
+
+    /// The row is smoothed until the series it predicts is no rougher than the
+    /// recording's — and not one decibel further, because the recording's own
+    /// roughness is the measurement the field exists to carry.
+    #[test]
+    fn the_row_is_smoothed_to_the_recordings_roughness_and_no_further() {
+        let config = ShapingConfig::default();
+        let three = |v: &[f64]| vec![flat_spectrum(v), flat_spectrum(v), flat_spectrum(v)];
+        let engine: Vec<f64> = (0..12).map(|k| -1.0 * k as f64).collect();
+
+        // A recording that really is rough: the row has to keep all of it, and
+        // the loop is not allowed to smooth a thing.
+        let rough: Vec<f64> = engine
+            .iter()
+            .enumerate()
+            .map(|(k, e)| e + if k % 2 == 0 { 5.0 } else { -5.0 })
+            .collect();
+        let kept = measured_over_rendered_report(&three(&rough), &three(&engine), 12, &config)
+            .expect("a fit");
+        assert_eq!(kept.lambda, 0.0, "a matched roughness was smoothed anyway");
+        assert!(
+            (kept.written_step_db - kept.target_step_db).abs() < 1.0,
+            "target {:.2} against written {:.2}",
+            kept.target_step_db,
+            kept.written_step_db
         );
     }
 

@@ -47,12 +47,15 @@ use piano_tuner::estimate::motion::{
     fit_false_beat, fit_strike_direction, strike_direction_for, FalseBeatLoop, FalseBeatVerdict,
     MotionConfig, SwingLine, VelocityCell,
 };
-use piano_tuner::estimate::shaping::{measured_over_rendered, ShapingConfig};
+use piano_tuner::estimate::shaping::{
+    flatten_row, measured_over_rendered_report, ShapingConfig,
+};
 use piano_tuner::motion::{partial_motion, Motion, Spectrum, WINDOW_HI_S};
 use piano_tuner::pipeline::analyze_note;
 use piano_tuner::preset::{
     equal_temperament, key_index, FalseBeat, Preset, MAX_PARTIAL_GAIN, MIN_PARTIAL_GAIN,
 };
+use piano_tuner::series::{amp_db, Series, PARTIALS, WINDOW_S};
 use piano_tuner::survey::SurveyConfig;
 use piano_tuner::trajectory::InharmonicModel;
 use piano_tuner::{audio, detect_onset, Sample, SampleLibrary, SAMPLE_RATE};
@@ -73,6 +76,10 @@ const RENDER_S: f64 = WINDOW_HI_S + 1.5;
 /// How long a render for a *spectrum* has to be: `analyze_note` fits a decay and
 /// extrapolates it back to the strike, and a short render is a short fit.
 const SPECTRUM_RENDER_S: f32 = 4.0;
+
+/// How long a render for the compass's own spectrum statistic has to be: the
+/// window ends at 1.10 s and the level is an RMS over it.
+const SERIES_RENDER_S: f32 = 1.6;
 
 /// Velocity layers the gains are taken over. The reference layer plus its two
 /// neighbours: the engine is rendered at each one's own velocity, so what is
@@ -458,7 +465,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if wants("partial_gains") {
         println!(
             "\n== notes.partial_gains ==\n key  layers  partials   dB at k=1..4                \
-             span   loudest rec/eng"
+             span    rail  railed   step rec/row   level   keep  irreg rec/eng  moved  \
+             loudest rec/eng"
         );
         let shaping = ShapingConfig::default();
         let mut agreed = 0usize;
@@ -487,12 +495,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 recorded.push(spectrum);
                 rendered.push(engine);
             }
-            let Some(gains) =
-                measured_over_rendered(&recorded, &rendered, MAX_GAIN_PARTIALS, &shaping)
+            let Some(report) =
+                measured_over_rendered_report(&recorded, &rendered, MAX_GAIN_PARTIALS, &shaping)
             else {
                 println!("{key:>4}  {:>6}  nothing fitted", recorded.len());
                 continue;
             };
+            // Closed on the render, which is the only place the acceptance
+            // criterion lives. See `close_on_the_render`.
+            let mut fitted = report.gains.clone();
+            fitted.truncate(partial_count(&preset, key));
+            let target = reference_series(&library, key, &preset);
+            let closed = close_on_the_render(&preset, &probe, key, &fitted, target, &shaping);
+            let gains = closed.row.clone();
             let db = |g: f32| 20.0 * f64::from(g).log10();
             let span = gains.iter().fold(f64::MIN, |m, &g| m.max(db(g)))
                 - gains.iter().fold(f64::MAX, |m, &g| m.min(db(g)));
@@ -514,7 +529,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             checked += 1;
             println!(
-                "{:>4}  {:>6}  {:>8}   {:>6.2} {:>6.2} {:>6.2} {:>6.2}   {:>6.2}   {} / {}",
+                "{:>4}  {:>6}  {:>8}   {:>6.2} {:>6.2} {:>6.2} {:>6.2}   {:>6.2}  {:>6.2} {:>4}   \
+                 {:>5.2}/{:<5.2}  {:>+6.2}   {:>4.2}  {:>5.2}/{:<5.2}  {:>+5.2}  {} / {}",
                 key,
                 recorded.len(),
                 preset.notes.partial_gains[index].len(),
@@ -523,6 +539,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gains.get(2).copied().map_or(f64::NAN, db),
                 gains.get(3).copied().map_or(f64::NAN, db),
                 span,
+                report.rail_db,
+                report.railed,
+                report.target_step_db,
+                report.written_step_db,
+                report.level_db,
+                closed.keep,
+                closed.target_irregular,
+                closed.rendered_irregular,
+                closed.level_moved_db,
                 loudest(&reference),
                 loudest(&after),
             );
@@ -543,6 +568,259 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\nnothing written (pass --out <file>)");
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The gains, closed on the render
+// ---------------------------------------------------------------------------
+
+/// How far **under** the recording's own `irregular` the render has to land
+/// before the loop stops shrinking the row's roughness, in dB.
+///
+/// The target is the recording's roughness and not zero — the measured 5-10 dB
+/// of per-partial scatter is the whole reason the field exists, and a loop that
+/// aimed at a smooth series would give back the defect
+/// `estimate::shaping`'s header convicts the excitation of. What this margin
+/// buys is two things the target alone does not:
+///
+/// * The recording's `irregular` is measured through the sampler's own noise
+///   floor and the engine's is not, so landing exactly on it transfers the
+///   recording's measurement noise into the instrument.
+/// * The compass scores a key against its **neighbours**, and 58 of the 88 are
+///   unsampled and carry no row at all. Measured with no margin, C2 renders at
+///   9.80 dB of `irregular` against its own recording's 9.81 — a 0.01 dB match —
+///   and still reads `z` +4.2 because the keys either side of it render at 4.5.
+///   Half a decibel is what that costs to clear, and it leaves C2 inside the
+///   band its own recording sits in.
+const IRREGULAR_MARGIN_DB: f64 = 0.5;
+
+/// How far the rendered level of a fitted key may sit from where the bare key
+/// put it, in dB: the **band the recording's own compass has**, and not zero.
+///
+/// Measured over the 88 keys of `renders/compass/COMPASS.md`, the *recording's*
+/// `level` residual against its own eight nearest same-`N` neighbours has a
+/// robust sigma of **1.48 dB** (p90 3.25, worst 6.40). Two sigmas of that is the
+/// width of the piano's own key-to-key level scatter, and a fitted key that
+/// stays inside it cannot be the key a listener picks out of a melody: on the
+/// same compass the *engine's* residual sigma was 3.04 dB with a worst of 23.25,
+/// which is the defect.
+///
+/// # What this constant is *not* worth, measured (`DECISIONS.md` 282)
+///
+/// An earlier version of this comment claimed that pinning to zero instead
+/// would throw away **0.32 dB of mean log-mel**, and that the width of the band
+/// was therefore buying the scoreboard something. It is not. The stage was
+/// re-emitted at three settings of this constant and both boards scored on each:
+///
+/// | `LEVEL_BAND_DB` | mean log-mel | compass |
+/// |---|---|---|
+/// | `0.0` — the row may not move the level at all | 4.70 | 16 flags / 13 keys |
+/// | `2.96` — shipped | 4.70 | 16 flags / 13 keys |
+/// | `1e9` — no bound at all | 4.73 | 16 flags / 13 keys |
+///
+/// So the band is worth **0.00 dB** of mean log-mel against pinning to zero and
+/// **+0.03** against lifting it, and no `level` flag appears on the compass at
+/// any of the three. The 0.32 dB belongs to `estimate::shaping::energy_offset`,
+/// which is a different mechanism in a different file: putting *its*
+/// removed scalar back into every
+/// row reads **4.45** — and costs `F#5` a rendered level **17.9 dB over its own
+/// neighbours**, which is the leak item 272 exists to close.
+///
+/// What the band still earns is one key: lifted, `D#4` gains a `centroid` flag
+/// at z +6.0. That, and not the scoreboard, is the reason it is kept.
+const LEVEL_BAND_DB: f64 = 2.96;
+
+/// How close to the band edge the loop has to land before it stops.
+const LEVEL_TOLERANCE_DB: f64 = 0.15;
+
+/// Bisection steps on the roughness, and level corrections after it.
+const KEEP_STEPS: usize = 7;
+const LEVEL_ROUNDS: usize = 2;
+
+struct ClosedRow {
+    row: Vec<f32>,
+    /// The fraction of the fitted roughness that survived.
+    keep: f64,
+    target_irregular: f64,
+    rendered_irregular: f64,
+    /// What the row did to the rendered level, dB — the number
+    /// [`LEVEL_BAND_DB`] bounds.
+    level_moved_db: f64,
+}
+
+/// Puts the fitted row on the engine and adjusts it until the **rendered** note
+/// passes the two tests the compass will apply to it.
+///
+/// # Why this cannot be done in the estimator
+///
+/// `estimate::shaping` normalises the row for energy and smooths it until the
+/// series it *predicts* — the engine's measured spectrum times the row — is no
+/// jaggier than the recording's. That prediction is not the render. The row
+/// multiplies a modal input gain, the note it produces is a coupled unison whose
+/// partials are pairs of eigenmodes, and the compass measures a one-second RMS
+/// through the whole master chain rather than an amplitude extrapolated back to
+/// the strike. Measured, the gap is real and one-sided: after the estimator's
+/// own discipline C4's predicted series reads 11.8 dB of step against its
+/// recording's 12.8 and the *rendered* note still reads 13.9 against 7.0.
+///
+/// So the last word is the render's, which is `estimate::directivity`'s pattern
+/// and `CombLine`'s and `FalseBeatLoop`'s (`DECISIONS.md` 137, 199, 211, 264): a
+/// quantity that is only meaningful as "what does the engine do with this" is
+/// inverted on the engine.
+///
+/// # The two tests, in the order they are solved
+///
+/// 1. **Roughness.** [`piano_tuner::estimate::shaping::flatten_row`] scales the
+///    row's departures from its own smooth tilt by `keep` and leaves the tilt
+///    alone, and `keep` is bisected until the rendered `irregular` is
+///    [`IRREGULAR_MARGIN_DB`] under the recording's own. `keep = 1` — the whole
+///    fitted roughness — is tried first and kept where it passes, because the
+///    target is the recording's roughness and not zero.
+/// 2. **Level.** The row is then shifted bodily until the rendered
+///    0.10-1.10 s RMS is inside [`LEVEL_BAND_DB`] of where the *bare* key put
+///    it — the band the recording's own compass has, so what is removed is only
+///    the part of the level no key of the piano does (`DECISIONS.md` 272).
+fn close_on_the_render(
+    preset: &Preset,
+    probe: &Preset,
+    key: u8,
+    fitted: &[f32],
+    target: Option<Series>,
+    shaping: &ShapingConfig,
+) -> ClosedRow {
+    let Some(index) = key_index(key) else {
+        return ClosedRow {
+            row: fitted.to_vec(),
+            keep: 1.0,
+            target_irregular: f64::NAN,
+            rendered_irregular: f64::NAN,
+            level_moved_db: 0.0,
+        };
+    };
+    let with = |row: &[f32]| -> (f64, f64) {
+        let mut candidate = preset.clone();
+        candidate.notes.partial_gains[index] = row.to_vec();
+        rendered_series(&candidate, key)
+    };
+    let (bare_level, _) = rendered_series(probe, key);
+    let Some(target) = target else {
+        return ClosedRow {
+            row: fitted.to_vec(),
+            keep: 1.0,
+            target_irregular: f64::NAN,
+            rendered_irregular: f64::NAN,
+            level_moved_db: 0.0,
+        };
+    };
+    let target_irregular = target.irregularity();
+
+    // 1. the roughness.
+    let mut keep = 1.0f64;
+    let (_, irregular) = with(fitted);
+    let mut row = fitted.to_vec();
+    if irregular > target_irregular - IRREGULAR_MARGIN_DB {
+        let (mut lo, mut hi) = (0.0f64, 1.0f64);
+        for _ in 0..KEEP_STEPS {
+            let mid = 0.5 * (lo + hi);
+            let candidate = flatten_row(fitted, mid, 0.0, shaping);
+            let (_, got) = with(&candidate);
+            if got > target_irregular - IRREGULAR_MARGIN_DB {
+                hi = mid;
+            } else {
+                lo = mid;
+                keep = mid;
+                row = candidate;
+            }
+        }
+        if keep <= 0.0 {
+            row = flatten_row(fitted, 0.0, 0.0, shaping);
+        }
+    }
+
+    // 2. the level.
+    let mut lift = 0.0f64;
+    for _ in 0..LEVEL_ROUNDS {
+        let (level, _) = with(&row);
+        let moved = level - bare_level;
+        let excess = moved - moved.clamp(-LEVEL_BAND_DB, LEVEL_BAND_DB);
+        if excess.abs() <= LEVEL_TOLERANCE_DB {
+            break;
+        }
+        lift -= excess;
+        row = flatten_row(fitted, keep, lift, shaping);
+    }
+    let (level, got) = with(&row);
+    ClosedRow {
+        row,
+        keep,
+        target_irregular,
+        rendered_irregular: got,
+        level_moved_db: level - bare_level,
+    }
+}
+
+/// `(level dBFS, series)` of one key struck alone through `preset`, measured
+/// exactly as `compass_scan` measures it.
+fn rendered_series(preset: &Preset, key: u8) -> (f64, f64) {
+    let engine = match piano_emulator::preset::Preset::from_toml(&preset.to_toml()) {
+        Ok(engine) => engine,
+        Err(_) => return (f64::NAN, f64::NAN),
+    };
+    let events = [RenderEvent::new(
+        PREROLL_S as f32,
+        Event::NoteOn {
+            key,
+            vel: REFERENCE_VELOCITY,
+        },
+    )];
+    let (left, right) = render_to_buffer(&engine, &events, SERIES_RENDER_S);
+    let onset = (PREROLL_S * SR) as usize;
+    let mono: Vec<f32> = left
+        .iter()
+        .zip(&right)
+        .skip(onset)
+        .map(|(&l, &r)| 0.5 * (l + r))
+        .collect();
+    let params = engine.string_params(key);
+    let partial_hz: Vec<f64> = (1..=PARTIALS)
+        .map(|k| f64::from(params.partial_freq(k)))
+        .collect();
+    let lo = (WINDOW_S.0 * SR) as usize;
+    let hi = ((WINDOW_S.1 * SR) as usize).min(mono.len());
+    let window = &mono[lo.min(hi)..hi];
+    (
+        amp_db(piano_tuner::realism::rms(window)),
+        Series::measure(window, &partial_hz, SR).irregularity(),
+    )
+}
+
+/// How many partials this key's bank has: the longest a row for it may be.
+fn partial_count(preset: &Preset, key: u8) -> usize {
+    piano_emulator::preset::Preset::from_toml(&preset.to_toml())
+        .map(|engine| engine.string_params(key).partial_count())
+        .unwrap_or(0)
+}
+
+/// The recording of `key` at the reference velocity, measured the same way.
+fn reference_series(library: &SampleLibrary, key: u8, preset: &Preset) -> Option<Series> {
+    let sample = layer_for(library, key, REFERENCE_VELOCITY)?;
+    let audio = audio::load_at(&sample.path, SAMPLE_RATE).ok()?;
+    let mono = audio.mono();
+    let onset = (detect_onset(&mono, SR) * SR).round() as usize;
+    let index = key_index(key)?;
+    let engine_params = piano_emulator::preset::Preset::from_toml(&preset.to_toml())
+        .ok()
+        .map(|p| p.string_params(key))?;
+    let _ = index;
+    let partial_hz: Vec<f64> = (1..=PARTIALS)
+        .map(|k| f64::from(engine_params.partial_freq(k)))
+        .collect();
+    let lo = onset + (WINDOW_S.0 * SR) as usize;
+    let hi = (onset + (WINDOW_S.1 * SR) as usize).min(mono.len());
+    if lo >= hi {
+        return None;
+    }
+    Some(Series::measure(&mono[lo..hi], &partial_hz, SR))
 }
 
 fn verdict_name(verdict: FalseBeatVerdict) -> &'static str {

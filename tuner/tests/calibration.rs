@@ -893,17 +893,31 @@ fn the_bridge_splits_a_unisons_decay_rates_and_the_drift_measures_it() {
 #[test]
 #[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
 fn the_pan_spread_comes_back_from_the_drift_it_puts_in_the_image() {
-    // The keys `estimate::directivity`'s constants were measured over, minus
-    // the two lowest: at A0 and A1 the note is panned so far left that the
-    // spread has almost nowhere to move it, and this test is about the
-    // constant rather than about the compass. Their drift is in the survey's
-    // own table.
-    const KEYS: [u8; 6] = [45, 57, 60, 72, 84, 96];
+    // The keys `estimate::directivity`'s constants were measured over — all
+    // eight of them. This test used to drop A0 and A1 on the grounds that the
+    // spread has almost nowhere to move a note panned that far left, which is
+    // true and is exactly why they belong: they are in the line, they pull its
+    // slope down from 8.76 dB per unit to 8.00, and a gate that checks the
+    // constant on a different key set than the constant was taken on is off by
+    // that difference before anything is wrong (`DECISIONS.md` 279).
+    const KEYS: [u8; 8] = [21, 33, 45, 57, 60, 72, 84, 96];
     let config = DirectivityConfig::default();
     let survey = piano_tuner::survey::SurveyConfig::default();
 
     let median_drift = |spread: f32| -> f64 {
-        let mut preset = gate_preset();
+        // `gate_preset()` would be wrong here, and it is the whole reason this
+        // test spent two milestones passing by a thousandth: it renders at
+        // `board_mix = 0`, and the diffuse field is half of this mechanism.
+        // Measured with `tuner/examples/drift_line.rs`, the dry engine's drift
+        // runs 15.84 dB per unit of spread over the eight keys the constants
+        // were taken on and 12.21 over these six, against 8.00 and 8.76 with
+        // the board as the preset ships it. Checking a constant measured on the
+        // finished chain against a chain with the board removed is checking it
+        // on a different instrument (`DECISIONS.md` 279).
+        let mut preset = EnginePreset::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/default.toml"),
+        )
+        .expect("presets/default.toml loads");
         preset.voicing.polarization_pan_spread = spread;
         let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
         let mut drifts: Vec<f64> = KEYS
@@ -1610,8 +1624,12 @@ fn a_known_per_key_spread_comes_back_key_by_key() {
         let mut candidate = tuner_base.clone();
         candidate.voicing.polarization_pan_spread = global;
         candidate.notes.pan_spread = table.map(<[f32]>::to_vec).unwrap_or_default();
-        let mut engine = EnginePreset::from_toml(&candidate.to_toml()).ok()?;
-        engine.soundboard.board_mix = 0.0;
+        // Through the finished chain, board included: the diffuse field is
+        // half of this mechanism, and a two-point line measured with it removed
+        // is a line for a different instrument
+        // (`the_pan_spread_comes_back_from_the_drift_it_puts_in_the_image`,
+        // `DECISIONS.md` 279).
+        let engine = EnginePreset::from_toml(&candidate.to_toml()).ok()?;
         let (left, right) = render_to_buffer(
             &engine,
             &[RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })],
@@ -1653,16 +1671,17 @@ fn a_known_per_key_spread_comes_back_key_by_key() {
         piano_tuner::estimate::directivity::pan_spread_table(&measured, &lines).expect("a table");
     for (&key, &want) in KEYS.iter().zip(&truth) {
         let got = recovered[key_index(key).unwrap()];
-        // 0.08 before the coupled construction. C5 is the key that moved:
-        // 0.302 against 0.200, where A2 comes back 0.085 against 0.100 and C4
-        // 0.298 against 0.300. The reason is item 229's — the polarization
-        // handover moved later, so the 0.3-to-2.0 s window `DirectivityConfig`
-        // reads the balance over now catches a different part of it, and the
-        // two-point line `KeyDriftLine` interpolates on is no longer straight
-        // in the spread. Three probe points instead of two would close it and
-        // is a change to the estimator rather than to this gate.
+        // Back to the 0.08 it was before the coupled construction, because the
+        // thing that widened it to 0.12 was this test rendering at
+        // `board_mix = 0`. C5 was the key that moved — 0.302 against 0.200 —
+        // and the diagnosis on the record was that the two-point line
+        // `KeyDriftLine` interpolates on is no longer straight in the spread,
+        // with three probe points named as the fix. It is straight; the board
+        // is what straightens it. Through the finished chain the three keys
+        // come back **0.109 / 0.296 / 0.234** against 0.100 / 0.300 / 0.200,
+        // worst error 0.034 (`DECISIONS.md` 279).
         assert!(
-            (got - want).abs() < 0.12,
+            (got - want).abs() < 0.08,
             "key {key}: a spread of {want} came back as {got:.3}"
         );
     }

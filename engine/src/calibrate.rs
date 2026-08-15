@@ -246,11 +246,15 @@ mod tests {
     use crate::types::amp_to_db;
 
     /// The two halves of the calibration, on the shipped instrument: a
-    /// velocity-90 strike peaks around -19 dBFS and the board passes a
+    /// velocity-90 strike peaks around -24 dBFS and the board passes a
     /// mechanism burst at about +16 dB. Windows rather than values — what the
     /// test pins is that the measurement ran and returned something physical,
     /// while `acceptance::a_note_off_thumps_at_the_level_the_recordings_
     /// measured` checks the number that matters on the finished render.
+    ///
+    /// The strike window moved down by `types::OUTPUT_GAIN`'s recalibration and
+    /// by exactly that, 5.19 dB (`DECISIONS.md` 277): -26..-12 dBFS becomes
+    /// -31..-17. The board's gain is a ratio and does not move.
     #[test]
     fn the_calibration_measures_a_strike_and_the_board() {
         let preset = Preset::default();
@@ -259,7 +263,7 @@ mod tests {
         for &key in &ANCHOR_KEYS {
             let db = amp_to_db(strike_output_peak(&preset, &shapes, key));
             assert!(
-                (-26.0..-12.0).contains(&db),
+                (-31.2..-17.2).contains(&db),
                 "a velocity-90 strike of key {key} peaks at {db:.1} dBFS"
             );
         }

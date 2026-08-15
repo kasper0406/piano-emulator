@@ -650,6 +650,16 @@ fn c6_still_has_an_aftersound_under_its_fundamental() {
 /// (`DECISIONS.md` 228).
 #[test]
 fn the_strike_lands_at_the_level_it_always_did() {
+    // The master gain has moved once since `b929658`, deliberately and by a
+    // known factor: `types::OUTPUT_GAIN` 9.0 -> 4.95 to put the ten-note
+    // fortissimo chord back on the safety limiter's threshold
+    // (`DECISIONS.md` 42, 277). That is a pure scale on the sounding path — the
+    // two end-of-note floors were frozen in internal units in the same change
+    // so that it would be — so it is carried here as one term rather than
+    // folded into eighteen numbers, and every departure below is the same
+    // departure it was before the recalibration, to a hundredth of a decibel.
+    const MASTER_GAIN_DB: f64 = -5.1927; // 20 log10(4.95 / 9.0)
+
     // Peak of the render, dB, from the free-running construction at `b929658`,
     // and the budget this key is held to against it.
     const PINNED: [(u8, u8, f64, f64); 18] = [
@@ -675,7 +685,8 @@ fn the_strike_lands_at_the_level_it_always_did() {
     ];
     let preset = Preset::default();
     let mut worst = (0.0f64, 0u8, 0u8);
-    for (key, vel, want, budget) in PINNED {
+    for (key, vel, pinned, budget) in PINNED {
+        let want = pinned + MASTER_GAIN_DB;
         let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel })];
         let (l, r) = render_to_buffer(&preset, &events, 3.0);
         let peak = l.iter().chain(r.iter()).fold(0.0f32, |m, &x| m.max(x.abs()));

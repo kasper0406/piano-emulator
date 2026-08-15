@@ -1094,6 +1094,11 @@ stages:
 | **+ the level and rate solved on the render (`FalseBeatLoop`)** | **1.39** | **0.92** | **1.67** | **1.03** |
 | the recording against itself | 1.00 | 1.00 | 0.00 | 1.00 |
 
+The third row is that milestone's reading and is left at it. On the shipped preset as it stands after
+the disciplined gains refit and the master-gain calibration (`DECISIONS.md` 273-274, 277-278) the same
+four read **1.375 / 0.866 / 1.643 / 1.050** — all four still pass, and the master gain cannot move them
+at all, since every column here is a ratio between the engine and the recording.
+
 Every one of the four is the two mechanisms; the gains move no column and the mechanisms move no
 energy metric. What the open-loop inversion could not do was *arrive*: the level is quoted against
 one block's coherent sum and the depth is measured on the whole partial, so A4 k=3 was asked for the

@@ -70,7 +70,7 @@ fn the_checked_in_default_is_character_for_character_what_the_engine_writes() {
 /// A failure here is not "update the constant". It means a change reached the
 /// strings, and the question to answer is which one and whether it was meant.
 ///
-/// # The two times it has been meant
+/// # The four times it has been meant
 ///
 /// The constant stood at `63686423443ec4d3` from the engine built at commit
 /// `16307c4` — the last one before `notes.inharmonicity_b4`,
@@ -99,6 +99,36 @@ fn the_checked_in_default_is_character_for_character_what_the_engine_writes() {
 /// bisection rather than the last is worth 4.5 points of the worst T60 error,
 /// costs -61.8 dB RMS here, and takes two of `tuner/tests/calibration.rs`'s
 /// round trips red (`DECISIONS.md` 259).
+///
+/// It moved to `11a08741631adb99` when `types::IDLE_ENERGY` — the threshold that
+/// decides *when a note ends*, because a bank that reports idle lets
+/// `Voice::process` stop writing samples altogether — was re-derived from the
+/// reference recordings' own noise floor instead of a nominal -100 dBFS. At the
+/// old value the top octave was switched off at 1.8-2.5 s where the recordings
+/// of the same keys ring for 3.5, and the compass read the step as -176.0 dB/s
+/// of decay against a neighbourhood of -19.9 (`DECISIONS.md` 275, family 1).
+///
+/// This is a change to the sounding path and it was meant, so what is held is
+/// the size of it, measured on this probe: **-115.0 dB RMS** against a render
+/// whose own RMS is -40.4, i.e. 74.6 dB under the signal it is added to, with a
+/// largest single-sample difference of 2.3e-5 (-92.9 dBFS). Nothing that can be
+/// heard moved; what moved is how far into silence a dead voice is followed.
+///
+/// It moved to `b77c69714fdb6f21` when `types::OUTPUT_GAIN` was recalibrated
+/// 9.0 -> 4.95, which is the one clause `DECISIONS.md` 42 sets that number by:
+/// the ten-note fortissimo chord had been driving the safety limiter 5.19 dB
+/// past its threshold and now arrives 0.02 dB under it, with no sample of it
+/// shaped (`DECISIONS.md` 277).
+///
+/// **This one is a pure scale and the fingerprint is the only thing that can
+/// see it.** The two end-of-note floors were frozen in internal units in the
+/// same change precisely so that it would be (`types::FLOOR_REFERENCE_GAIN`),
+/// so every sample of this probe is the old sample times 0.55 to within f32
+/// rounding: undo the scale and the residual is **-167.9 dBFS RMS, 122.3 dB
+/// under the signal**, largest single sample 4.5e-8 (-147.0 dBFS, 129.4 dB
+/// under the peak). The probe's own RMS moves -40.41 -> -45.61 dBFS, which is
+/// -5.20 against the -5.1927 the constants say. Nothing about the instrument
+/// moved; where full scale is did.
 #[test]
 fn the_sounding_path_is_what_it_was_before_the_mechanism() {
     let mut events = Vec::new();
@@ -118,8 +148,8 @@ fn the_sounding_path_is_what_it_was_before_the_mechanism() {
     assert!(l.iter().any(|v| v.abs() > 0.02), "the probe made no sound");
     assert_eq!(
         fingerprint(&l, &r),
-        "61e29d4abaa316f9",
-        "the sounding path has moved since the coupled-eigenmode unison"
+        "b77c69714fdb6f21",
+        "the sounding path has moved since the master-gain calibration"
     );
 }
 

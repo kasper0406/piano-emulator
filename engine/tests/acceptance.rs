@@ -277,6 +277,68 @@ fn the_fundamental_decays_over_a_pianistic_time() {
     );
 }
 
+/// The top octave must not stop dead while the recording of the same note is
+/// still ringing.
+///
+/// `renders/compass/COMPASS.md` caught this as three flags on each of A7, A#7,
+/// B7 and C8 at once — `decay` to **-176.0 dB/s** against a neighbourhood of
+/// -19.9, `beat` to +97.9 against 17.4, `jitter` to 7.77 against 1.20 — and the
+/// three were one event: [`IDLE_ENERGY`](piano_emulator::types) crossed at
+/// 1.8-2.5 s, `Voice::process` took the branch that writes nothing, and a step
+/// to exact zero has an infinite decay slope, an envelope span equal to the
+/// whole dynamic range and a phase that is noise (`DECISIONS.md` 275-276). The
+/// recordings of the same four keys are 60 dB down at 3.4-3.7 s.
+///
+/// The property is therefore stated as *no cliff*, not as a level: a decaying
+/// note's 100 ms windows step down by a few dB each, and a note that is switched
+/// off steps by the whole remaining dynamic range at once. 40 dB in 100 ms is
+/// 400 dB/s, twice the fastest slope any of these keys' own modes can produce
+/// (`sigma` 9.8 at A7 is 85 dB/s) and an order under what switching off costs.
+///
+/// Measured on `presets/salamander-c5.toml`, because that is the instrument the
+/// compass scans and the one whose top octave rings long enough for a switch-off
+/// to land inside the note; `Preset::default`'s top octave is at -209 dBFS by
+/// 2 s and has nothing left to truncate. Held with no release and no pedal,
+/// which is what the compass renders. Windows in `f64`: at these levels the
+/// squares underflow an `f32` accumulator.
+#[test]
+fn the_top_octave_does_not_stop_dead_inside_the_note() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/salamander-c5.toml");
+    let measured = Preset::load(&path).expect("presets/salamander-c5.toml loads");
+    const STEP_S: f32 = 0.1;
+    const NOTE_S: f32 = 3.6;
+
+
+    for key in 96u8..=108 {
+        let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })];
+        let (l, r) = render_to_buffer(&measured, &events, NOTE_S);
+        let level = |from: f32| -> f64 {
+            let a = (from * SAMPLE_RATE) as usize;
+            let b = (((from + STEP_S) * SAMPLE_RATE) as usize).min(l.len());
+            let sum: f64 = (a..b)
+                .map(|i| {
+                    let v = f64::from(l[i]) + f64::from(r[i]);
+                    v * v
+                })
+                .sum();
+            10.0 * (sum / (b - a).max(1) as f64).max(1e-300).log10()
+        };
+
+        let fall = level(2.0) - level(3.0);
+        println!(
+            "key {key}: {:.1} dBFS at 2.0 s, {:.1} at 3.0, {fall:.1} dB/s",
+            level(2.0),
+            level(3.0)
+        );
+        assert!(
+            fall < 60.0,
+            "key {key} fell {fall:.1} dB/s between 2.0 and 3.0 s — that is a \
+             switch-off, not a decay (the compass's own neighbourhood is 19.9)"
+        );
+    }
+}
+
 #[test]
 fn releasing_a_key_with_the_pedal_up_stops_the_note() {
     for key in [36u8, 48, 60, 79] {

@@ -211,6 +211,18 @@ impl ModalBank {
         self.g_re[k]
     }
 
+    /// Mode `k`'s present state magnitude `|s_k|` — the peak amplitude it still
+    /// contributes to the bank's output, and the quantity [`ModalBank::cull`]
+    /// tests.
+    ///
+    /// `pub` for the same reason [`ModalBank::pole_radius`] is: a threshold that
+    /// decides when a note ends has to be checkable against the thing it is
+    /// applied to rather than against a proxy for it
+    /// (`tuner/examples/top_octave.rs`, `DECISIONS.md` 275-276).
+    pub fn mode_amplitude(&self, k: usize) -> f32 {
+        self.re[k].hypot(self.im[k])
+    }
+
     /// The imaginary half of mode `k`'s input gain; zero on every bank built
     /// with [`ModalBank::push_mode`].
     pub fn mode_gain_im(&self, k: usize) -> f32 {

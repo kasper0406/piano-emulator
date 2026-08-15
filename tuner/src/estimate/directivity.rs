@@ -40,15 +40,35 @@ use crate::trajectory::InharmonicModel;
 
 /// Median drift, in dB, that the engine's own renders show per unit of
 /// `voicing.polarization_pan_spread`. Measured over keys 21, 33, 45, 57, 60,
-/// 72, 84 and 96 at velocity 90 on `presets/salamander-c5.toml`.
-pub const DRIFT_PER_SPREAD_DB: f64 = 8.3;
+/// 72, 84 and 96 at velocity 90 by `tuner/examples/drift_line.rs`, at five
+/// spreads from 0 to the ceiling: **0.739, 1.356, 2.441, 2.913, 3.963 dB**,
+/// a straight line to within 0.170 dB.
+///
+/// **On `presets/default.toml`, and it cannot be measured on
+/// `presets/salamander-c5.toml`** as this line used to claim: that preset
+/// carries a per-key `notes.pan_spread` table, which overrides the global
+/// parameter, so the sweep is exactly flat — slope 0.000 at every spread. The
+/// old value 8.3 is close to right for the wrong reason
+/// (`DECISIONS.md` 279).
+///
+/// **And it is the finished chain that has this slope.** With the soundboard's
+/// diffuse path removed the same sweep runs **15.84** dB per unit, because the
+/// board is not panned at all and compresses every balance toward the middle —
+/// the header above says so and the number is now measured. A gate that renders
+/// at `board_mix = 0` is checking this constant on a different instrument.
+pub const DRIFT_PER_SPREAD_DB: f64 = 8.0;
 
 /// Median drift the same measurement returns at a spread of zero: not zero,
 /// because a note's partials do not all decay at the same rate and the diffuse
 /// field is not a constant either. Subtracted before the inversion, so a
 /// recording that drifts no more than the engine already does asks for no
 /// spread at all.
-pub const DRIFT_AT_ZERO_DB: f64 = 0.32;
+///
+/// 0.68 dB, the intercept of the same eight-key fit. It read 0.32 while the
+/// slope read 8.3, and the pair was taken with the board out of the chain,
+/// where the intercept really is near zero (-0.23) — put the board back and an
+/// unspread instrument drifts two thirds of a decibel on its own.
+pub const DRIFT_AT_ZERO_DB: f64 = 0.68;
 
 /// The engine's ceiling on the parameter (`soundboard::MAX_PAN_SPREAD`).
 pub const MAX_PAN_SPREAD: f64 = 0.4;

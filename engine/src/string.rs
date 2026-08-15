@@ -1642,6 +1642,24 @@ impl PianoString {
             .collect()
     }
 
+    /// Present state magnitudes `|s_m|` of the `2N` eigenmodes of partial `k`,
+    /// in the same order [`PianoString::partial_modes`] returns them.
+    ///
+    /// This is what the culling floor is compared against, so it is what any
+    /// claim about the floor has to be measured on.
+    pub fn partial_amplitudes(&self, k: usize) -> Vec<f32> {
+        let base = (k - 1) * self.strings;
+        (0..2 * self.strings)
+            .map(|i| {
+                if i >= self.strings {
+                    self.horizontal.mode_amplitude(base + i - self.strings)
+                } else {
+                    self.vertical.mode_amplitude(base + i)
+                }
+            })
+            .collect()
+    }
+
     /// Radiation-weighted centre frequency of partial `k` — where the partial
     /// sits, as opposed to where any one of its `2N` modes does.
     pub fn partial_freq(&self, k: usize) -> f32 {

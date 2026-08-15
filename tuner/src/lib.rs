@@ -47,6 +47,7 @@ pub mod realism;
 pub mod residual;
 pub mod sampler;
 pub mod response;
+pub mod series;
 pub mod stft;
 pub mod survey;
 pub mod synth;

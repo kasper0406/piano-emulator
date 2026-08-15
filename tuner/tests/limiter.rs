@@ -122,56 +122,67 @@ fn no_benchmark_phrase_reaches_the_master_safety_limiter() {
     }
 }
 
-/// ... and on the preset the master gain is calibrated against, a single note
-/// never reaches it at any velocity a player can ask for, anywhere on the
-/// keyboard.
+/// ... and on **both shipped presets** a single note never reaches it at any
+/// velocity a player can ask for, anywhere on the keyboard.
 ///
 /// This is the clause of `DECISIONS.md` 42 that is a statement about *one
 /// note*: the limiter is for chords. Every fourth key at three velocities, the
-/// loudest of them the loudest a MIDI file can carry. On
-/// `presets/default.toml` the loudest single strike on the instrument is C8 at
-/// velocity 127, **−4.23 dBFS in the channel it is panned into**, which leaves
-/// 3.23 dB under the threshold.
+/// loudest of them the loudest a MIDI file can carry. Over the keys this gate
+/// samples the loudest is A7 at velocity 127 on both presets, **-9.86 dBFS on
+/// `presets/default.toml` and -11.39 on `presets/salamander-c5.toml`** in the
+/// channel it is panned into, 8.86 and 10.39 dB under the threshold. Over all
+/// 88 keys (`tuner/examples/output_gain.rs`, which is not on the every-fourth
+/// grid) it is C8 at -9.42 and C5 at -7.58, 8.42 and 6.58 dB under.
 ///
-/// **`presets/salamander-c5.toml` is deliberately not in this gate, and
-/// `DECISIONS.md` 265 is why.** Under the same engine, three keys of the
-/// *fitted* preset — 87, 96 and 99 — put a single fortissimo strike inside the
-/// limiter (17, 2525 and 1487 samples, all three peaking at 0.00 dBFS), and the
-/// same engine running the *previous* revision of that same file puts none
-/// there. So it is the tables and not the construction, it is `partial_gains`
-/// after item 237 widened its ceiling from 10 to 20, and re-fitting it is a
-/// milestone with the corpus in it. What holds for both presets meanwhile is
-/// the phrase-level gate above: at the velocities the benchmark actually
-/// plays, neither of them reaches the limiter at all.
+/// **`presets/salamander-c5.toml` used to be deliberately excluded, and both
+/// halves of the reason are now gone.** Under the same engine three keys of the
+/// fitted preset — 87, 96 and 99 — used to put a single fortissimo strike
+/// inside the limiter (17, 2525 and 1487 samples, all three peaking at 0.00
+/// dBFS), which item 265 attributed to `notes.partial_gains` rather than to the
+/// construction. The disciplined refit (`DECISIONS.md` 273-274) took the level
+/// out of those rows, and the master-gain recalibration (277) moved the whole
+/// instrument 5.19 dB down from a threshold it was driving past; the loudest
+/// key of the fitted preset is no longer in the treble at all. Both presets are
+/// in the gate now, which is where a claim about "the instrument" belongs.
 #[test]
 fn a_single_note_never_reaches_the_master_safety_limiter() {
-    let preset = preset("presets/default.toml");
-    let mut loudest = (0.0f32, 0u8, 0u8);
-    for key in (LOWEST_KEY..=HIGHEST_KEY).step_by(4) {
-        for vel in [80, 110, 127] {
-            let (l, r) = render_to_buffer(
-                &preset,
-                &[RenderEvent::new(0.0, Event::NoteOn { key, vel })],
-                0.6,
-            );
-            let (over, peak) = master_limiter(&l, &r);
-            assert_eq!(
-                over, 0,
-                "key {key} at velocity {vel} put {over} samples inside the safety limiter"
-            );
-            if peak > loudest.0 {
-                loudest = (peak, key, vel);
+    for path in ["presets/default.toml", "presets/salamander-c5.toml"] {
+        let preset = preset(path);
+        let mut loudest = (0.0f32, 0u8, 0u8);
+        for key in (LOWEST_KEY..=HIGHEST_KEY).step_by(4) {
+            for vel in [80, 110, 127] {
+                let (l, r) = render_to_buffer(
+                    &preset,
+                    &[RenderEvent::new(0.0, Event::NoteOn { key, vel })],
+                    0.6,
+                );
+                let (over, peak) = master_limiter(&l, &r);
+                assert_eq!(
+                    over, 0,
+                    "{path}: key {key} at velocity {vel} put {over} samples inside \
+                     the safety limiter"
+                );
+                if peak > loudest.0 {
+                    loudest = (peak, key, vel);
+                }
             }
         }
+        let headroom = db(LIMIT_THRESHOLD) - db(loudest.0);
+        println!(
+            "{path}: loudest single strike is key {} at velocity {}, {:.2} dBFS in \
+             its channel, {headroom:.2} dB under the threshold",
+            loudest.1,
+            loudest.2,
+            db(loudest.0)
+        );
+        assert!(
+            headroom > 2.0,
+            "{path}: the loudest single note (key {}, velocity {}) leaves only \
+             {headroom:.2} dB under the safety limiter",
+            loudest.1,
+            loudest.2
+        );
     }
-    let headroom = db(LIMIT_THRESHOLD) - db(loudest.0);
-    assert!(
-        headroom > 2.0,
-        "the loudest single note (key {}, velocity {}) leaves only {headroom:.2} dB \
-         under the safety limiter",
-        loudest.1,
-        loudest.2
-    );
 }
 
 // ---------------------------------------------------------------------------

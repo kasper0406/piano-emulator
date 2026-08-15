@@ -53,13 +53,13 @@
 //!     -- data/salamander renders/compass presets/salamander-c5.toml
 //! ```
 
-use std::f64::consts::TAU;
 use std::path::{Path, PathBuf};
 
 use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::types::Event;
 use piano_tuner::motion::Motion;
+use piano_tuner::series::{amp_db, Series, PARTIALS, WINDOW_S as SPECTRUM_WINDOW};
 use piano_tuner::{audio, realism, Audio, Sampler, SampleLibrary, SamplerEvent, TimedEvent, SAMPLE_RATE};
 
 /// Velocity every key is struck at: the middle layer, the one the fits and the
@@ -72,27 +72,8 @@ const RENDER_S: f64 = 3.6;
 /// Seconds of silence before the strike, so an onset is never at sample zero.
 const PREROLL_S: f64 = 0.05;
 
-/// Partials the spectrum metrics are taken over. Twelve reaches 785 Hz at A0
-/// and 12.5 kHz at C8; above that a bass note's partials are closer together
-/// than the band-pass is wide.
-const PARTIALS: usize = 12;
 
-/// Window the level and the spectrum are measured over, seconds from the
-/// strike: past the hammer's noise and inside the part every key still sounds
-/// in.
-const SPECTRUM_WINDOW: (f64, f64) = (0.10, 1.10);
 
-/// How far a partial must stand over the signal *between* partials before it is
-/// counted as present, in dB.
-///
-/// Without this the spectrum metrics measure the analysis floor at the top of
-/// the compass, where a key's twelfth partial is past the rendered band on one
-/// side and past Nyquist on the other: two floor readings differ by whatever
-/// the floor happens to be doing, and the treble reads a 25 dB `irregular`
-/// that has nothing to do with the note. The test is a *local* one — the level
-/// midway to each neighbouring partial — so a partial that is genuinely 26 dB
-/// under its neighbours still counts, which is the whole point.
-const PRESENCE_DB: f64 = 8.0;
 
 /// How many neighbours a key is scored against.
 ///
@@ -337,14 +318,14 @@ impl Metrics {
 
     /// `against` is the spectrum of the recording of the same note, or `None`
     /// when this *is* the recording.
-    fn measure(mono: &[f32], partial_hz: &[f64], against: Option<&Spectrum>) -> (Metrics, Spectrum) {
+    fn measure(mono: &[f32], partial_hz: &[f64], against: Option<&Series>) -> (Metrics, Series) {
         let sr = f64::from(SAMPLE_RATE);
         let lo = (SPECTRUM_WINDOW.0 * sr) as usize;
         let hi = ((SPECTRUM_WINDOW.1 * sr) as usize).min(mono.len());
         let window = &mono[lo.min(hi)..hi];
         let level_db = amp_db(realism::rms(window));
 
-        let spectrum = Spectrum::measure(window, partial_hz, sr);
+        let spectrum = Series::measure(window, partial_hz, sr);
         let centroid_st = spectrum.centroid_semitones();
         let irregular_db = spectrum.irregularity();
         let match_db = against.map_or(0.0, |r| spectrum.distance_from(r));
@@ -383,158 +364,6 @@ impl Metrics {
             },
             spectrum,
         )
-    }
-}
-
-/// One note's harmonic series as measured: a level per partial, and whether the
-/// partial is really there.
-///
-/// The projection is Goertzel-style onto each partial's own frequency through a
-/// Hann window rather than a DFT bin, because the window is a second long, its
-/// bins are 1 Hz apart, and the two modes of a coupled unison are a tenth of
-/// that: what is wanted is the partial's energy *however it is split inside its
-/// own neighbourhood*, so a skirt of +-3 bins is summed in power.
-struct Spectrum {
-    /// Level of partial `k`, dB.
-    levels_db: Vec<f64>,
-    /// Whether partial `k` stands [`PRESENCE_DB`] over the signal between it
-    /// and its neighbours.
-    present: Vec<bool>,
-}
-
-impl Spectrum {
-    fn measure(window: &[f32], partial_hz: &[f64], sr: f64) -> Spectrum {
-        if window.is_empty() || partial_hz.is_empty() {
-            return Spectrum {
-                levels_db: vec![f64::NEG_INFINITY; partial_hz.len()],
-                present: vec![false; partial_hz.len()],
-            };
-        }
-        let n = window.len();
-        // Hann, so a neighbouring partial 1/T away is 31 dB down.
-        let taper: Vec<f64> = (0..n)
-            .map(|i| 0.5 - 0.5 * (TAU * i as f64 / n as f64).cos())
-            .collect();
-        let bin = sr / n as f64;
-        let at = |hz: f64| -> f64 {
-            if hz <= 0.0 || hz >= 0.45 * sr {
-                return f64::NEG_INFINITY;
-            }
-            let mut power = 0.0;
-            for d in -3..=3i32 {
-                let f = hz + f64::from(d) * bin;
-                if f <= 0.0 {
-                    continue;
-                }
-                let (mut re, mut im) = (0.0f64, 0.0f64);
-                let w = TAU * f / sr;
-                for (i, (&s, &t)) in window.iter().zip(&taper).enumerate() {
-                    let phase = w * i as f64;
-                    let v = f64::from(s) * t;
-                    re += v * phase.cos();
-                    im -= v * phase.sin();
-                }
-                power += re * re + im * im;
-            }
-            amp_db(2.0 * power.sqrt() / n as f64)
-        };
-        let levels_db: Vec<f64> = partial_hz.iter().map(|&hz| at(hz)).collect();
-        // The floor is measured where the note is not: 45 % of the way to each
-        // neighbouring partial, whichever side reads lower.
-        let spacing = partial_hz[0];
-        let present: Vec<bool> = partial_hz
-            .iter()
-            .zip(&levels_db)
-            .map(|(&hz, &db)| {
-                let floor = at(hz - 0.45 * spacing).min(at(hz + 0.45 * spacing));
-                db.is_finite() && (!floor.is_finite() || db - floor >= PRESENCE_DB)
-            })
-            .collect();
-        Spectrum {
-            levels_db,
-            present,
-        }
-    }
-
-    /// The partials that are really there, as `(k, level)`.
-    fn sounding(&self) -> Vec<(usize, f64)> {
-        self.levels_db
-            .iter()
-            .enumerate()
-            .zip(&self.present)
-            .filter(|((_, db), &p)| p && db.is_finite())
-            .map(|((i, &db), _)| (i + 1, db))
-            .collect()
-    }
-
-    /// Power-weighted mean partial index, expressed in semitones over `f0`.
-    ///
-    /// Register-free by construction: a note whose energy sits on its second
-    /// partial reads 12 semitones whether it is A0 or C8, so the number can be
-    /// compared across the compass without a trend to remove first.
-    fn centroid_semitones(&self) -> f64 {
-        let mut num = 0.0;
-        let mut den = 0.0;
-        for (k, db) in self.sounding() {
-            let p = 10f64.powf(db / 10.0);
-            num += p * k as f64;
-            den += p;
-        }
-        if den <= 0.0 {
-            return 0.0;
-        }
-        12.0 * (num / den).log2()
-    }
-
-    /// Mean absolute per-partial distance from another spectrum of the same
-    /// note, dB, after the common offset between the two is removed.
-    ///
-    /// The offset is the **median** of the per-partial differences, so one
-    /// railed partial cannot move it. Removing it is what makes this a measure
-    /// of *colour* rather than of loudness: a note that is uniformly 6 dB quiet
-    /// is a level error, which `level` already reports, and it is not what a
-    /// listener calls a note that does not fit.
-    ///
-    /// Taken only where both spectra have the partial: a partial the recording
-    /// does not have is not a distance, it is a missing measurement.
-    fn distance_from(&self, other: &Spectrum) -> f64 {
-        let pairs: Vec<(f64, f64)> = self
-            .levels_db
-            .iter()
-            .zip(&self.present)
-            .zip(other.levels_db.iter().zip(&other.present))
-            .filter(|((a, &pa), (b, &pb))| pa && pb && a.is_finite() && b.is_finite())
-            .map(|((&a, _), (&b, _))| (a, b))
-            .collect();
-        if pairs.len() < 3 {
-            return f64::NAN;
-        }
-        let offset = median(&pairs.iter().map(|(a, b)| a - b).collect::<Vec<_>>());
-        pairs.iter().map(|(a, b)| (a - offset - b).abs()).sum::<f64>() / pairs.len() as f64
-    }
-
-    /// Mean absolute step between the levels of adjacent sounding partials, dB.
-    ///
-    /// Every mechanism in the engine that shapes a spectrum is smooth in `ln k`
-    /// — the hammer, the bridge admittance, the strike comb, the microphone —
-    /// with exactly one exception, the fitted `notes.partial_gains` row, which
-    /// is a free number per partial. So this metric cannot be made large by the
-    /// physics, and a key that reads large has a table problem.
-    ///
-    /// Steps are taken only between partials that are adjacent or one apart: a
-    /// step across a long silent stretch of the series is a step across
-    /// whatever the note stopped doing, not a step in the note.
-    fn irregularity(&self) -> f64 {
-        let sounding = self.sounding();
-        let steps: Vec<f64> = sounding
-            .windows(2)
-            .filter(|w| w[1].0 - w[0].0 <= 2)
-            .map(|w| (w[1].1 - w[0].1).abs())
-            .collect();
-        if steps.is_empty() {
-            return 0.0;
-        }
-        steps.iter().sum::<f64>() / steps.len() as f64
     }
 }
 
@@ -701,8 +530,8 @@ fn print_detail(
     let hi = (SPECTRUM_WINDOW.1 * sr) as usize;
     let e_mono = engine.mono();
     let r_mono = reference.mono();
-    let e_spec = Spectrum::measure(&e_mono[lo..hi.min(e_mono.len())], partial_hz, sr);
-    let r_spec = Spectrum::measure(&r_mono[lo..hi.min(r_mono.len())], partial_hz, sr);
+    let e_spec = Series::measure(&e_mono[lo..hi.min(e_mono.len())], partial_hz, sr);
+    let r_spec = Series::measure(&r_mono[lo..hi.min(r_mono.len())], partial_hz, sr);
     let (e_lev, r_lev) = (&e_spec.levels_db, &r_spec.levels_db);
     let e_sig: Vec<f64> = e_mono.iter().map(|&v| f64::from(v)).collect();
     let r_sig: Vec<f64> = r_mono.iter().map(|&v| f64::from(v)).collect();
@@ -918,13 +747,6 @@ fn metric_index(name: &str) -> usize {
     METRIC_NAMES.iter().position(|&n| n == name).unwrap_or(0)
 }
 
-fn amp_db(amp: f64) -> f64 {
-    if amp > 0.0 {
-        20.0 * amp.log10()
-    } else {
-        f64::NEG_INFINITY
-    }
-}
 
 fn note_name(key: u8) -> String {
     const NAMES: [&str; 12] = [
