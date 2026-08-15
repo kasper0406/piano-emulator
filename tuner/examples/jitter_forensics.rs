@@ -82,11 +82,10 @@ use std::f64::consts::TAU;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use piano_emulator::preset::{Preset as EnginePreset, UnisonSigmaScale, Voicing};
+use piano_emulator::preset::Preset as EnginePreset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
-use piano_emulator::resonance::BridgeFilter;
-use piano_emulator::string::{contact_taper, StringParams};
-use piano_emulator::types::{key_index, Event, MAX_UNISON};
+use piano_emulator::string::PianoString;
+use piano_emulator::types::Event;
 use piano_tuner::{audio, detect_onset, Sample, SampleLibrary, SAMPLE_RATE};
 use rustfft::{num_complex::Complex64, FftPlanner};
 
@@ -115,6 +114,9 @@ const NOTE_S: f64 = 4.0;
 /// How long the engine is actually rendered for: past the analysis window with
 /// room for the band-pass filter's own tail.
 const RENDER_S: f64 = 4.5;
+
+/// How long the two long listening files are — see [`write_long_pair`].
+const LONG_S: f64 = 12.0;
 
 /// The analysis window, in seconds since the strike. Past the attack and the
 /// hammer's noise, and inside the part of the record every key still sounds in.
@@ -174,15 +176,21 @@ const VARIANTS: &[(&str, &str, Edit)] = &[
             *d = 0.0;
         }
     }),
+    // Three rungs changed hands at `DECISIONS.md` 223-236, and had to: the
+    // fields the old ones edited (`horizontal_offset_hz`, `unison_sigma_scale`,
+    // `unison_coupling`) are inert under the coupled construction, so those
+    // three renders came back bit-identical to `01_engine` and a bisection whose
+    // arms are copies of its control is not a bisection. Each is replaced by the
+    // field `FUNDAMENTALS.md` §7.7 names as its successor.
     (
-        "no_hoffset",
-        "voicing.horizontal_offset_hz = 0",
-        |p| p.voicing.horizontal_offset_hz = vec![0.0; MAX_UNISON],
+        "no_false_beat",
+        "notes.false_beat dropped - the successor of voicing.horizontal_offset_hz",
+        |p| p.notes.false_beat = Vec::new(),
     ),
     (
-        "flat_unison_sigma",
-        "voicing.unison_sigma_scale = ones",
-        |p| p.voicing.unison_sigma_scale = unity_sigma_scale(),
+        "no_strike_direction",
+        "[voicing.strike_direction] dropped - the only velocity dependence a linear model has",
+        |p| p.voicing.strike_direction = None,
     ),
     ("no_partial_gains", "notes.partial_gains dropped", |p| {
         p.notes.partial_gains = Vec::new()
@@ -192,9 +200,15 @@ const VARIANTS: &[(&str, &str, Edit)] = &[
         "notes.partial_sigma_scale dropped",
         |p| p.notes.partial_sigma_scale = Vec::new(),
     ),
-    ("no_coupling", "voicing.unison_coupling = 0", |p| {
-        p.voicing.unison_coupling = 0.0
-    }),
+    (
+        "no_bridge_coupling",
+        "voicing.bridge.radiated_share = 0 - the successor of voicing.unison_coupling",
+        |p| {
+            if let Some(bridge) = p.voicing.bridge.as_mut() {
+                bridge.radiated_share = 0.0;
+            }
+        },
+    ),
     ("single_string", "notes.unison = 1 (no unison at all)", |p| {
         for u in &mut p.notes.unison {
             *u = 1;
@@ -204,22 +218,15 @@ const VARIANTS: &[(&str, &str, Edit)] = &[
         for d in &mut p.notes.detune_cents {
             *d = 0.0;
         }
-        p.voicing.horizontal_offset_hz = vec![0.0; MAX_UNISON];
-        p.voicing.unison_sigma_scale = unity_sigma_scale();
+        p.notes.false_beat = Vec::new();
+        p.voicing.strike_direction = None;
         p.notes.partial_gains = Vec::new();
         p.notes.partial_sigma_scale = Vec::new();
-        p.voicing.unison_coupling = 0.0;
+        if let Some(bridge) = p.voicing.bridge.as_mut() {
+            bridge.radiated_share = 0.0;
+        }
     }),
 ];
-
-/// `preset::unity_sigma_scale`, which is private there.
-fn unity_sigma_scale() -> Vec<UnisonSigmaScale> {
-    (1..=MAX_UNISON)
-        .map(|n| UnisonSigmaScale {
-            scale: vec![1.0; n],
-        })
-        .collect()
-}
 
 // ------------------------------------------------------------ the measurement
 
@@ -709,76 +716,44 @@ struct Component {
     amp: f64,
 }
 
-/// `engine::string::radiated_damping`, which is private there.
-fn radiated_damping(params: &StringParams, voicing: &Voicing, partials: usize) -> Vec<f32> {
-    let share = match &voicing.bridge {
-        Some(bridge) if bridge.radiated_share > 0.0 => bridge.radiated_share,
-        _ => return vec![1.0; partials],
-    };
-    let modes = BridgeFilter::peaks_only(voicing.bridge.as_ref().expect("checked above"));
-    (1..=partials)
-        .map(|k| {
-            let excess = modes.magnitude(params.partial_freq(k)) - 1.0;
-            (1.0 + share * excess).clamp(0.25, 4.0)
+/// Every eigenmode the engine's `string.rs` puts into partial `k` of `key`.
+///
+/// Not rebuilt from the preset any more — **read off the instrument**. Under the
+/// free-running construction the components were `N` strings x 2 polarizations
+/// at preset-fixed offsets and the arithmetic could be repeated here; under the
+/// coupled one they are the roots of `A_k = i Omega_k - sigma_int I - C_k`
+/// (`FUNDAMENTALS.md` §5.1, `DECISIONS.md` 223) and there is nothing to repeat.
+/// So this builds the key and asks it, through [`PianoString::partial_modes`],
+/// which is the same `2N` poles the audio path steps.
+///
+/// The amplitude is the mode's own complex input gain: every mode of a partial
+/// is driven by the same excitation, so the ratios are what the beat is made
+/// of, which is all the table below reads.
+fn components(preset: &EnginePreset, key: u8, k: usize) -> Vec<Component> {
+    let string = PianoString::new(
+        preset.string_params(key),
+        &preset.voicing,
+        preset.partial_shaping(key),
+    );
+    let strings = string.string_count();
+    string
+        .partial_modes(k)
+        .iter()
+        .enumerate()
+        .map(|(i, m)| Component {
+            string: i % strings,
+            horizontal: m.horizontal,
+            hz: f64::from(m.hz),
+            sigma: f64::from(m.sigma),
+            amp: f64::from(m.gain()),
         })
         .collect()
 }
 
-/// Every sinusoid the engine's `string.rs` puts into partial `k` of `key`,
-/// rebuilt from the preset by the same arithmetic. Read-only: this predicts
-/// what the measurement should find, and the measurement is what decides.
-fn components(preset: &EnginePreset, key: u8, k: usize) -> Vec<Component> {
-    let params = preset.string_params(key);
-    let voicing = &preset.voicing;
-    let i = key_index(key).expect("key in range");
-    let row = |table: &Vec<Vec<f32>>| -> f32 {
-        table
-            .get(i)
-            .and_then(|r| r.get(k - 1))
-            .copied()
-            .unwrap_or(1.0)
-    };
-    let gain_k = row(&preset.notes.partial_gains);
-    let sigma_k = row(&preset.notes.partial_sigma_scale);
-    let radiated = radiated_damping(&params, voicing, params.partial_count());
-    let vertical_factor = voicing.vertical_decay_factor();
-    let horizontal_gain = 10f32.powf(voicing.horizontal_gain_db / 20.0);
-    let comb = (k as f32 * std::f32::consts::PI * params.strike_position).sin();
-    let comb = if params.comb_floor > 0.0 {
-        comb.signum() * (comb * comb + params.comb_floor * params.comb_floor).sqrt()
-    } else {
-        comb
-    };
-    let base_amp = (comb * contact_taper(k, params.contact_width) * gain_k).abs();
-    let mut out = Vec::new();
-    for s in 0..params.unison {
-        let detune = voicing.detune_ratio(s, params.unison, params.detune_cents);
-        let sigma = params.partial_sigma(k)
-            * sigma_k
-            * vertical_factor
-            * voicing.sigma_scale(s, params.unison)
-            * radiated[k - 1];
-        let f = params.partial_freq(k) * detune;
-        let share = voicing.strike_share(s, params.unison);
-        out.push(Component {
-            string: s,
-            horizontal: false,
-            hz: f64::from(f),
-            sigma: f64::from(sigma),
-            amp: f64::from(base_amp * share),
-        });
-        out.push(Component {
-            string: s,
-            horizontal: true,
-            hz: f64::from(f + voicing.horizontal_offset_hz[s]),
-            sigma: f64::from(sigma * voicing.horizontal_decay_ratio),
-            amp: f64::from(base_amp * share * horizontal_gain),
-        });
-    }
-    out
-}
-
-/// `v0`, `h2`: which string, which polarization.
+/// `v0`, `h2`: which polarization block, which mode of it. Under the coupled
+/// construction a mode is no longer *one* string — it is a shape over all of
+/// them — so the index is the mode's rank inside its block, sorted by
+/// frequency, and not a string number.
 fn component_name(c: &Component) -> String {
     format!("{}{}", if c.horizontal { "h" } else { "v" }, c.string)
 }
@@ -867,10 +842,14 @@ fn layer_for(
 
 /// The recording, on the engine's clock, cut so that frame 0 is the strike.
 fn recording(sample: &Sample) -> Result<Stereo, Box<dyn std::error::Error>> {
+    recording_of(sample, RENDER_S)
+}
+
+fn recording_of(sample: &Sample, seconds: f64) -> Result<Stereo, Box<dyn std::error::Error>> {
     let audio = audio::load_at(&sample.path, SAMPLE_RATE)?;
     let onset = detect_onset(&audio.mono(), SR);
     let start = (onset * SR).round() as usize;
-    let frames = (RENDER_S * SR) as usize;
+    let frames = (seconds * SR) as usize;
     let channel = |i: usize| -> Vec<f32> {
         let source = &audio.channels[i.min(audio.channel_count() - 1)];
         (0..frames)
@@ -883,18 +862,69 @@ fn recording(sample: &Sample) -> Result<Stereo, Box<dyn std::error::Error>> {
 /// The engine's render of one note through its public API, cut so that frame 0
 /// is the strike.
 fn render(preset: &EnginePreset, key: u8, vel: u8) -> Stereo {
+    render_for(preset, key, vel, RENDER_S)
+}
+
+fn render_for(preset: &EnginePreset, key: u8, vel: u8, seconds: f64) -> Stereo {
     let events = [RenderEvent::new(
         PREROLL_S as f32,
         Event::NoteOn { key, vel },
     )];
-    let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + RENDER_S) as f32);
+    let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + seconds) as f32);
     let skip = (PREROLL_S * SR) as usize;
     let cut = |c: Vec<f32>| -> Vec<f32> {
         let mut v: Vec<f32> = c.into_iter().skip(skip).collect();
-        v.resize((RENDER_S * SR) as usize, 0.0);
+        v.resize((seconds * SR) as usize, 0.0);
         v
     };
     (cut(left), cut(right))
+}
+
+/// The two long files, written beside the measured set and outside it.
+///
+/// `FUNDAMENTALS.md` §II.4 convicts every listening set this repository has ever
+/// shipped of being **shorter than the artefact**: the beat periods are 2-20 s
+/// and the guaranteed amplitude-equality crossings sat at 2.43-2.86 s, so a 4 s
+/// cut contains at most one null, partly under the fade. One dip heard once is a
+/// piano; the same dip at the same millisecond every time is a machine, and only
+/// the second thing is the defect. [`LONG_S`] seconds is two to four beat
+/// periods of the midrange, which is the shortest file that can state the
+/// difference.
+///
+/// They are not measured. Every number in this report is over
+/// [`T0_S`]-[`T1_S`] s, which both files contain identically to `00`/`01`;
+/// adding them to the measured set would add two duplicate rows to five tables.
+fn write_long_pair(
+    dir: &Path,
+    sample: &Sample,
+    preset: &EnginePreset,
+    key: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let recorded = recording_of(sample, LONG_S)?;
+    let rendered = render_for(preset, key, VELOCITY, LONG_S);
+    let reference = match_rms(&recorded);
+    if reference.is_nan() || reference <= 0.0 {
+        return Err(format!("{}: the long reference is silent", dir.display()).into());
+    }
+    let level = match_rms(&rendered);
+    let gain = if level > 0.0 { reference / level } else { 0.0 };
+    let peak = |(l, r): &Stereo, g: f64| {
+        l.iter()
+            .chain(r.iter())
+            .fold(0.0f64, |m, &v| m.max(f64::from(v).abs()))
+            * g
+    };
+    let common = {
+        let p = peak(&recorded, 1.0).max(peak(&rendered, gain));
+        if p > 0.891 {
+            0.891 / p
+        } else {
+            1.0
+        }
+    };
+    write_wav(&dir.join("14_recording_long.wav"), &recorded, common, LONG_S)?;
+    write_wav(&dir.join("15_eigen_fitted.wav"), &rendered, gain * common, LONG_S)?;
+    Ok(())
 }
 
 /// One exponentially decaying sinusoid, optionally on a white-noise pedestal,
@@ -988,19 +1018,35 @@ fn write_set(dir: &Path, signals: &[Signal]) -> Result<(), Box<dyn std::error::E
     let common = if peak > 0.891 { 0.891 / peak } else { 1.0 };
     for (i, (signal, &gain)) in signals.iter().zip(&gains).enumerate() {
         let path = dir.join(format!("{i:02}_{}.wav", signal.label));
-        write_wav(&path, &signal.stereo, gain * common)?;
+        write_wav(&path, &signal.stereo, gain * common, NOTE_S)?;
     }
     Ok(())
 }
 
-fn write_wav(path: &Path, (left, right): &Stereo, gain: f64) -> Result<(), hound::Error> {
+/// Writes one listening file, `seconds` long, faded at both ends.
+///
+/// `seconds` is a parameter and not [`NOTE_S`] because the set is no longer one
+/// length: the measured rungs are rendered for [`RENDER_S`] and written for
+/// [`NOTE_S`] — the extra half second is the band-pass's tail, which the
+/// measurement wants and a listener does not — while the long pair of
+/// [`write_long_pair`] is [`LONG_S`] both ways. It was hard-coded to
+/// `NOTE_S * SR`, which silently truncated the long pair back to four seconds
+/// and delivered the one thing `FUNDAMENTALS.md` §II.4 says a listening file has
+/// to be able to do — hold two beat periods — as two more copies of the file
+/// that cannot (`DECISIONS.md` 258).
+fn write_wav(
+    path: &Path,
+    (left, right): &Stereo,
+    gain: f64,
+    seconds: f64,
+) -> Result<(), hound::Error> {
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: SAMPLE_RATE,
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
-    let frames = (NOTE_S * SR) as usize;
+    let frames = (seconds * SR) as usize;
     let fade_in = (FADE_IN_S * SR) as usize;
     let fade_out = (FADE_OUT_S * SR) as usize;
     let mut writer = hound::WavWriter::create(path, spec)?;
@@ -1120,8 +1166,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          row can be a measurement of whatever radiates *beside* the partial (read against \
          the `S/N` column, which is measured the same way on every signal below); the last \
          is the artefact in its pure form — two free-running components of equal amplitude \
-         {CONTROL_BEAT_HZ} Hz apart, which is inside `voicing.horizontal_offset_hz`'s own \
-         range.\n\n\
+         {CONTROL_BEAT_HZ} Hz apart, which is the fixed offset the deleted \
+         `voicing.horizontal_offset_hz` used to put on every partial of every key.\n\n\
          {}",
         header_row("control")
     )?;
@@ -1177,6 +1223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
         write_set(&dir, &signals)?;
+        write_long_pair(&dir, layer_for(&library, key, VELOCITY)?, &base, key)?;
 
         // ---- what the preset predicts, before anything is measured.
         writeln!(
@@ -1188,12 +1235,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         writeln!(
             report,
-            "**What the shipped preset builds.** Every partial is this many independent \
-             sinusoids, at these fixed offsets, with these decay rates; `equal at` is when \
-             the two loudest of them pass through equal amplitude, which is where the \
-             hypothesis says the frequency track swings hardest. `under dB` is how far \
-             that meeting pair sits below whatever is loudest at that instant: 0 dB is a \
-             full null.\n\n\
+            "**What the instrument builds.** Read off `PianoString::partial_modes` rather \
+             than rebuilt from the preset: under the coupled construction a partial is the \
+             `2N` eigenmodes of `A_k = i Omega_k - sigma_int I - C_k` and there is no \
+             preset arithmetic left to repeat. `beat rates Hz` is every pairwise difference \
+             among them, which is what the envelope can beat at; `equal at` is when the two \
+             loudest pass through equal amplitude, which is where a frequency track swings \
+             hardest. `under dB` is how far that meeting pair sits below whatever is \
+             loudest at that instant: 0 dB is a full null.\n\n\
              | k | components | beat rates Hz | equal at s | pair | pair Hz | under dB |\n\
              |--:|--:|:--|--:|:--|--:|--:|"
         )?;
@@ -1328,14 +1377,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         report,
         "\nThe rungs are deliberately **not** orthogonal, and reading them as if they were \
-         is the one mistake this table invites. `notes.detune_cents` offsets whole strings \
-         by a *ratio* and `voicing.horizontal_offset_hz` offsets each string's horizontal \
-         polarization by a fixed number of *hertz*; zeroing either one leaves the other's \
-         beats standing, and can make the remaining ones deeper by removing what used to \
-         fill their nulls. The two rungs that bracket the whole mechanism are \
-         `single_string`, which leaves exactly one pair of components beating at one \
-         `horizontal_offset_hz`, and `all_off`, which leaves one sinusoid per partial and \
-         is therefore this measurement's own floor."
+         is the one mistake this table invites. `notes.detune_cents` sets where the unison's \
+         eigenvalues sit and `notes.false_beat` puts one more offset on the diagonal of the \
+         horizontal block; zeroing either one leaves the other's beats standing, and can \
+         make the remaining ones deeper by removing what used to fill their nulls. The two \
+         rungs that bracket the whole mechanism are `single_string`, which leaves one \
+         string's two polarizations, and `all_off`, which leaves one sinusoid per partial \
+         and is therefore this measurement's own floor. Three rungs changed hands when the \
+         fields they edited went inert (`DECISIONS.md` 255): `no_false_beat`, \
+         `no_strike_direction` and `no_bridge_coupling` are the successors named in \
+         `FUNDAMENTALS.md` §7.7 of `horizontal_offset_hz`, `unison_sigma_scale` and \
+         `unison_coupling`."
     )?;
     writeln!(
         report,
@@ -1344,6 +1396,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          two components passing through each other, it has to move with how hard the note \
          is struck.",
         EXTRA_VELOCITIES
+    )?;
+    writeln!(
+        report,
+        "- `14_recording_long` / `15_eigen_fitted` - the same strike held for {LONG_S} s \
+         instead of {NOTE_S}, level-matched on the same window and written outside the \
+         measured set. `FUNDAMENTALS.md` §II.4 convicts every listening set this repository \
+         has shipped of being shorter than the artefact: the beat periods are 2-20 s, so a \
+         four-second cut holds at most one null and cannot show whether the second one \
+         arrives on the same millisecond. Nothing in the tables above is measured on them - \
+         every number here is over {T0_S}-{T1_S} s, which `00` and `01` contain identically."
     )?;
 
     std::fs::write(out.join("JITTER.md"), &report)?;

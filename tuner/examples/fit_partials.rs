@@ -37,6 +37,16 @@
 //! sections you meant to re-fit into the preset by hand — which is how
 //! `DECISIONS.md` 210–213's `[noise.strike]` was taken.
 //!
+//! **`notes.partial_gains` has moved.** `tuner/examples/fit_motion.rs` fits it as
+//! the full measured ratio of the recording's time-zero spectrum to the engine's
+//! own render of the same note (`DECISIONS.md` 237, 243), against a probe whose
+//! own row is cleared first — which is what makes that fit re-entrant where this
+//! one is not. What is left here is the roughness half plus
+//! [`envelope_tilt`](piano_tuner::estimate::shaping::envelope_tilt), kept because
+//! `notes.comb_floor` is fitted against the gains this file writes and the two
+//! were derived together; run `fit_motion` afterwards and its table replaces
+//! this one outright.
+//!
 //! ```sh
 //! cargo run --release -p piano-tuner --example fit_partials -- \
 //!     data/salamander/SalamanderGrandPiano-V3+20200602.sfz \
@@ -61,13 +71,15 @@ use piano_tuner::estimate::decay::DecayCurve;
 use piano_tuner::estimate::noise::NoiseConfig;
 use piano_tuner::estimate::decay::DecayReport;
 use piano_tuner::estimate::shaping::{
-    fit_note, measured_deepest, CombLine, DecaySplit, EngineComb, NoteShaping, ShapingConfig,
+    envelope_tilt, fit_note, measured_deepest, CombLine, DecaySplit, EngineComb, NoteShaping,
+    ShapingConfig,
 };
 use piano_tuner::library::MechanismKind;
 use piano_tuner::pipeline::{analyze_note, analyze_trajectories};
 use piano_tuner::residual::onset_residual;
 use piano_tuner::preset::{
-    equal_temperament, key_index, NoteEstimate, Preset, PresetBuilder, NUM_KEYS,
+    equal_temperament, key_index, NoteEstimate, Preset, PresetBuilder, MAX_PARTIAL_GAIN,
+    MIN_PARTIAL_GAIN, NUM_KEYS,
 };
 use piano_tuner::survey::{load_signal, trajectories_for, SurveyConfig};
 use piano_tuner::trajectory::InharmonicModel;
@@ -262,6 +274,7 @@ fn run() -> Result<()> {
     let mut notes = analyse(&library, &base, &survey, &attack)?;
     fit_comb_floors(&mut notes, &base, &survey);
     refit_with_floors(&mut notes, &base);
+    fit_spectral_envelope(&mut notes, &base, &survey);
     report_shaping(&notes);
     let mut strike = report_strike(&notes, &base, &attack);
     strike_offset(&base, &mut strike.strike, &band);
@@ -348,6 +361,9 @@ struct Note {
     spectrum: Vec<(f64, f64)>,
     /// Why the residual was not measured, where it was not.
     refused: Option<String>,
+    /// The time-zero spectrum of the layer a velocity-90 blow triggers, kept so
+    /// that the engine's own render can be measured against the same one.
+    reference_spectrum: Vec<(u32, f64)>,
 }
 
 /// Every sampled key: the per-partial fits from the cached trajectories, and the
@@ -758,6 +774,12 @@ fn analyse_key(
         })
         .collect();
     let owned_reports: Vec<DecayReport> = analyses.iter().map(|a| a.decays.clone()).collect();
+    let reference_spectrum = signals
+        .iter()
+        .zip(&spectra)
+        .find(|((_, lovel, hivel, _, _), _)| (*lovel..=*hivel).contains(&REFERENCE_VELOCITY))
+        .map(|(_, spectrum)| spectrum.clone())
+        .unwrap_or_default();
 
     // The reference every level here is quoted against: the peak of the layer a
     // velocity-90 blow would trigger, at the level the instrument plays it.
@@ -837,6 +859,7 @@ fn analyse_key(
         residuals,
         spectrum,
         refused,
+        reference_spectrum,
     })
 }
 
@@ -901,6 +924,105 @@ fn fit_comb_floors(notes: &mut [Note], base: &Preset, survey: &SurveyConfig) {
         );
         note.comb_floor = floor;
     }
+}
+
+/// The half of the excitation the roughness fit throws away, measured on the
+/// engine and multiplied back in.
+///
+/// [`piano_tuner::estimate::shaping::envelope_tilt`] carries the argument; this
+/// is the render that feeds it. Each measured key is played through the engine
+/// **with everything fitted so far already in it** — the comb floor, the
+/// roughness gains — so that what the two smooth envelopes differ by is the
+/// engine's own error in the hammer's tilt and nothing that has already been
+/// corrected. The diffuse field is switched off for the same reason `comb_line`
+/// switches it off: several decibels of frequency-dependent gain on every
+/// partial would be measured as envelope.
+fn fit_spectral_envelope(notes: &mut [Note], base: &Preset, survey: &SurveyConfig) {
+    let config = ShapingConfig::default();
+    println!(
+        "\n key   tilt dB at k=1..4                       span dB   strongest partial  \
+         recording / engine"
+    );
+    for note in notes.iter_mut() {
+        let Some(index) = key_index(note.key) else { continue };
+        if note.reference_spectrum.is_empty() {
+            continue;
+        }
+        let mut probe = base.clone();
+        probe.notes.comb_floor[index] = note.comb_floor.unwrap_or(0.0) as f32;
+        probe.notes.partial_gains[index] = note.shaping.gains.clone();
+        probe.soundboard.board_mix = 0.0;
+        let Some(rendered) = rendered_spectrum(&probe, survey, note.key) else {
+            continue;
+        };
+        let partials = note.shaping.gains.len().max(rendered.len());
+        let Some(tilt) = envelope_tilt(&note.reference_spectrum, &rendered, partials, &config)
+        else {
+            continue;
+        };
+        let loudest = |spectrum: &[(u32, f64)]| {
+            spectrum
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).expect("finite"))
+                .map(|&(k, _)| k)
+                .unwrap_or(0)
+        };
+        let db = |g: f32| 20.0 * f64::from(g).log10();
+        let mut gains = note.shaping.gains.clone();
+        gains.resize(partials, 1.0);
+        for (g, t) in gains.iter_mut().zip(&tilt) {
+            *g = (*g * t).clamp(MIN_PARTIAL_GAIN, MAX_PARTIAL_GAIN);
+        }
+        while gains.last() == Some(&1.0) {
+            gains.pop();
+        }
+        let span = tilt.iter().fold(f64::MIN, |m, &g| m.max(db(g)))
+            - tilt.iter().fold(f64::MAX, |m, &g| m.min(db(g)));
+        println!(
+            "{:>4}   {:>7.2} {:>7.2} {:>7.2} {:>7.2}   {:>13.1}   {:>8} / {:<8}",
+            note.key,
+            db(tilt[0]),
+            tilt.get(1).copied().map_or(f64::NAN, db),
+            tilt.get(2).copied().map_or(f64::NAN, db),
+            tilt.get(3).copied().map_or(f64::NAN, db),
+            span,
+            loudest(&note.reference_spectrum),
+            loudest(&rendered),
+        );
+        note.shaping.gains = gains;
+    }
+}
+
+/// One key's time-zero spectrum as the engine renders it, measured by the code
+/// that measured the recording.
+fn rendered_spectrum(probe: &Preset, survey: &SurveyConfig, key: u8) -> Option<Vec<(u32, f64)>> {
+    let index = key_index(key)?;
+    let note_config = survey.note_config(equal_temperament(key)).ok()?;
+    let engine = piano_emulator::preset::Preset::from_toml(&probe.to_toml()).ok()?;
+    let events = [RenderEvent::new(
+        0.05,
+        Event::NoteOn {
+            key,
+            vel: REFERENCE_VELOCITY,
+        },
+    )];
+    let (left, right) = render_to_buffer(&engine, &events, COMB_RENDER_S);
+    let mono: Vec<f32> = left
+        .iter()
+        .zip(&right)
+        .map(|(&l, &r)| 0.5 * (l + r))
+        .collect();
+    let seed = InharmonicModel::harmonic(f64::from(probe.notes.f0_hz[index]));
+    let analysis = analyze_note(&mono, f64::from(SAMPLE_RATE), seed, &note_config).ok()?;
+    Some(
+        analysis
+            .decays
+            .partials
+            .iter()
+            .filter(|fit| fit.k >= 1 && fit.initial_amplitude() > 0.0)
+            .map(|fit| (fit.k, fit.initial_amplitude()))
+            .collect(),
+    )
 }
 
 /// One key's line: the engine rendered at each probe floor and measured the way

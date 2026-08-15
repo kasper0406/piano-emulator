@@ -8,6 +8,16 @@
 //! r_k    = exp(-sigma_k / SAMPLE_RATE),   w_k = 2*pi*f_k / SAMPLE_RATE
 //! ```
 //!
+//! The input gain `g_k` is **complex**. A bank whose modes are the free modes of
+//! one object — the duplex segments, the board, one uncoupled string — only ever
+//! needs a real one, and [`ModalBank::push_mode`] is that case written as
+//! `g_im = 0`. What needs the imaginary half is a bank whose modes are the
+//! *eigenmodes of a coupled group*: the strike projects onto a non-orthogonal
+//! eigenbasis, so each mode starts at its own phase, and that phase is the
+//! difference between a unison that beats once and settles and one that beats
+//! forever (`FUNDAMENTALS.md` §5.2, `engine::string`). It costs one FMA per mode
+//! per sample in [`Chunk::step`].
+//!
 //! State is stored SoA. The recurrence is serial along the sample axis, so the
 //! block loop runs [`LANES`] modes at a time with the state held in registers:
 //! the mode axis is the one that vectorizes.
@@ -18,7 +28,7 @@ use std::ops::Range;
 /// Modes processed simultaneously by the inner loop — one NEON f32 vector. The
 /// mode arrays are padded to a multiple of this with silent entries
 /// (`a = 0`, `g = 0`) so the block loop never needs a tail case.
-const LANES: usize = 4;
+const LANES: usize = 8;
 
 /// One vector of resonators, held in registers for the length of a block.
 struct Chunk {
@@ -26,7 +36,8 @@ struct Chunk {
     im: [f32; LANES],
     a_re: [f32; LANES],
     a_im: [f32; LANES],
-    g: [f32; LANES],
+    g_re: [f32; LANES],
+    g_im: [f32; LANES],
 }
 
 impl Chunk {
@@ -36,10 +47,34 @@ impl Chunk {
     fn step(&mut self, x: f32) -> f32 {
         let mut acc = 0.0;
         for l in 0..LANES {
-            let re = self.a_re[l] * self.re[l] - self.a_im[l] * self.im[l] + self.g[l] * x;
-            self.im[l] = self.a_re[l] * self.im[l] + self.a_im[l] * self.re[l];
-            self.re[l] = re;
-            acc += self.im[l];
+            let (re, im) = (self.re[l], self.im[l]);
+            let next_re = self.a_re[l] * re - self.a_im[l] * im + self.g_re[l] * x;
+            let next_im = self.a_re[l] * im + self.a_im[l] * re + self.g_im[l] * x;
+            self.re[l] = next_re;
+            self.im[l] = next_im;
+            acc += next_im;
+        }
+        acc
+    }
+
+    /// The same step with no input at all: `s <- a s`.
+    ///
+    /// Most of what a piano is doing at any instant is *ringing*, not being
+    /// driven — a hammer pulse is two milliseconds and a note is seconds — so
+    /// this is the case that decides the budget, and it is four multiplies and
+    /// three adds per lane against the driven six and five. It is also exactly
+    /// the recurrence, not an approximation of it: `x` is zero, so the two gain
+    /// terms are zero.
+    #[inline(always)]
+    fn step_free(&mut self) -> f32 {
+        let mut acc = 0.0;
+        for l in 0..LANES {
+            let (re, im) = (self.re[l], self.im[l]);
+            let next_re = self.a_re[l] * re - self.a_im[l] * im;
+            let next_im = self.a_re[l] * im + self.a_im[l] * re;
+            self.re[l] = next_re;
+            self.im[l] = next_im;
+            acc += next_im;
         }
         acc
     }
@@ -52,8 +87,11 @@ pub struct ModalBank {
     // Current per-sample pole a_k = r_cur * e^(i*w_k).
     a_re: Vec<f32>,
     a_im: Vec<f32>,
-    // Input gains.
-    g: Vec<f32>,
+    // Input gains, complex: `g_im` is zero for every bank whose modes are the
+    // free modes of one object, and non-zero only where the modes are the
+    // eigenmodes of a coupled group.
+    g_re: Vec<f32>,
+    g_im: Vec<f32>,
     // Unit phasor e^(i*w_k), kept so the pole can be rebuilt from a new radius.
     cos_w: Vec<f32>,
     sin_w: Vec<f32>,
@@ -82,7 +120,8 @@ impl ModalBank {
             im: z(),
             a_re: z(),
             a_im: z(),
-            g: z(),
+            g_re: z(),
+            g_im: z(),
             cos_w: z(),
             sin_w: z(),
             freq: z(),
@@ -118,8 +157,14 @@ impl ModalBank {
     }
 
     /// Appends a mode: `freq_hz` centre frequency, `sigma` decay rate in 1/s
-    /// (T60 = 6.91 / sigma), `gain` the input gain g_k.
+    /// (T60 = 6.91 / sigma), `gain` the input gain g_k. Real, i.e. the mode
+    /// starts at the phase the input hands it.
     pub fn push_mode(&mut self, freq_hz: f32, sigma: f32, gain: f32) {
+        self.push_mode_complex(freq_hz, sigma, gain, 0.0);
+    }
+
+    /// Appends a mode with a complex input gain `g_re + i g_im`.
+    pub fn push_mode_complex(&mut self, freq_hz: f32, sigma: f32, g_re: f32, g_im: f32) {
         let k = self.len;
         if k == self.re.len() {
             for v in self.arrays_mut() {
@@ -130,14 +175,14 @@ impl ModalBank {
         self.re[k] = 0.0;
         self.im[k] = 0.0;
         self.sigma_extra[k] = 0.0;
-        self.write_mode(k, freq_hz, sigma, gain);
+        self.write_mode(k, freq_hz, sigma, g_re, g_im);
     }
 
     /// Redefines mode `k` in place, keeping its resonator state (a retuned
     /// string keeps ringing rather than restarting) and its extra damping.
     pub fn set_mode(&mut self, k: usize, freq_hz: f32, sigma: f32, gain: f32) {
         debug_assert!(k < self.len);
-        self.write_mode(k, freq_hz, sigma, gain);
+        self.write_mode(k, freq_hz, sigma, gain, 0.0);
     }
 
     pub fn mode_freq(&self, k: usize) -> f32 {
@@ -148,12 +193,41 @@ impl ModalBank {
         self.sigma_base[k]
     }
 
+    /// The modulus of mode `k`'s pole, `|a| = r`, as the recurrence will
+    /// actually use it — after the `f32` rounding of `exp(-sigma/SR)` and after
+    /// any extra damping.
+    ///
+    /// A resonator is stable iff this is strictly under one. It is `pub` so
+    /// that the construction that builds the eigenmodes can be *tested* on the
+    /// property rather than on a proxy for it: `sigma > 0` is the mathematical
+    /// condition, `r < 1` is the arithmetic one, and at 48 kHz they are not the
+    /// same condition — every `sigma` under about `5.7e-3` rounds to `r = 1`
+    /// and rings forever (`string.rs::MIN_MODE_SIGMA`).
+    pub fn pole_radius(&self, k: usize) -> f32 {
+        self.r_cur[k]
+    }
+
     pub fn mode_gain(&self, k: usize) -> f32 {
-        self.g[k]
+        self.g_re[k]
+    }
+
+    /// The imaginary half of mode `k`'s input gain; zero on every bank built
+    /// with [`ModalBank::push_mode`].
+    pub fn mode_gain_im(&self, k: usize) -> f32 {
+        self.g_im[k]
     }
 
     pub fn set_mode_gain(&mut self, k: usize, gain: f32) {
-        self.g[k] = gain;
+        self.g_re[k] = gain;
+        self.g_im[k] = 0.0;
+    }
+
+    /// Rewrites mode `k`'s complex input gain, leaving its pole and its state
+    /// alone — how a strike vector that has changed direction (una corda) is
+    /// applied to a group whose eigenmodes have not.
+    pub fn set_mode_gain_complex(&mut self, k: usize, g_re: f32, g_im: f32) {
+        self.g_re[k] = g_re;
+        self.g_im[k] = g_im;
     }
 
     /// Silences the resonators without changing the mode layout.
@@ -215,7 +289,8 @@ impl ModalBank {
                 im: read4(&self.im, base),
                 a_re: read4(&self.a_re, base),
                 a_im: read4(&self.a_im, base),
-                g: read4(&self.g, base),
+                g_re: read4(&self.g_re, base),
+                g_im: read4(&self.g_im, base),
             };
 
             if ramping {
@@ -237,6 +312,10 @@ impl ModalBank {
                 }
                 for l in 0..LANES {
                     self.snap_pole(base + l);
+                }
+            } else if silent_input {
+                for o in out.iter_mut() {
+                    *o += c.step_free();
                 }
             } else {
                 for (o, &x) in out.iter_mut().zip(input) {
@@ -284,11 +363,12 @@ impl ModalBank {
         true
     }
 
-    fn write_mode(&mut self, k: usize, freq_hz: f32, sigma: f32, gain: f32) {
+    fn write_mode(&mut self, k: usize, freq_hz: f32, sigma: f32, g_re: f32, g_im: f32) {
         let w = std::f32::consts::TAU * freq_hz / SAMPLE_RATE;
         self.cos_w[k] = w.cos();
         self.sin_w[k] = w.sin();
-        self.g[k] = gain;
+        self.g_re[k] = g_re;
+        self.g_im[k] = g_im;
         self.freq[k] = freq_hz;
         self.sigma_base[k] = sigma;
         self.r_base[k] = (-sigma.max(0.0) / SAMPLE_RATE).exp();
@@ -318,13 +398,14 @@ impl ModalBank {
         self.a_im[k] = self.r_tgt[k] * self.sin_w[k];
     }
 
-    fn arrays_mut(&mut self) -> [&mut Vec<f32>; 13] {
+    fn arrays_mut(&mut self) -> [&mut Vec<f32>; 14] {
         [
             &mut self.re,
             &mut self.im,
             &mut self.a_re,
             &mut self.a_im,
-            &mut self.g,
+            &mut self.g_re,
+            &mut self.g_im,
             &mut self.cos_w,
             &mut self.sin_w,
             &mut self.freq,

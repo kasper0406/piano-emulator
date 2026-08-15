@@ -34,6 +34,35 @@
 //!    the key-off noise and whatever is left ringing, and it is the one metric
 //!    the whole-phrase measures average away.
 //!
+//! ## Columns A and B: what those five are blind to
+//!
+//! Every metric above is a functional of *energy*, and `FUNDAMENTALS.md` Part II
+//! is the argument that the percept the instrument is still failing on is not
+//! one. A 4-cent frequency modulation of a resolved partial is several times
+//! detection threshold and changes a mel feature vector by exactly nothing (the
+//! bands are two semitones wide); a beat 15 dB deep at a fixed rate is thirty
+//! times threshold and sits *below* the modulation metric's own 0.5 Hz low edge.
+//! M3 is the demonstration: the modulation column improved 5.76 → 3.84 while the
+//! listener's verdict got worse, because an aggregate that rewards the presence
+//! of modulation rewards a metronome.
+//!
+//! [`motion_columns`] is Part II §II.3's answer, promoted from the forensics that
+//! found the fault. Four numbers over sixteen key × partial cells at three
+//! velocities ([`MOTION_KEYS`], [`MOTION_PARTIALS`], [`MOTION_VELOCITIES`]),
+//! each a **per-cell mismatch against the recording** rather than a pooled mean,
+//! because the mean is what hid this: over the same cells the engine's jitter
+//! averaged 1.27 cents against the recording's 1.50 while being 33x too still at
+//! C4 k=1 and 4.5x too spiky at A4 k=1.
+//!
+//! * **A1 `IF mismatch`** ([`A1_GATE`]) — symmetric, so too dead fails as loudly
+//!   as too spiky.
+//! * **A2 `IF placement`** ([`A2_GATE`]) — does the wobble ride the loud part of
+//!   the partial, as the recording's does, or spike at the null of a beat, which
+//!   is all a sum of free-running sinusoids can do.
+//! * **B1 `beat-depth error`** ([`B1_GATE_DB`]).
+//! * **B2 `velocity coherence`** ([`B2_GATE`]) — the column with the physics in
+//!   it, and the only one of the four that anything in this repository can move.
+//!
 //! ## What the numbers are not
 //!
 //! Every metric is computed on the **mono** sum. The engine places keys in the
@@ -60,6 +89,7 @@ use rustfft::{num_complex::Complex32, FftPlanner};
 use crate::audio::Audio;
 use crate::error::{Error, Result};
 use crate::library::SampleLibrary;
+use crate::motion::{partial_motion, Motion, Spectrum, IF_FLOOR_CENTS};
 use crate::sampler::{SamplerEvent, TimedEvent};
 use crate::stft::{Stft, StftConfig};
 
@@ -1702,6 +1732,226 @@ pub fn phrase_set() -> Vec<Phrase> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// Columns A and B: what the six energy metrics above are blind to
+// ---------------------------------------------------------------------------
+
+/// The keys the motion columns are measured on, in the order they are reported.
+/// `FUNDAMENTALS.md` Part II §II.3 pins four, and the verification errata pin
+/// that it is these four and not section 7's three: A4 is the cell the forensics
+/// found the engine's worst frequency excursion on, and leaving it out is why
+/// Part II's `A1` baseline (~4.5 over 16 cells) and section 7's (3.39 over 12)
+/// differ.
+pub const MOTION_KEYS: [(u8, &str); 4] = [(45, "A2"), (60, "C4"), (69, "A4"), (84, "C6")];
+
+/// Partials per key. Low enough that every key has them and low enough that the
+/// ear resolves them individually.
+pub const MOTION_PARTIALS: u32 = 4;
+
+/// The three velocities every cell is rendered and recorded at. Column B's
+/// velocity coherence is the spread across them, and it is the column with the
+/// physics in it: a coupled unison's mode *mixture* is set by the strike, so it
+/// cannot be velocity-invariant, and a free-running one cannot be anything else.
+pub const MOTION_VELOCITIES: [u8; 3] = [40, 90, 120];
+
+/// The velocity Columns A and B1 are quoted at — the same one every per-note
+/// table in the preset is fitted at.
+pub const MOTION_REFERENCE_VELOCITY: u8 = 90;
+
+/// `IF mismatch` must be at most this. Symmetric by construction, so "too dead"
+/// fails as loudly as "too spiky".
+pub const A1_GATE: f64 = 2.0;
+/// `IF placement` must be at least this.
+pub const A2_GATE: f64 = 0.5;
+/// `beat-depth error` must be at most this many dB.
+pub const B1_GATE_DB: f64 = 3.0;
+/// `velocity coherence` must be at least this fraction of the reference's own.
+pub const B2_GATE: f64 = 0.25;
+
+/// One key × partial × velocity, measured on both signals.
+#[derive(Clone, Copy, Debug)]
+pub struct MotionCell {
+    pub key: u8,
+    pub k: u32,
+    pub velocity: u8,
+    /// `None` when the partial did not stand over its own neighbourhood, which
+    /// is a cell that measured nothing rather than a cell that measured zero.
+    pub engine: Option<Motion>,
+    pub reference: Option<Motion>,
+}
+
+impl MotionCell {
+    fn both(&self) -> Option<(Motion, Motion)> {
+        Some((self.engine?, self.reference?))
+    }
+}
+
+/// Measures one signal's first [`MOTION_PARTIALS`] partials.
+///
+/// `partial_hz` is the nominal frequency of each partial — the caller's, because
+/// only the caller knows the preset's inharmonicity. The search half-width is a
+/// fraction of the fundamental, so a partial that has been pulled by the bridge
+/// is still found and a neighbouring one is not.
+pub fn measure_partials(signal: &[f64], partial_hz: &[f64]) -> Vec<Option<Motion>> {
+    let mut spectrum = Spectrum::new(signal);
+    let half_width = partial_hz.first().copied().unwrap_or(100.0) * 0.35;
+    partial_hz
+        .iter()
+        .map(|&hz| partial_motion(&mut spectrum, hz, half_width))
+        .collect()
+}
+
+/// Columns A and B, and the pieces they are made of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotionColumns {
+    /// **A1, `IF mismatch`.** Geometric mean over the reference-velocity cells
+    /// of `max(J_eng, J_ref) / min(J_eng, J_ref)`, both clamped at
+    /// [`crate::motion::IF_FLOOR_CENTS`] first.
+    pub if_mismatch: f64,
+    /// **A2, `IF placement`.** Median over the same cells of `L_eng / L_ref`.
+    pub if_placement: f64,
+    /// **B1, `beat-depth error`.** Mean over the same cells of
+    /// `|D_eng − D_ref|`, dB. Reported as a mean of absolute values
+    /// deliberately: the signed mean of a table spanning −9.1 to +14.8 dB is
+    /// +2.0, which is exactly what must not be reported.
+    pub beat_depth_error_db: f64,
+    /// **B2, `velocity coherence`.** The geometric mean of the two ratios
+    /// below, which is how the column is "pooled over J and D".
+    pub velocity_coherence: f64,
+    /// The frequency half of B2: the engine's mean per-cell spread of `J` across
+    /// the three velocities, over the reference's.
+    pub velocity_coherence_freq: f64,
+    /// The depth half: the same for `D`.
+    pub velocity_coherence_depth: f64,
+    /// The four spreads the two ratios are made of, so a report can say what
+    /// moved rather than only how far: engine cents, reference cents, engine dB,
+    /// reference dB.
+    pub spread_cents: (f64, f64),
+    pub spread_depth_db: (f64, f64),
+    /// Cells that measured on both sides, at the reference velocity.
+    pub cells: usize,
+    /// Cells that had all three velocities on both sides.
+    pub velocity_cells: usize,
+}
+
+impl MotionColumns {
+    /// Whether all four gates pass. Nothing in this repository has ever passed
+    /// one of them, which is the point of writing them down.
+    pub fn passes(&self) -> bool {
+        self.if_mismatch <= A1_GATE
+            && self.if_placement >= A2_GATE
+            && self.beat_depth_error_db <= B1_GATE_DB
+            && self.velocity_coherence >= B2_GATE
+    }
+}
+
+/// Reduces the measured cells to the four columns.
+///
+/// A1, A2 and B1 are taken over the [`MOTION_REFERENCE_VELOCITY`] cells; B2 is
+/// taken over the same cells' spread across all of [`MOTION_VELOCITIES`]. That
+/// split is pinned here rather than left to the caller because
+/// `FUNDAMENTALS.md`'s two halves quote the columns over different cell sets and
+/// the errata require an implementation to choose one.
+///
+/// Every per-cell frequency deviation is clamped at
+/// [`crate::motion::IF_FLOOR_CENTS`] before any ratio is taken — the errata's
+/// own instruction, and it is what a ratio needs to mean anything: two cells
+/// that are both at the measurement's floor are *the same*, and without the
+/// clamp they read a mismatch of thirty.
+pub fn motion_columns(cells: &[MotionCell]) -> MotionColumns {
+    let floor = |c: f64| c.max(IF_FLOOR_CENTS);
+    let at_reference: Vec<&MotionCell> = cells
+        .iter()
+        .filter(|c| c.velocity == MOTION_REFERENCE_VELOCITY)
+        .collect();
+
+    let mut log_mismatch = 0.0;
+    let mut placements: Vec<f64> = Vec::new();
+    let mut depth_errors: Vec<f64> = Vec::new();
+    let mut counted = 0usize;
+    for cell in &at_reference {
+        let Some((engine, reference)) = cell.both() else {
+            continue;
+        };
+        let (a, b) = (floor(engine.band_cents), floor(reference.band_cents));
+        log_mismatch += (a.max(b) / a.min(b)).ln();
+        if reference.placement() > 0.0 {
+            placements.push(engine.placement() / reference.placement());
+        }
+        depth_errors.push((engine.beat_depth_db - reference.beat_depth_db).abs());
+        counted += 1;
+    }
+
+    // B2: per cell, the spread of each statistic over the velocities that
+    // measured on both sides — and only cells where *both* signals have all
+    // three, so the ratio is not a comparison of different cell sets.
+    let mut engine_cents: Vec<f64> = Vec::new();
+    let mut reference_cents: Vec<f64> = Vec::new();
+    let mut engine_depth: Vec<f64> = Vec::new();
+    let mut reference_depth: Vec<f64> = Vec::new();
+    for &(key, _) in &MOTION_KEYS {
+        for k in 1..=MOTION_PARTIALS {
+            let group: Vec<(Motion, Motion)> = MOTION_VELOCITIES
+                .iter()
+                .filter_map(|&velocity| {
+                    cells
+                        .iter()
+                        .find(|c| c.key == key && c.k == k && c.velocity == velocity)
+                        .and_then(MotionCell::both)
+                })
+                .collect();
+            if group.len() < MOTION_VELOCITIES.len() {
+                continue;
+            }
+            let spread = |values: Vec<f64>| {
+                values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                    - values.iter().copied().fold(f64::INFINITY, f64::min)
+            };
+            engine_cents.push(spread(group.iter().map(|(e, _)| floor(e.band_cents)).collect()));
+            reference_cents.push(spread(
+                group.iter().map(|(_, r)| floor(r.band_cents)).collect(),
+            ));
+            engine_depth.push(spread(group.iter().map(|(e, _)| e.beat_depth_db).collect()));
+            reference_depth.push(spread(group.iter().map(|(_, r)| r.beat_depth_db).collect()));
+        }
+    }
+    let mean = |v: &[f64]| {
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<f64>() / v.len() as f64
+        }
+    };
+    let ratio = |a: f64, b: f64| if b > 0.0 { a / b } else { 0.0 };
+    let freq = ratio(mean(&engine_cents), mean(&reference_cents));
+    let depth = ratio(mean(&engine_depth), mean(&reference_depth));
+
+    placements.sort_by(|a, b| a.partial_cmp(b).expect("finite placements"));
+    MotionColumns {
+        if_mismatch: if counted == 0 {
+            f64::NAN
+        } else {
+            (log_mismatch / counted as f64).exp()
+        },
+        if_placement: if placements.is_empty() {
+            f64::NAN
+        } else {
+            placements[placements.len() / 2]
+        },
+        beat_depth_error_db: mean(&depth_errors),
+        // Pooled as a geometric mean: the two halves are in different units
+        // (cents and decibels) and neither may dominate the other by being
+        // numerically larger.
+        velocity_coherence: (freq.max(0.0) * depth.max(0.0)).sqrt(),
+        velocity_coherence_freq: freq,
+        velocity_coherence_depth: depth,
+        spread_cents: (mean(&engine_cents), mean(&reference_cents)),
+        spread_depth_db: (mean(&engine_depth), mean(&reference_depth)),
+        cells: counted,
+        velocity_cells: engine_cents.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2141,6 +2391,121 @@ mod tests {
             }
         }
     }
+
+    // ---- Columns A and B -------------------------------------------------
+
+    fn cell(key: u8, k: u32, velocity: u8, engine: (f64, f64, f64), reference: (f64, f64, f64)) -> MotionCell {
+        let motion = |(band, placement, depth): (f64, f64, f64)| Motion {
+            mean_hz: 440.0,
+            peak_db: 40.0,
+            band_cents: band,
+            raw_cents: 1.0,
+            weighted_cents: placement,
+            beat_depth_db: depth,
+            beat_rate_hz: 1.0,
+            prompt_db_s: -12.0,
+            tail_db_s: -6.0,
+            aftersound_db: 10.0,
+        };
+        MotionCell {
+            key,
+            k,
+            velocity,
+            engine: Some(motion(engine)),
+            reference: Some(motion(reference)),
+        }
+    }
+
+    /// An exact resynthesis of the recording scores 1 / 1 / 0, which is
+    /// `ANALYSIS.md` §7's certification rule for any new metric: near-zero for
+    /// the thing that is the reference by construction.
+    #[test]
+    fn the_columns_score_a_perfect_copy_at_their_own_identity() {
+        let mut cells = Vec::new();
+        for (i, &(key, _)) in MOTION_KEYS.iter().enumerate() {
+            for k in 1..=MOTION_PARTIALS {
+                for (j, &velocity) in MOTION_VELOCITIES.iter().enumerate() {
+                    let v = (1.0 + i as f64 + 0.4 * j as f64, 0.5, 3.0 + j as f64);
+                    cells.push(cell(key, k, velocity, v, v));
+                }
+            }
+        }
+        let columns = motion_columns(&cells);
+        assert_eq!(columns.cells, 16);
+        assert_eq!(columns.velocity_cells, 16);
+        assert!((columns.if_mismatch - 1.0).abs() < 1e-12, "{}", columns.if_mismatch);
+        assert!((columns.if_placement - 1.0).abs() < 1e-12);
+        assert!(columns.beat_depth_error_db < 1e-12);
+        assert!((columns.velocity_coherence - 1.0).abs() < 1e-12);
+        assert!(columns.passes());
+    }
+
+    /// The errata's clamp, which is the difference between "both signals are at
+    /// the measurement's floor" and "the engine is thirty times too still".
+    #[test]
+    fn two_cells_at_the_floor_are_not_a_mismatch() {
+        let cells: Vec<MotionCell> = (1..=MOTION_PARTIALS)
+            .map(|k| {
+                cell(
+                    60,
+                    k,
+                    MOTION_REFERENCE_VELOCITY,
+                    (0.001, 0.5, 3.0),
+                    (0.03, 0.5, 3.0),
+                )
+            })
+            .collect();
+        let columns = motion_columns(&cells);
+        assert!(
+            (columns.if_mismatch - 1.0).abs() < 1e-9,
+            "mismatch {} without the clamp would be 30",
+            columns.if_mismatch
+        );
+    }
+
+    /// A1 is symmetric: a partial thirty times too still and one thirty times
+    /// too spiky are the same failure.
+    #[test]
+    fn the_mismatch_column_punishes_stillness_and_spikiness_alike() {
+        let still = motion_columns(&[cell(60, 1, 90, (0.1, 0.5, 3.0), (3.0, 0.5, 3.0))]);
+        let spiky = motion_columns(&[cell(60, 1, 90, (3.0, 0.5, 3.0), (0.1, 0.5, 3.0))]);
+        assert!((still.if_mismatch - spiky.if_mismatch).abs() < 1e-12);
+        assert!((still.if_mismatch - 30.0).abs() < 1e-9, "{}", still.if_mismatch);
+        assert!(!still.passes());
+    }
+
+    /// B2 reads the *spread across velocity*, which is zero for anything the
+    /// strike vector cannot move — and that is the whole claim of the column.
+    #[test]
+    fn a_velocity_invariant_engine_has_no_coherence_however_right_it_is() {
+        let mut cells = Vec::new();
+        for k in 1..=MOTION_PARTIALS {
+            for (j, &velocity) in MOTION_VELOCITIES.iter().enumerate() {
+                cells.push(cell(
+                    60,
+                    k,
+                    velocity,
+                    (1.0, 0.5, 6.0),
+                    (1.0 + 0.8 * j as f64, 0.5, 6.0 + 2.0 * j as f64),
+                ));
+            }
+        }
+        let columns = motion_columns(&cells);
+        assert!(columns.velocity_coherence < 1e-12, "{}", columns.velocity_coherence);
+        assert!(columns.spread_cents.0 < 1e-12 && columns.spread_cents.1 > 1.0);
+        assert!(!columns.passes());
+    }
+
+    /// A cell only one of the two signals measured is not a cell.
+    #[test]
+    fn a_partial_only_one_signal_resolved_is_not_scored() {
+        let mut only_engine = cell(60, 1, 90, (1.0, 0.5, 3.0), (1.0, 0.5, 3.0));
+        only_engine.reference = None;
+        let columns = motion_columns(&[only_engine]);
+        assert_eq!(columns.cells, 0);
+        assert!(columns.if_mismatch.is_nan());
+    }
+
 }
 
 

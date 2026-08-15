@@ -38,9 +38,12 @@ use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::types::{Event, PedalEvent};
 use piano_tuner::audio::Audio;
 use piano_tuner::realism::{
-    self, MelDiff, Phrase, RealismMetrics, ReleaseDelta, VelocityLayers, MEL_BANDS, MEL_FLOOR_DB,
-    MEL_F_MAX, MEL_F_MIN, MULTI_RES_WINDOWS, PHRASE_SET_VERSION,
+    self, MelDiff, MotionCell, MotionColumns, Phrase, RealismMetrics, ReleaseDelta, VelocityLayers,
+    A1_GATE, A2_GATE, B1_GATE_DB, B2_GATE, MEL_BANDS, MEL_FLOOR_DB, MEL_F_MAX, MEL_F_MIN,
+    MOTION_KEYS, MOTION_PARTIALS, MOTION_REFERENCE_VELOCITY, MOTION_VELOCITIES, MULTI_RES_WINDOWS,
+    PHRASE_SET_VERSION,
 };
+use piano_tuner::{audio, detect_onset};
 use piano_tuner::sampler::{Sampler, SamplerEvent, TimedEvent};
 use piano_tuner::{SampleLibrary, SAMPLE_RATE};
 
@@ -118,8 +121,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rows.push(Row { phrase, measured, floor });
     }
 
+    // ---- Columns A and B: the sixteen cells, at three velocities -----------
+    print!("{:<18}", "motion columns");
+    let started = Instant::now();
+    let library = SampleLibrary::from_sfz(&sfz)?;
+    let cells = motion_cells(&preset, &library);
+    let columns = realism::motion_columns(&cells);
+    println!(
+        "  A1 {:5.2}   A2 {:5.2}   B1 {:5.2} dB   B2 {:5.3}   {:.1} s",
+        columns.if_mismatch,
+        columns.if_placement,
+        columns.beat_depth_error_db,
+        columns.velocity_coherence,
+        started.elapsed().as_secs_f64()
+    );
+
     let report = out.join("REALISM.md");
-    std::fs::write(&report, scoreboard(&rows, &preset_path, &sfz))?;
+    std::fs::write(&report, scoreboard(&rows, &columns, &preset_path, &sfz))?;
     println!("\n{}", report.display());
     Ok(())
 }
@@ -169,7 +187,79 @@ fn render_engine(preset: &Preset, phrase: &Phrase) -> Audio {
 // The scoreboard
 // ---------------------------------------------------------------------------
 
-fn scoreboard(rows: &[Row], preset: &Path, sfz: &Path) -> String {
+/// Every Column A/B cell, measured on the engine and on the recording layer a
+/// strike at the same velocity would trigger.
+fn motion_cells(preset: &Preset, library: &SampleLibrary) -> Vec<MotionCell> {
+    let sample_rate = f64::from(SAMPLE_RATE);
+    let mut cells = Vec::new();
+    for &(key, _) in &MOTION_KEYS {
+        let params = preset.string_params(key);
+        let partial_hz: Vec<f64> = (1..=MOTION_PARTIALS)
+            .map(|k| f64::from(params.partial_freq(k as usize)))
+            .collect();
+        for &velocity in &MOTION_VELOCITIES {
+            let engine = measure_render(preset, key, velocity, &partial_hz);
+            let reference = library
+                .layers(key)
+                .iter()
+                .find(|s| (s.lovel..=s.hivel).contains(&velocity))
+                .and_then(|sample| {
+                    let audio = audio::load_at(&sample.path, SAMPLE_RATE).ok()?;
+                    let mono = audio.mono();
+                    let onset = detect_onset(&mono, sample_rate);
+                    let start = (onset * sample_rate).round() as usize;
+                    let frames = (MOTION_RENDER_S * sample_rate) as usize;
+                    let cut: Vec<f64> = (0..frames)
+                        .map(|n| f64::from(mono.get(start + n).copied().unwrap_or(0.0)))
+                        .collect();
+                    Some(realism::measure_partials(&cut, &partial_hz))
+                })
+                .unwrap_or_else(|| vec![None; partial_hz.len()]);
+            for k in 1..=MOTION_PARTIALS {
+                cells.push(MotionCell {
+                    key,
+                    k,
+                    velocity,
+                    engine: engine[k as usize - 1],
+                    reference: reference[k as usize - 1],
+                });
+            }
+        }
+    }
+    cells
+}
+
+/// Seconds of note the motion columns are measured over: past the analysis
+/// window with room for the band-pass's own tail.
+const MOTION_RENDER_S: f64 = 4.5;
+const MOTION_PREROLL_S: f64 = 0.05;
+
+fn measure_render(
+    preset: &Preset,
+    key: u8,
+    velocity: u8,
+    partial_hz: &[f64],
+) -> Vec<Option<piano_tuner::motion::Motion>> {
+    let events = [RenderEvent::new(
+        MOTION_PREROLL_S as f32,
+        Event::NoteOn { key, vel: velocity },
+    )];
+    let (left, right) = render_to_buffer(
+        preset,
+        &events,
+        (MOTION_PREROLL_S + MOTION_RENDER_S) as f32,
+    );
+    let skip = (MOTION_PREROLL_S * f64::from(SAMPLE_RATE)) as usize;
+    let mono: Vec<f64> = left
+        .iter()
+        .zip(&right)
+        .skip(skip)
+        .map(|(&l, &r)| 0.5 * (f64::from(l) + f64::from(r)))
+        .collect();
+    realism::measure_partials(&mono, partial_hz)
+}
+
+fn scoreboard(rows: &[Row], columns: &MotionColumns, preset: &Path, sfz: &Path) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "# REALISM.md — the engine against the piano it was measured from\n");
     let _ = writeln!(
@@ -283,6 +373,73 @@ rather than a bug.\n",
         1000.0 * realism::ENVELOPE_HOP as f64 / f64::from(SAMPLE_RATE),
         rise_engine * 1000.0,
         rise_reference * 1000.0,
+    );
+
+    // ---- Columns A and B ----
+    let _ = writeln!(s, "## Columns A and B — the motion of a single partial\n");
+    let _ = writeln!(
+        s,
+        "The six columns above are functionals of *energy*, and `FUNDAMENTALS.md` Part II is \
+the argument that what the instrument still fails on is not one. These four are that review's \
+own answer (§II.3), measured over {} key x partial cells — {} at partials 1..{} — at \
+velocities {:?}, on single held notes rather than phrases. Every per-cell frequency deviation \
+is clamped at the measurement's own 0.05-cent floor before any ratio is taken, which is the \
+verification errata's pinned spec.\n",
+        MOTION_KEYS.len() * MOTION_PARTIALS as usize,
+        MOTION_KEYS
+            .iter()
+            .map(|&(_, name)| name)
+            .collect::<Vec<_>>()
+            .join(", "),
+        MOTION_PARTIALS,
+        MOTION_VELOCITIES
+    );
+    let _ = writeln!(s, "| column | what it measures | gate | reading | verdict |");
+    let _ = writeln!(s, "|:--|:--|--:|--:|:--|");
+    let verdict = |pass: bool| if pass { "**pass**" } else { "fail" };
+    let _ = writeln!(
+        s,
+        "| `A1` IF mismatch | geometric mean of `max(J_eng, J_ref) / min(...)`, symmetric so \
+too dead fails as loudly as too spiky | ≤ {A1_GATE:.1} | {:.2} | {} |",
+        columns.if_mismatch,
+        verdict(columns.if_mismatch <= A1_GATE)
+    );
+    let _ = writeln!(
+        s,
+        "| `A2` IF placement | median of `L_eng / L_ref`: does the wobble ride the loud part \
+of the partial or spike at a null | ≥ {A2_GATE:.1} | {:.2} | {} |",
+        columns.if_placement,
+        verdict(columns.if_placement >= A2_GATE)
+    );
+    let _ = writeln!(
+        s,
+        "| `B1` beat-depth error | mean absolute difference of the two beat depths, \
+dB | ≤ {B1_GATE_DB:.0} dB | {:.2} | {} |",
+        columns.beat_depth_error_db,
+        verdict(columns.beat_depth_error_db <= B1_GATE_DB)
+    );
+    let _ = writeln!(
+        s,
+        "| `B2` velocity coherence | the engine's mean per-cell spread across the three \
+velocities over the recording's, pooled over `J` and `D` | ≥ {B2_GATE:.2} | {:.3} | {} |",
+        columns.velocity_coherence,
+        verdict(columns.velocity_coherence >= B2_GATE)
+    );
+    let _ = writeln!(
+        s,
+        "\n`A1`, `A2` and `B1` are taken over the {} cells at velocity {}; `B2` over the {} of \
+them that measured at all three velocities on both sides. What `B2` is made of, which is what \
+says *which* half moved: frequency spread {:.3} cents engine against {:.3} recorded (ratio \
+{:.3}), beat-depth spread {:.2} dB against {:.2} (ratio {:.3}).\n",
+        columns.cells,
+        MOTION_REFERENCE_VELOCITY,
+        columns.velocity_cells,
+        columns.spread_cents.0,
+        columns.spread_cents.1,
+        columns.velocity_coherence_freq,
+        columns.spread_depth_db.0,
+        columns.spread_depth_db.1,
+        columns.velocity_coherence_depth
     );
 
     // ---- signed detail ----

@@ -997,25 +997,42 @@ audibly stiller in exactly the register the user is listening to.** The three cl
 |:--|:--|
 | the eigen construction is the physically right one | **upheld** — and it is cheaper than what it replaces: same mode count, one extra FMA, three preset fields deleted, `couple()` and its three per-group `BLOCK` buffers gone |
 | it removes the artefact the user reported | **upheld for the metronome** — the note-independent 0.27/0.35/0.52 Hz pulse and the scheduled full nulls cannot exist under it |
-| it reproduces the recording | **refuted** — A1 3.39 → 4.37, velocity spread 0.010 against 0.787, and the C4/A2 fundamentals go from too still to stiller |
+| it reproduces the recording | **refuted for the construction alone** — A1 3.39 → 4.37, velocity spread 0.010 against 0.787, and the C4/A2 fundamentals go from too still to stiller. Steps 2 and 3 below are what closes it, and they close it: all four columns pass at A1 1.39 / A2 0.92 / B1 1.67 / B2 1.03 (`DECISIONS.md` 253), with A2 k=1 at 1.35 cents against the recording's 1.44 where the construction alone read **0.04** |
 
 The build order that follows is therefore **not** "ship §5 and re-measure". It is:
 
 1. **Ship §5's construction** — for the metronome, for the deleted fields, and because every later
    experiment needs a forward model that is not wrong. Accept that it *reduces* movement.
-2. **Add the within-string split as a real mechanism**, on top of it: a per-string, per-partial
+2. **Add the within-string split as a real mechanism**, on top of it — **built and then solved on
+   the render** (`DECISIONS.md` 233–234, 249–252): a per-string, per-partial
    frequency offset between the two polarization blocks of the *same* string, of order 1 Hz in the
    bass and midrange, with the two planes at comparable amplitude (implied −4 to −7 dB, against
    `horizontal_gain_db`'s −27.6). In the eigenproblem this is one more term on the diagonal of
    `Ω_k`, not a new solver: `ω_(j,h) = ω_(j,v)(1 + δ_j(k))`. It is the only candidate the
    measurements support, and it is falsifiable — if `δ` fitted per string and per partial does not
-   come back uncorrelated across `k`, it is not a false beat.
+   come back uncorrelated across `k`, it is not a false beat. (It comes back uncorrelated at 24 of
+   30 sampled keys and the other six are refused. What did **not** survive contact with the render
+   is the *open-loop* inversion of the level from the recording's own depth: the asked level is
+   quoted against one polarization block and the depth is measured on all `2N` modes, so the two
+   disagree by up to 16.4 dB and `B1` was a mean of that. The level is now bisected, and the rate
+   stepped, against the engine's own render — `estimate::motion::FalseBeatLoop`.)
 3. **Make the strike vector's *direction* velocity-dependent**, which is the only place velocity
-   dependence can enter a linear model: `s_j(v)`, `d_j(v)`, and the split of energy between the two
+   dependence can enter a linear model — **built**, `voicing.strike_direction` (`DECISIONS.md`
+   235–236): `s_j(v)`, `d_j(v)`, and the split of energy between the two
    planes as a function of hammer speed. Without this, nothing in this family of models can produce
    the recording's 0.787 cents of velocity spread, and no amount of fitting will change that.
+   (`d_j(v)` is not among the three fields: the timing skew is not a phase and was dropped outright,
+   `DECISIONS.md` 227. What was built is the v/h ratio and the per-string share tilt, both
+   interpolated in velocity, both leaving `|u|` alone.)
 4. **Re-fit `detune_cents` under the new forward model** — the shipped tables were fitted through
    the free-running one, and C6's aftersound breaking (4.9 → 21.2 dB) is the first place that bites.
+   **Attempted and largely refuted**, `DECISIONS.md` 242: at 28 of the library's 30 sampled keys the
+   recording's own companions come back *flat in `k`*, so the beat that is there is the wire's and
+   not the tuning's and there is no beat rate left to invert; where the rates do track `k` the
+   inversion runs and moves one key. The aftersound was tried as the objective in its place and does
+   not carry a fit — swept over the tuning it runs over ranges of 13 to 96 dB with no monotone shape
+   — so it is *reported* against the recording's own, key by key, which is this step's check
+   delivered as a measurement rather than as a fit.
 
 ### 7.6 Migration sketch — construction time only
 
@@ -1058,13 +1075,38 @@ Nothing below touches the audio thread's structure.
 | `voicing.unison_coupling` | **gone** — it is `radiated_share × σ_k` |
 | `voicing.bridge.radiated_share` | **the one number the construction turns on**; fit it against the *aftersound/prompt decay ratio*, which is directly measurable and is what pins it |
 | `notes.sigma0`, `sigma1`, `partial_sigma_scale`, `partial_gains` | **unchanged**, and now anchored by the per-partial T60 normalisation rather than by one global `vertical_decay_factor` |
-| — | **new, and the one worth building the estimator for**: the velocity dependence of the strike vector. Measure `wRMS/raw` and the beat depth at three velocities per key, which the forensics harness already does, and fit `s_j(v)` / `d_j(v)` to it. This is the only parameter family in the model that can move the number that is currently 0.010 against 0.787. |
+| — | **new, and the one worth building the estimator for**: the velocity dependence of the strike vector. Measure `wRMS/raw` and the beat depth at three velocities per key, which the forensics harness already does, and fit `s_j(v)` / `d_j(v)` to it. This is the only parameter family in the model that can move the number that is currently 0.010 against 0.787. — **built**, `estimate::motion::fit_strike_direction` + `SwingLine` (`DECISIONS.md` 241): the recording gives the sign, the engine gives the size, because a beat depth saturates and the column the field exists to move is a *spread*. `B2` reads **1.011** against the 0.25 gate. |
 
 **Acceptance tests for any of this**: the perception review's Column A (`A1` IF mismatch, gate < 2.0;
 `A2` placement, gate > 0.5) and Column B (`B1` beat-depth error, gate < 3 dB; `B2` velocity
 coherence, gate > 0.25× the reference). Current standings over 12 cells — engine 3.39 / 0.42 / 6.74 /
 0.006, eigenmode 4.37 / 0.43 / 5.91 / 0.010, reference 1.00 / 0.55 / 0 / 0.787. Not one of the four
 passes for either construction, and `B2` is the one that says why.
+
+**Built, and all four pass**, over Part II's own 16 cells (`tuner/src/realism.rs::motion_columns`,
+`renders/realism/REALISM.md`, `DECISIONS.md` 244, 249–253). `presets/salamander-c5.toml` at three
+stages:
+
+| | `A1` ≤ 2.0 | `A2` ≥ 0.5 | `B1` ≤ 3 dB | `B2` ≥ 0.25 |
+|:--|--:|--:|--:|--:|
+| the eigen construction alone | 4.34 | 1.31 | 5.64 | 0.127 |
+| + the motion mechanisms, level inverted open-loop from the recording | 2.93 | 1.32 | 3.88 | 1.011 |
+| **+ the level and rate solved on the render (`FalseBeatLoop`)** | **1.39** | **0.92** | **1.67** | **1.03** |
+| the recording against itself | 1.00 | 1.00 | 0.00 | 1.00 |
+
+Every one of the four is the two mechanisms; the gains move no column and the mechanisms move no
+energy metric. What the open-loop inversion could not do was *arrive*: the level is quoted against
+one block's coherent sum and the depth is measured on the whole partial, so A4 k=3 was asked for the
+companion its recorded 3.19 dB implies and rendered 19.58 (`DECISIONS.md` 250). Two things had to
+change with it — the schema's −20 dB level floor, which made the dead fundamentals unwritable by
+construction (item 249), and the objective the *rate* is solved against, because at A2 k=1 the
+recording's depth and its frequency deviation imply rates 4.8x apart and a two-component partial has
+only one (item 251).
+
+`B1`'s residue is now one thing and it is not this mechanism: **57 of 128 candidate partials get no
+row at all** because the coupled unison already beats deeper than the piano does, and the four of
+them in the cell set carry 1.14 of the column's 1.67 dB. That is `voicing.unison_layout.share`, one
+row above.
 
 
 ---
@@ -1077,3 +1119,8 @@ An independent verifier reproduced every load-bearing number in this file (jitte
 - **`radiated_share`:** the mu census and the 0.010 Hz derived polarization split in sections 3-4 use the shipped 0.5; section 7 resolves the field to 0.828, under which mu shrinks x0.60 (>= 35 of 73 keys below 1) and C6's quoted mu = 1.74 becomes ~1.05 — softening, not overturning, section 7.3's explanation of the C6 aftersound break.
 - **Prediction bookkeeping:** section 7's "three of six predictions won" is strictly: predictions 3 and 4 confirmed, 1 and 2 refuted, 5 and 6 not evaluated; the third win (C4 k=2) was not a numbered prediction.
 - **Orphan numbers:** section 4.2's "wRMS/raw up to 1.48" matches no published cell (max 1.15 at vel 90); section 3.3's 3.3x radiated-weight ratio is sensitive to unstated skew-phase assumptions (a zero-skew rederivation gives ~14x; the qualitative claim stands).
+
+A later review of the *implementation* added two corrections of its own, both recorded with their measurements in `DECISIONS.md` rather than edited in here:
+
+- **The equivalence contract** the shipped construction is held to is 0.5 cents of pitch, 5 % of whole-note T60 and 0.5 dB of strike level on `presets/default.toml`. Pitch and level meet it as stated (worst 0.073 cents at construction, +0.49 dB from A0 to C6, with C7 and C8 pinned at the +1.0 / +3.0 they cost). **T60 does not meet it cell by cell and cannot**, because the statistic is the last crossing of a beating envelope and jumps by a whole beat period: median 0.0 %, p90 8.0 %, worst 22.9 %, and 12 of 302 cells outside the bracket their own crossing ambiguity allows. `DECISIONS.md` 259 states the four assertions that replace the single loose bound, and measures the `decay_scale` change that would halve the residual and why it is not taken.
+- **`notes.duplex` is inert at every legal value**, which is why one workspace test is red rather than green: `DECISIONS.md` 260. Section 7.7's list of what the tuner would fit under the new construction does not name it, and it should — it is the next thing the estimator side is blocked on.

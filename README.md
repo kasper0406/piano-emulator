@@ -4,14 +4,14 @@ A physically modeled (simulated) grand piano — no samples. Every note is synth
 
 ## What is modeled
 
-- **Strings** — modal synthesis with stiffness inharmonicity (`f_k = k·f0·√(1+Bk²)`), frequency-dependent decay, and two polarizations per string for the characteristic fast-attack / slow-aftersound double decay.
+- **Strings** — modal synthesis with stiffness inharmonicity (`f_k = k·f0·√(1+Bk²)`) and frequency-dependent decay. A key's 1–3 strings and their two polarizations are not independent oscillators: they terminate on one bridge point, so each partial is a `2N × 2N` coupled system, solved at preset load into `2N` eigenmodes whose frequencies the bridge pulls together and whose decay rates it pushes apart. The mode that radiates most dies first, which is the fast-attack / slow-aftersound double decay — arriving out of one coupling constant rather than out of a hand-set balance.
 - **Unison groups** — 1–3 strings per key, unevenly detuned and unevenly struck, coupled through the bridge: real beating and uneven decay rather than envelope tricks.
 - **Hammer** — nonlinear felt (Hunt–Crossley hysteresis) integrated against an explicit agraffe reflection; contact time and brightness vary with key and velocity the way measured grands do.
 - **Pedals** — sustain as *continuous* damper lift (half-pedaling works), sostenuto with correct capture semantics, and una corda (softer felt, one string of the group unstruck). Keys from G6 up have no dampers, as on a real grand. A damper that is touching but not seated limits the string nonlinearly, so a half-pedal buzzes rather than merely decaying faster.
 - **The action** — the piano's own noises, at the levels they were measured at on a real instrument: the key-off thump on every release (scaled by how fast the key is let go), the damper lifting under a silently pressed key, and the pedal tray going down and coming up, scaled by how many dampers actually move. Panned per key, band-limited like the structure-borne path it travels, and deterministic — the same performance renders the same samples. The levels are ratios to a strike of the same key as a microphone hears it, so the strike they are quoted against is measured through the finished chain when the instrument is built: a preset that voices the piano more quietly takes its action down with it.
 - **Touch** — a key pressed too gently to reach escapement lifts its damper and strikes nothing, which is how a pianist prepares sympathetic resonance without the pedal; release velocity sets how fast the damper falls.
 - **Sympathetic resonance** — undamped strings pick up energy from everything else that rings; strike-and-release with the pedal down leaves the halo behind. A preset can give the bridge its measured admittance — a mean mobility curve with the board's discrete modes on it — and the halo is then coloured by the board the strings actually share instead of being spectrally flat, while a partial that sits on one of those modes loses energy into the board faster than the smooth fitted decay law says (`radiated_share`: T60 11.3 s against 14.6 s with a flat bridge). `render out.wav halo` is a phrase written to show it. Measured honestly the treble aftersound is still 21 dB short of the instrument it was fitted to — and that gap is on the board's late field rather than on this coupling, which has 0.1 dB of authority over it even at the largest value the stability contract will certify (`DECISIONS.md` 182–184).
-- **Duplex and aliquot segments** — the lengths of string beyond the bridge and the agraffe, which have no dampers at all. A preset can give a key up to six of them, at measured frequencies rather than harmonic ratios; they are driven by that key's own bridge force and by the rest of the instrument through the bridge, and neither the key, nor the sustain pedal, nor sostenuto, nor una corda can stop them. Play a treble note staccato and the shimmer stays behind — at the top of the schema's range. At the level the *measured* table currently ships them they are 148 dB below the note and nobody can hear them; the mechanism is right and the drive is wrong — a segment is normalised to answer its own frequency, and a struck string's bridge force has almost nothing there (`DECISIONS.md` 162, 163, 170, `PHYSICS.md` §3).
+- **Duplex and aliquot segments** — the lengths of string beyond the bridge and the agraffe, which have no dampers at all. A preset can give a key up to six of them, at measured frequencies rather than harmonic ratios; they are driven by that key's own bridge force and by the rest of the instrument through the bridge, and neither the key, nor the sustain pedal, nor sostenuto, nor una corda can stop them. Play a treble note staccato and the shimmer stays behind — at the top of the schema's range. At the level the *measured* table currently ships them they are 148 dB below the note and nobody can hear them; the mechanism is right and the drive is wrong — a segment is normalised to answer a **steady** drive at its own frequency, receives only an **impulsive** one, and the factor between those is `1 − r`, a part in ten thousand. Measured at the schema's own ceiling: both segments at +6 dB leave a halo 81.7 dB under their strike, which is under the level the modal culling zeroes, so *no* legal `gain_db` makes one audible. Fixing it re-decides what the field means and is a milestone of its own (`DECISIONS.md` 162, 163, 170, 260, `PHYSICS.md` §3).
 - **Soundboard** — body resonances plus a short diffuse-field reverberator, per-key stereo placement, and a master chain with a safety limiter. The two polarizations of a key can be panned apart, so a note's stereo image *moves* as the fast plane dies; a preset may set that spread per key, because one number for the whole compass overshoots the treble by three decibels and undershoots the bass by five.
 
 Full 88-key polyphony with the sustain pedal down runs at roughly a third of one performance core on an M4 Pro (41.6 % on the measured preset, whose duplex segments are never damped). The engine's offline renderer and the live audio path are the same code, so everything measurable in a rendered WAV is what you hear live.
@@ -34,6 +34,15 @@ the offline analysis and parameter-estimation crate `TUNING.md` describes, and
 the root runs both crates, including the self-calibration gate, which puts the
 tuner's whole estimation pipeline over notes the engine rendered from a known
 preset and checks that the parameters come back.
+
+**One of those gates is red, on purpose and by name.**
+`a_known_duplex_comes_back_from_the_engines_own_render_of_it` fails and has
+since the unison became a coupled eigenproblem: 487 green, one red. It is not a
+tolerance and it is not the estimator — with the modal culling switched off the
+injected segment comes back at −0.05 cents having rung 1.38 s of the 1.4 s it
+was given — it is the duplex bullet below, and the gate is left failing rather
+than skipped because that is the only honest way to carry it
+(`DECISIONS.md` 260).
 
 The default (dev) profile is built with `opt-level = 3` — the DSP is unusable unoptimized — so plain `cargo run`/`cargo test` are real-time capable while keeping fast incremental builds. `--release` additionally enables thin LTO and disables debug assertions; it is the profile performance is measured on, and the performance acceptance test only runs there. The binary opens the default output device and drops you into a REPL:
 
@@ -81,6 +90,9 @@ cargo run --release -p piano-tuner -- survey \
 cargo run --release -p piano-tuner --example fit_sympathetic -- \
     data/salamander/SalamanderGrandPiano-V3+20200602.sfz \
     --preset presets/salamander-c5.toml --out presets/salamander-c5.toml
+cargo run --release -p piano-tuner --example fit_motion -- \
+    data/salamander/SalamanderGrandPiano-V3+20200602.sfz \
+    --preset presets/salamander-c5.toml --out presets/salamander-c5.toml
 cargo run --release -p piano-tuner --example salamander_ab   # A/B renders into renders/
 cargo run --release -p piano-tuner --example verify_milestone_b -- [old-preset.toml]
 ```
@@ -90,6 +102,13 @@ with the same code the recordings are measured with — the spectrum census, the
 halo isolated by subtraction, render health, neutrality, cost, and what the
 between-partial statistic is actually made of. Given the preset as it stood
 before a change it prints both columns.
+
+`fit_motion` is stage 2's *motion* half: the within-string false beat (`notes.false_beat`) and the
+strike vector's velocity law (`[voicing.strike_direction]`) inverted from the recordings' own beat
+depth and rate, `notes.detune_cents` re-fitted where the coupled unison still lets a beat identify
+it, and `notes.partial_gains` as the full measured ratio of the recording's time-zero spectrum to
+the engine's own render of the same note. Unlike `fit_partials` it is re-entrant: every fit clears
+the field it writes from the probe before rendering it. `DECISIONS.md` 239-248.
 
 `survey` is stage 1: everything an isolated recorded note can identify.
 `fit_sympathetic` is stage 2, which is render-and-measure — it fits the duplex
@@ -108,6 +127,6 @@ measure and print without writing anything.
 - `SPEC.md` — the model specification and acceptance tests.
 - `DECISIONS.md` — the running log of every design decision and deviation.
 - `TUNING.md` — the plan for estimating parameters automatically from recordings of real pianos (in progress; stage 1, its self-calibration gate and the first measured preset are built, in `tuner/`).
-- `renders/realism/REALISM.md` — the standing realism scoreboard: six fixed phrases rendered from one event list through both the engine and the Salamander recordings, with `TUNING.md`'s stage-2 losses measured over each pair *and* the same measurement between two recordings of the same piano, which is the noise floor that makes the first number readable. Written by `cargo run --release -p piano-tuner --example realism_bench` (needs `data/fetch_salamander.sh`); the metrics themselves live in `tuner/src/realism.rs` so the scoreboard and the loss an optimizer minimises are one piece of code.
+- `renders/realism/REALISM.md` — the standing realism scoreboard: six fixed phrases rendered from one event list through both the engine and the Salamander recordings, with `TUNING.md`'s stage-2 losses measured over each pair *and* the same measurement between two recordings of the same piano, which is the noise floor that makes the first number readable. It also carries **Columns A and B** (`FUNDAMENTALS.md` §II.3): four per-cell measurements of how a single partial *moves* — instantaneous-frequency mismatch and placement, beat-depth error and velocity coherence — over sixteen key × partial cells at three velocities, each with a gate, because every other column on the board is a functional of energy and the artefact those were built to catch is not. All four gates pass on the measured preset (`DECISIONS.md` 253); `cargo run --release -p piano-tuner --example motion_score` is the same four numbers with every cell printed, in seven seconds, for iterating a fit against them. Written by `cargo run --release -p piano-tuner --example realism_bench` (needs `data/fetch_salamander.sh`); the metrics themselves live in `tuner/src/realism.rs` so the scoreboard and the loss an optimizer minimises are one piece of code.
 - `presets/default.toml` — the hand-tuned v1 instrument, written out in full.
 - `presets/salamander-c5.toml` — the same instrument with everything stage 1 could measure off a real Yamaha C5 written into it.

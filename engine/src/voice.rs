@@ -8,7 +8,7 @@
 
 use crate::calibrate::MechanismCalibration;
 use crate::duplex::DuplexBank;
-use crate::hammer::{Hammer, MAX_SKEW_SAMPLES};
+use crate::hammer::Hammer;
 use crate::noise::{self, Burst, EventModel, NoiseShapes};
 use crate::pedal::PedalState;
 use crate::preset::Preset;
@@ -284,6 +284,12 @@ impl Voice {
     pub fn note_on(&mut self, vel: u8, pedals: &PedalState, frame: u64) {
         self.press(pedals);
         self.hammer.set_una_corda(pedals.una_corda());
+        // Both halves of the strike vector's direction, in one pass over the
+        // key's modes: which strings the hammer reaches, and how hard it is
+        // travelling. The second is the only way velocity enters the linear
+        // string model at all (`FUNDAMENTALS.md` §7.5 step 3), and a preset
+        // without a `[voicing.strike_direction]` ignores it.
+        self.string.set_strike(pedals.una_corda(), vel);
         self.hammer.strike_midi(vel);
         // A re-strike into a burst that is still ringing keeps its filter state
         // and restarts the envelope — the same "louder continuation" a trill
@@ -405,22 +411,16 @@ impl Voice {
                 self.string.set_damper(self.damper_current);
             }
 
-            // Under una corda the hammer misses one string of the group; the
-            // missed string keeps ringing from whatever is already in its banks.
-            let struck = if self.hammer.una_corda() {
-                (self.string.string_count() - 1).max(1)
-            } else {
-                self.string.string_count()
-            };
             if self.hammer.is_active() {
-                for s in 0..struck {
-                    // Small timing skew across the group: the hammer is not
-                    // perfectly square to the strings.
-                    let skew = s * MAX_SKEW_SAMPLES / self.string.string_count().max(1);
-                    let share = self.string.strike_share(s);
-                    self.hammer
-                        .add_pulse(self.string.excitation_mut(s), skew, share);
-                }
+                // One common, unskewed, unit-share pulse. The per-string shares
+                // and the small timing skew — the hammer is not perfectly square
+                // to the strings — are inside the modes' complex gains, which is
+                // the whole point of the eigen construction: `N` input buffers
+                // collapse into `2N` complex scalars. Under una corda the hammer
+                // misses one string of the group, which is the strike vector's
+                // *direction* changing, and `PianoString::set_una_corda` swaps
+                // the gain table the note-on selected.
+                self.hammer.add_pulse(self.string.excitation_mut(), 0, 1.0);
                 self.hammer.advance(BLOCK);
             }
         }
@@ -950,15 +950,24 @@ mod tests {
 
         let (mut a, mut b) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
         let mut peak = 0.0f32;
+        let mut worst = 0.0f32;
         for _ in 0..200 {
             assert!(plain.process(&mut a, &bus, &mut board()));
             assert!(split.process(&mut b, &bus, &mut board()));
             for i in 0..BLOCK {
                 peak = peak.max(a[i].abs());
-                assert!((a[i] - b[i]).abs() <= 1e-6 * peak.max(1e-12));
+                worst = worst.max((a[i] - b[i]).abs());
             }
         }
         assert!(peak > 0.0);
+        // The two paths add the same numbers in a different order, so this is a
+        // rounding bound and not a bit-exactness one — and it is stated against
+        // the note's own peak rather than against a running maximum, because the
+        // group's modes cancel into small samples early in the attack.
+        assert!(
+            worst <= 1e-6 * peak,
+            "the spread voice's mono sum differs by {worst:e} on a peak of {peak:e}"
+        );
     }
 
     /// A voice with nothing to render must write nothing at all — the noise

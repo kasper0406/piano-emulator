@@ -65,7 +65,7 @@ use crate::resonance::{BridgeFilter, MAX_BRIDGE_LOOP_GAIN, MAX_COUPLING};
 use crate::soundboard::MAX_PAN_SPREAD;
 use crate::string::{
     PartialShaping, StringParams, MAX_COMB_FLOOR, MAX_CONTACT_WIDTH, MAX_PARTIAL_GAIN,
-    MAX_PARTIAL_SIGMA_SCALE, MAX_SIGMA_SCALE, MAX_UNISON_COUPLING, MIN_PARTIAL_GAIN,
+    MAX_PARTIAL_SIGMA_SCALE, MAX_SIGMA_SCALE, MIN_MODE_SIGMA, MIN_PARTIAL_GAIN,
     MIN_PARTIAL_SIGMA_SCALE, MIN_SIGMA_SCALE,
 };
 use crate::types::{
@@ -94,6 +94,16 @@ pub struct Preset {
     pub noise: NoiseTables,
 }
 
+/// Largest value the inert `voicing.unison_coupling` may still carry.
+///
+/// It used to be a loop-gain ceiling: the coupling passed a fraction of the
+/// neighbours' bridge force into a string one block later, so a unison group was
+/// a feedback loop and a value near 0.1 could sustain itself. The loop is gone —
+/// the coupling is a construction-time property of the partial and lives in the
+/// eigenproblem — so this is now only a schema bound, kept at the number every
+/// preset already written was validated against so that all of them still load.
+pub const LEGACY_MAX_UNISON_COUPLING: f32 = 0.05;
+
 /// Global string and coupling constants: the parts of the voicing that are not
 /// per note.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -110,13 +120,36 @@ pub struct Voicing {
     /// which is what gives a piano note its double decay.
     #[serde(serialize_with = "short::scalar")]
     pub horizontal_decay_ratio: f32,
-    /// Frequency offset of the horizontal polarization, one per unison string.
-    /// The two planes see slightly different transverse stiffness, and no two
-    /// strings of a group see the same difference.
+    /// **Inert.** Frequency offset of the horizontal polarization, one per
+    /// unison string.
+    ///
+    /// A fixed number of *hertz*, so the three values were beat rates of every
+    /// partial of every key at once — an instrument-wide, note-independent,
+    /// velocity-independent pulse at 0.270 / 0.350 / 0.520 Hz, which
+    /// `renders/jitter/JITTER.md` measured in every row of every table it
+    /// printed and `FUNDAMENTALS.md` §2.2 showed to be 35x the physically
+    /// derivable split and the one shape with no mechanism behind it. The
+    /// polarization split is now the bridge's reactive anisotropy times the
+    /// partial's own frequency (`engine::string`), which is a few hundredths of
+    /// a hertz and different in every partial of every key.
+    ///
+    /// Still parsed, still validated, never read. [`Preset::inert_fields`]
+    /// names it on load.
     #[serde(serialize_with = "short::list")]
     pub horizontal_offset_hz: Vec<f32>,
-    /// Bridge coupling within a unison group, as a fraction of the string's
-    /// wave impedance.
+    /// **Inert.** Bridge coupling within a unison group, as a fraction of the
+    /// string's wave impedance.
+    ///
+    /// It was applied one `BLOCK` late through the excitation, which is both
+    /// ~25x too weak and phase-scrambled — 2.667 ms is 251 degrees at C4's
+    /// fundamental and 11.4 periods at C6's fourth partial, so the sign of both
+    /// the frequency pull and the damping split was randomised per partial. The
+    /// forensics measured the whole of it end to end at **0.07 cents**. The
+    /// coupling is not a free parameter at all: it is `radiated_share * sigma_k`,
+    /// the same coefficient as the radiation damping the preset has already
+    /// fitted (`FUNDAMENTALS.md` §1.1), and it now lives in the eigenproblem.
+    ///
+    /// Still parsed, still validated, never read.
     #[serde(serialize_with = "short::scalar")]
     pub unison_coupling: f32,
     /// Fraction of the sympathetic-resonance bus injected into each undamped
@@ -147,16 +180,19 @@ pub struct Voicing {
     pub bridge: Option<BridgeVoicing>,
     /// One entry per unison group size, 1 to [`MAX_UNISON`] strings.
     pub unison_layout: Vec<UnisonLayout>,
-    /// Decay-rate multipliers for the individual strings of a unison, one row
-    /// per group size exactly like [`Voicing::unison_layout`].
+    /// **Inert.** Decay-rate multipliers for the individual strings of a
+    /// unison, one row per group size exactly like [`Voicing::unison_layout`].
     ///
-    /// A group whose strings are mistuned but share one damping law cannot move
-    /// its own pitch as it decays; a real one does, by up to 32 cents over the
-    /// fundamental's first 20 dB, because a mistuned string that outlives its
-    /// neighbours takes the composite partial's pitch with it
-    /// (`TUNING_REPORT.md` §6). All ones — the default — is the shared damping
-    /// law, and the note's whole-note T60 is then exactly the one
-    /// `notes.sigma0` asks for.
+    /// It existed to write in by hand the one thing a group of *independent*
+    /// oscillators cannot have: strings of one unison decaying at different
+    /// rates, which is what moves a composite partial's pitch as the survivor
+    /// takes over (`TUNING_REPORT.md` §6). Under the coupled construction that
+    /// split is an **output** — the bridge pushes the group's decay rates apart
+    /// by construction, by a factor of 4.6 at C4's fundamental where the
+    /// free-running banks were identical to the bit — so writing it in as well
+    /// would be counting the same physics twice.
+    ///
+    /// Still parsed, still validated, never read.
     #[serde(
         default = "unity_sigma_scale",
         skip_serializing_if = "is_unity_sigma_scale"
@@ -166,7 +202,123 @@ pub struct Voicing {
     /// log frequency. Dampers hold low partials tightly and the top ones barely
     /// at all, which is the brief metallic zing on release.
     pub damper_weight: Vec<DamperAnchor>,
+    /// How the hammer's blow changes *direction* with velocity.
+    ///
+    /// Absent — the default — is the fitted, velocity-independent strike vector,
+    /// bit for bit. See [`StrikeDirection`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike_direction: Option<StrikeDirection>,
 }
+
+/// The one place velocity can enter a linear model: the *direction* of the
+/// hammer's excitation vector.
+///
+/// `FUNDAMENTALS.md` §7.3 refuted the hope that the coupled construction would
+/// bring velocity dependence with it, and the refutation is structural, not a
+/// tolerance: the strike vector `u = s_j g_k` scales **uniformly** with
+/// velocity, so `c = V^-1 u` scales uniformly too and every ratio in the mode
+/// mixture is a constant. The eigenmodes are velocity-invariant by eigenvalue
+/// and the mixture is velocity-invariant by linearity. Measured, that is the
+/// engine's 0.006 cents and 0.054 dB of beat structure across velocities 40 /
+/// 90 / 120 against the recording's **0.787 cents and 1.90 dB**
+/// (`renders/jitter/EIGENMODE.md`; `FUNDAMENTALS.md` §7.4, third fingerprint).
+///
+/// What *can* move with velocity is where the blow points. A hammer that
+/// arrives faster arrives with its felt more compressed and its face at a
+/// slightly different angle, so two ratios inside `u` move while its length
+/// goes on scaling with the blow:
+///
+/// * the **vertical/horizontal** ratio — how much of the force goes into the
+///   plane perpendicular to the soundboard and how much into the plane parallel
+///   to it ([`StrikeDirection::vh_db_at_pp`], [`StrikeDirection::vh_db_at_ff`]);
+/// * the **per-string share** asymmetry — the hammer is not square to the
+///   strings, and how far out of square it is depends on how hard it is
+///   travelling ([`StrikeDirection::share_tilt`]).
+///
+/// Both are ratios *inside* `u`, so neither changes the length of the strike
+/// vector and neither is a second velocity law on the note's loudness: the
+/// share tilt is applied about the group's mean, which stays exactly 1, and the
+/// v/h ratio moves a component that starts 27.6 dB down. What they change is
+/// the **mixture** `V^-1 u` — the one thing §7.3 proved a velocity-independent
+/// direction cannot change.
+///
+/// All three fields zero is the fitted, velocity-independent strike vector at
+/// every velocity, bit for bit; that is the neutrality contract, and it is what
+/// `presets/default.toml` and `presets/salamander-c5.toml` both get by leaving
+/// the section out.
+///
+/// Nothing here can be fitted yet — `FUNDAMENTALS.md` §7.7's last row is the
+/// estimator that would do it, and it is the next milestone.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrikeDirection {
+    /// Offset on [`Voicing::horizontal_gain_db`] at MIDI velocity 1, in dB.
+    ///
+    /// The v/h ratio is `horizontal_gain_db + lerp(pp, ff)` and the
+    /// interpolation is linear in `(vel - 1) / 126`, so this end is reached
+    /// exactly at the softest blow the protocol has.
+    #[serde(serialize_with = "short::scalar")]
+    pub vh_db_at_pp: f32,
+    /// The same offset at MIDI velocity 127.
+    ///
+    /// A *positive* difference `ff - pp` is the physical direction: a faster
+    /// hammer with more compressed felt puts more of the blow out of the
+    /// vertical plane, which is why a fortissimo note has more aftersound
+    /// relative to its prompt than a pianissimo one does.
+    #[serde(serialize_with = "short::scalar")]
+    pub vh_db_at_ff: f32,
+    /// Full pianissimo-to-fortissimo swing of the group's share asymmetry, as a
+    /// fraction of that asymmetry.
+    ///
+    /// `voicing.unison_layout.share` is a row averaging 1; this tilts how far
+    /// each string sits from that mean, **about the mean and about
+    /// mid-velocity**:
+    ///
+    /// ```text
+    ///     s_j(v) = 1 + (1 + share_tilt (2 t - 1)) (s_j - 1),   t = (vel - 1)/126
+    /// ```
+    ///
+    /// so the row still averages exactly 1 at every velocity (no loudness law
+    /// smuggled in), the fitted shares are the shares of a mezzo blow, and a
+    /// positive value is a hammer that meets the group *more* out of square the
+    /// harder it is thrown. Zero leaves `unison_layout.share` alone at every
+    /// velocity, to the last bit.
+    #[serde(serialize_with = "short::scalar")]
+    pub share_tilt: f32,
+}
+
+/// Largest v/h offset a [`StrikeDirection`] may declare at either end, in dB.
+///
+/// The quantity it offsets is `horizontal_gain_db`, fitted at −27.6 dB, and the
+/// measurements that motivate a velocity dependence at all put the recording's
+/// beat-depth swing at 1.90 dB over an 80-point velocity span
+/// (`FUNDAMENTALS.md` §7.4). Twelve decibels either way is six times the swing
+/// that has to be explained and still leaves the horizontal plane a leak rather
+/// than a second note; it is a bound on a knob nobody has fitted yet, not a
+/// measurement.
+pub const MAX_STRIKE_DIRECTION_DB: f32 = 12.0;
+/// Largest share tilt, as a fraction of the group's fitted share asymmetry.
+///
+/// The shares are within a few percent of each other, so a fifth of that
+/// asymmetry is already a hammer whose squareness visibly depends on how hard
+/// it is thrown, and it keeps every share comfortably positive: a hammer cannot
+/// pull.
+pub const MAX_SHARE_TILT: f32 = 0.2;
+
+/// Widest unison spread a key may declare, in cents (`notes.detune_cents`).
+///
+/// A unison is a group of strings a tuner has failed to make identical, and the
+/// spread that survives that failure is single-figure cents: the shipped tables
+/// run 0.44 to 3.89 and the fitted one's widest key is under four. A whole
+/// semitone is four hundred times the beat rate the mechanism exists to
+/// produce and is no longer one note — but the bound is here for an arithmetic
+/// reason as well as a musical one. The eigenproblem's diagonal is
+/// `2 pi f_k · detune_j`, so the spread multiplies **the top of the series**,
+/// and the band between [`MAX_PARTIAL_RATIO`](crate::types::MAX_PARTIAL_RATIO)
+/// and Nyquist is the only headroom there is: at this ceiling the widest string
+/// of a three-string group sits 0.29 % sharp, which moves a 21.6 kHz partial to
+/// 22.2 kHz and still leaves 1.8 kHz of it.
+pub const MAX_DETUNE_CENTS: f32 = 100.0;
 
 /// How the strings of one size of unison group are laid out.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -371,6 +523,98 @@ pub const MAX_DUPLEX_GAIN_DB: f32 = 6.0;
 /// touches it, and `PHYSICS.md` §3 asks for 0.5–2 s for exactly that reason.
 pub const MIN_DUPLEX_T60_S: f32 = 0.05;
 pub const MAX_DUPLEX_T60_S: f32 = 3.0;
+
+/// One false beat: a within-string split on one partial of one key.
+///
+/// # What a false beat is, and why it is not any of the three things it looks
+/// like
+///
+/// `renders/jitter/EIGENMODE.md` inverted the recording's measured beat depth
+/// for the two-component pair that would produce it, partial by partial
+/// (`D = 20 log10((1+r)/(1-r))`), and got the same answer at C4 and at A2: each
+/// mid and low partial carries **a second component 4–7 dB down, 0.7–1.5 Hz
+/// away**, at a spacing that does **not** scale with the partial number
+/// (C4: 1.11, 1.48, 0.74, 0.74 Hz on k = 1..4). `FUNDAMENTALS.md` §7.4 rules
+/// out every mechanism the model already has:
+///
+/// * not the **unison** — a mistuning is a frequency *ratio*, so its beat rate
+///   must be proportional to `k`, and C4's whole fitted detune is 0.149 Hz at
+///   k = 1, seven to twenty times too narrow;
+/// * not the **bridge's polarization split** — §2.2 derives 0.010 Hz from
+///   Weinreich's measured admittance, a hundred times smaller, and it too grows
+///   with the partial;
+/// * not `voicing.horizontal_offset_hz` — the right order of magnitude in rate,
+///   but 22 dB out in level (−27.6 dB against the implied −6) and the *same*
+///   number on every partial of every key, which is the metronome the coupled
+///   construction deleted.
+///
+/// What is left is Capleton's own subject ("False beats in coupled piano string
+/// unisons", JASA 115(2), 2004): the two transverse planes of **one wire** at
+/// genuinely different frequencies, from the wire's own geometry — non-uniform
+/// diameter, an out-of-round or twisted cross-section, an asymmetric bridge-pin
+/// termination. A property of one string and one partial, so it is uncorrelated
+/// across `k` and across notes, which is exactly what the measurement says and
+/// exactly what no note-independent constant can imitate.
+///
+/// # How it enters
+///
+/// It is an **input to the eigensolve**, not a detune applied to its output: the
+/// offset goes on the diagonal of `Omega_k` for the split string's horizontal
+/// entry, so the companion comes back as one of the group's own `2N`
+/// eigenvalues, with the decay rate the coupled system gives it
+/// (`FUNDAMENTALS.md` §7.5 step 2, `omega_(j,h) = omega_(j,v)(1 + delta_j(k))`).
+/// The mode count does not change: the false beat **moves and lifts** the
+/// horizontal mode that was already there — the aftersound — rather than adding
+/// anything to the bank.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FalseBeat {
+    /// Which partial of this key is split, 1-based. At most one entry per
+    /// partial: two splits of one wire's one partial are one split.
+    pub k: u16,
+    /// The split, in **hertz** — and hertz is right here where it was wrong for
+    /// `horizontal_offset_hz`, because a wire's diameter irregularity is a
+    /// property of that partial's own mode shape and not a ratio the whole
+    /// series shares. That is the falsifiable half of the claim: fitted per
+    /// string and per partial, `delta` must come back *uncorrelated* across `k`,
+    /// or it is not a false beat.
+    #[serde(serialize_with = "short::scalar")]
+    pub hz: f32,
+    /// How loud the companion stands, in dB relative to the loudest mode of the
+    /// same partial — the quantity the measured beat depth inverts to, and
+    /// therefore the quantity a fit can write. Solved for exactly by
+    /// [`crate::string`]: the extra excitation of the split plane is chosen so
+    /// that the companion eigenmode's radiated gain lands here.
+    #[serde(serialize_with = "short::scalar")]
+    pub db: f32,
+}
+
+/// Bounds on a `notes.false_beat` row.
+///
+/// At most eight splits per key, because the mechanism is a defect of one wire
+/// and a note whose every partial is defective is a broken string, not a voiced
+/// one. The rate band is the measurement's: the recording's implied companions
+/// sit at 0.74–1.48 Hz at C4 and A2 and 2.22–5.19 Hz at C6, and 0.2–3.0 Hz
+/// covers the register the mechanism was measured in with room either side —
+/// under 0.2 Hz the split is a slow tilt of the decay rather than a beat, and
+/// over 3.0 Hz it has left the band the ear hears as one moving partial. The
+/// level band runs up to two planes of equal strength and may not go above,
+/// because a companion louder than the mode it beats against is a second note.
+///
+/// The floor was −20 dB (1.6 dB of beat depth) while the level was inverted
+/// open-loop from the recording's own depth, and it cut the mechanism off
+/// exactly where the fault is loudest: the recording's bass and lower-midrange
+/// *fundamentals* move 1.1–1.4 cents on beat depths of 0.8–1.4 dB, i.e.
+/// companions at −27 dB, so the two cells `FUNDAMENTALS.md` §II.5 names first —
+/// A2 k=1 and k=2, 29x and 22x too still — were unwritable by construction.
+/// The floor is now −40 dB (0.17 dB of depth), which is under the level at
+/// which a companion still moves a resolved partial's *frequency* by a cent,
+/// which is the quantity Column A measures (`DECISIONS.md` 249).
+pub const MAX_FALSE_BEATS_PER_KEY: usize = 8;
+pub const MIN_FALSE_BEAT_HZ: f32 = 0.2;
+pub const MAX_FALSE_BEAT_HZ: f32 = 3.0;
+pub const MIN_FALSE_BEAT_DB: f32 = -40.0;
+pub const MAX_FALSE_BEAT_DB: f32 = 0.0;
 
 /// One point of the damper's frequency response.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -680,13 +924,45 @@ pub struct NoteTables {
     /// Per-partial linear gain multipliers on the excitation comb, one row per
     /// key, 1-based in the partial index.
     ///
-    /// The measured excitation spectrum is 5–10 dB rougher than any smooth
-    /// envelope times `sin(k pi x)` (engine control 2–5 dB) and the roughness is
-    /// **not** shared between notes at the same frequency, so it cannot be a
-    /// bridge curve and has to be per note, per partial (`TUNING_REPORT.md` §3,
-    /// backlog item 6). It is a property of the excitation and not of the blow:
-    /// velocity-independent by design, so a fit cannot smuggle a second velocity
-    /// law in here.
+    /// # What the number means
+    ///
+    /// **The full measured ratio**: partial `k`'s amplitude at the strike in the
+    /// recording, over what the engine's own excitation model predicts for it —
+    /// `a_k(0) measured / a_k(0) rendered`, at one key and one velocity, through
+    /// one tracker. Not the *roughness residual* it used to be, and the
+    /// difference is the whole of `DECISIONS.md` 231.
+    ///
+    /// The old semantics fitted a smooth polynomial in `ln k` to each layer's
+    /// spectrum and wrote only what was left over, on the reasoning that
+    /// everything smooth in `ln k` is the hammer, the bridge and the microphone
+    /// and that the engine has models for all three. Half right: the envelope
+    /// really does contain the part of the blow that changes with velocity,
+    /// which a velocity-independent table must not carry — but it *also*
+    /// contains the engine's own error in that envelope, which does **not**
+    /// change with velocity and which nothing else in the schema can hold. That
+    /// error has been unfitted since the felt fits landed in Phase E, and it is
+    /// audible: measured at C4 against the shipped preset it is
+    /// **−6.53 / −2.55 / −0.91 / −0.05 dB** on k = 1..4, a 7.5 dB tilt, which is
+    /// why the engine leads with k = 1 where the recording at velocity 90 leads
+    /// with k = 2 — a note the ear places an octave differently at the attack.
+    ///
+    /// The tilt is still measured **on the engine** and not on the recording
+    /// alone (`estimate::shaping::envelope_tilt` fits the same polynomial twice,
+    /// once to each, and writes the difference), which is what divides the
+    /// tracker's bias, the window and the microphone's comb out of the answer
+    /// instead of modelling them; and the difference is offset so the table's
+    /// geometric mean is 1, which is what stops it from becoming a second level
+    /// control. It is a property of the excitation and not of the blow:
+    /// velocity-independent by design, so a fit cannot smuggle a velocity law in
+    /// here — that is [`StrikeDirection`]'s job, and it is a direction, not a
+    /// gain. The roughness the field used to carry is still in it; it is now
+    /// carried *with* the envelope error rather than instead of it.
+    ///
+    /// The roughness itself is unchanged and still needs a per-note, per-partial
+    /// table: the measured excitation spectrum is 5–10 dB rougher than any
+    /// smooth envelope times `sin(k pi x)` (engine control 2–5 dB) and the
+    /// roughness is **not** shared between notes at the same frequency, so it
+    /// cannot be a bridge curve (`TUNING_REPORT.md` §3, backlog item 6).
     ///
     /// Absent — the default — is one everywhere. A row may be shorter than that
     /// key's partial count (the estimator tracks as far as it can) or empty, and
@@ -761,6 +1037,16 @@ pub struct NoteTables {
     /// starts at D4.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub duplex: Vec<Vec<DuplexMode>>,
+    /// Within-string splits: which partials of which key beat against
+    /// themselves, and how hard ([`FalseBeat`]).
+    ///
+    /// Empty — the default, and absent from the file — is the instrument with no
+    /// false beats at all, which is the engine as it was and the only thing the
+    /// equivalence contract of `DECISIONS.md` 229 pins. A table that is present
+    /// has one row per key, and a row may be empty: a well-drawn wire in good
+    /// condition has no measurable split, and most of them are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub false_beat: Vec<Vec<FalseBeat>>,
     /// Per-key override of [`Voicing::polarization_pan_spread`].
     ///
     /// The global scalar is one number for the whole compass, and the compass
@@ -782,13 +1068,53 @@ impl Preset {
     /// Reads and validates a preset file.
     pub fn load(path: &Path) -> Result<Preset, PresetError> {
         let text = std::fs::read_to_string(path).map_err(PresetError::Io)?;
-        Preset::from_toml(&text)
+        let preset = Preset::from_toml(&text)?;
+        // On the *file* path only, and deliberately not in `from_toml`: a probe
+        // preset built in memory by the tuner is not a user asking for a field,
+        // and a warning printed once per render is not a warning.
+        for field in preset.inert_fields() {
+            eprintln!(
+                "warning: {}: `{field}` is accepted but no longer read - the \
+                 coupled-eigenmode unison derives what it used to assert \
+                 (`FUNDAMENTALS.md` §5, `DECISIONS.md` 225)",
+                path.display()
+            );
+        }
+        Ok(preset)
     }
 
     pub fn from_toml(text: &str) -> Result<Preset, PresetError> {
         let preset: Preset = toml::from_str(text).map_err(PresetError::Parse)?;
         preset.validate()?;
         Ok(preset)
+    }
+
+    /// The fields this preset sets that the string construction no longer
+    /// reads, by name — empty for a preset that leaves all three at the value
+    /// the free-running unison called neutral.
+    ///
+    /// They are kept in the schema rather than removed so that every preset
+    /// already written still loads, and so that the tuner's copy of the schema
+    /// (`tuner/src/preset.rs`, deliberately independent) does not have to move
+    /// in the same commit. What they used to do is now derived:
+    /// `unison_coupling` is `radiated_share * sigma_k` (it is the *same
+    /// coefficient* as the radiation damping, `FUNDAMENTALS.md` §1.1),
+    /// `horizontal_offset_hz` is the bridge's reactive anisotropy times the
+    /// partial's own frequency, and `unison_sigma_scale` is the eigenproblem's
+    /// own output. See `DECISIONS.md` 225.
+    pub fn inert_fields(&self) -> Vec<&'static str> {
+        let v = &self.voicing;
+        let mut inert = Vec::new();
+        if v.unison_coupling != 0.0 {
+            inert.push("voicing.unison_coupling");
+        }
+        if v.horizontal_offset_hz.iter().any(|&o| o != 0.0) {
+            inert.push("voicing.horizontal_offset_hz");
+        }
+        if !is_unity_sigma_scale(&v.unison_sigma_scale) {
+            inert.push("voicing.unison_sigma_scale");
+        }
+        inert
     }
 
     pub fn to_toml(&self) -> String {
@@ -847,6 +1173,31 @@ impl Preset {
                 "notes.strike_position[{i}] is {}, expected 0 < x < 1",
                 n.strike_position[i]
             )));
+        }
+        // The two tables the loop above could only check the sign of, and both
+        // are bounds the coupled construction needs rather than tidiness. The
+        // spread multiplies every partial's frequency, so it spends the band
+        // headroom above the partial cap; and `sigma0` is the floor of the whole
+        // loss budget — `sigma_int = (1 - share) · scale · sigma_k` — which is
+        // what `string::stable_sigma` asserts the sign of, on the `f64` the
+        // Durand-Kerner solve returns. A strictly positive denormal passes every
+        // check in the loop above and comes back out of the solve *negative*,
+        // at the size of the solver's own rounding, because there is no signal
+        // left in it: at `1e-44` the fitted T60 is `7e44` seconds. The floor is
+        // [`MIN_MODE_SIGMA`], which is the rate under which the resonator's own
+        // pole radius rounds to one in `f32` — a note that decays slower than
+        // that is not a note this engine can hold, and 0.02 is still a T60 of
+        // 345 s.
+        for (i, &c) in n.detune_cents.iter().enumerate() {
+            within(&format!("notes.detune_cents[{i}]"), c, 0.0, MAX_DETUNE_CENTS)?;
+        }
+        for (i, &s) in n.sigma0.iter().enumerate() {
+            if s < MIN_MODE_SIGMA {
+                return Err(PresetError::invalid(format!(
+                    "notes.sigma0[{i}] is {s}, expected at least {MIN_MODE_SIGMA} \
+                     (a T60 of 345 s)"
+                )));
+            }
         }
         // The fourth-order inharmonicity is the one signed table: the sign is
         // the finding (`TUNING_REPORT.md` §1), so only finiteness can be
@@ -928,7 +1279,21 @@ impl Preset {
                 }
                 // The legitimate end of the series: past the cap the banks are
                 // never built, so nothing beyond it needs to be well-formed.
+                // Except at `k = 1`, which is not an end at all:
+                // `StringParams::partial_count` floors its `take_while` at one,
+                // so a key whose *fundamental* is already past the cap still
+                // gets a bank — of one partial, out of the band the resonator is
+                // defined in. The floor is right (a key with no partials is not
+                // a key); what is wrong is reaching it, so the tuning is refused
+                // here instead.
                 if f >= limit {
+                    if k == 1 {
+                        return Err(PresetError::invalid(format!(
+                            "notes.f0_hz[{i}] = {} puts the key's own fundamental at {f} Hz, \
+                             at or past the {limit} Hz cap the partial series stops at",
+                            p.f0
+                        )));
+                    }
                     break;
                 }
                 previous = f;
@@ -938,6 +1303,7 @@ impl Preset {
         // are measured against are counts of a bank the engine will really
         // build.
         self.validate_partial_tables()?;
+        self.validate_false_beats()?;
 
         let v = &self.voicing;
         // `excitation_scale` divides the unison bridge coupling, and the
@@ -949,7 +1315,12 @@ impl Preset {
         // its excitation one block later, through its unison siblings and
         // through the resonance bus, and a loop that reaches unity sustains
         // itself until the state overflows to infinity and then to NaN.
-        within("voicing.unison_coupling", v.unison_coupling, 0.0, MAX_UNISON_COUPLING)?;
+        within(
+            "voicing.unison_coupling",
+            v.unison_coupling,
+            0.0,
+            LEGACY_MAX_UNISON_COUPLING,
+        )?;
         within("voicing.resonance_coupling", v.resonance_coupling, 0.0, MAX_COUPLING)?;
         // A displacement either side of a pan position that already reaches
         // `MAX_PAN`: the ceiling is what puts the outer polarization of the
@@ -1050,6 +1421,29 @@ impl Preset {
                     "voicing.unison_sigma_scale[{row}].scale averages {mean}, expected 1"
                 )));
             }
+        }
+        if let Some(d) = &v.strike_direction {
+            for (name, value) in [
+                ("vh_db_at_pp", d.vh_db_at_pp),
+                ("vh_db_at_ff", d.vh_db_at_ff),
+            ] {
+                within(
+                    &format!("voicing.strike_direction.{name}"),
+                    value,
+                    -MAX_STRIKE_DIRECTION_DB,
+                    MAX_STRIKE_DIRECTION_DB,
+                )?;
+            }
+            // Signed: the physical direction is a hammer that leaks *more*
+            // sideways the harder it is thrown, but the sign of the share tilt
+            // is a property of one action and nothing here knows which way it
+            // goes, so only the magnitude is bounded.
+            within(
+                "voicing.strike_direction.share_tilt",
+                d.share_tilt,
+                -MAX_SHARE_TILT,
+                MAX_SHARE_TILT,
+            )?;
         }
         let max_b = self.validate_bridge()?;
         self.validate_duplex(max_b)?;
@@ -1192,6 +1586,57 @@ impl Preset {
                 }
                 for (k, &value) in row.iter().enumerate() {
                     within(&format!("notes.{name}[{i}][{k}]"), value, low, high)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks the within-string splits.
+    ///
+    /// Same all-or-nothing shape rule as the two per-partial tables — a preset
+    /// either has the table or does not — and inside a key the row is a list and
+    /// not a series, so what is checked is that every entry names a partial the
+    /// key really has, that no partial is named twice (two splits of one wire's
+    /// one partial are one split, and the second would silently overwrite the
+    /// first), and that the rate and the level are inside the band the mechanism
+    /// was measured in.
+    fn validate_false_beats(&self) -> Result<(), PresetError> {
+        let table = &self.notes.false_beat;
+        if table.is_empty() {
+            return Ok(());
+        }
+        if table.len() != NUM_KEYS {
+            return Err(PresetError::invalid(format!(
+                "notes.false_beat has {} rows, expected {NUM_KEYS} (or none at all)",
+                table.len()
+            )));
+        }
+        for (i, row) in table.iter().enumerate() {
+            let key = index_to_note(i);
+            if row.len() > MAX_FALSE_BEATS_PER_KEY {
+                return Err(PresetError::invalid(format!(
+                    "notes.false_beat[{i}] (key {key}) has {} entries, expected at most \
+                     {MAX_FALSE_BEATS_PER_KEY}",
+                    row.len()
+                )));
+            }
+            let partials = self.string_params(key).partial_count();
+            for (e, entry) in row.iter().enumerate() {
+                let at = format!("notes.false_beat[{i}][{e}]");
+                if entry.k == 0 || entry.k as usize > partials {
+                    return Err(PresetError::invalid(format!(
+                        "{at}.k is {}, but key {key} has partials 1..={partials}",
+                        entry.k
+                    )));
+                }
+                within(&format!("{at}.hz"), entry.hz, MIN_FALSE_BEAT_HZ, MAX_FALSE_BEAT_HZ)?;
+                within(&format!("{at}.db"), entry.db, MIN_FALSE_BEAT_DB, MAX_FALSE_BEAT_DB)?;
+                if row[..e].iter().any(|other| other.k == entry.k) {
+                    return Err(PresetError::invalid(format!(
+                        "{at} splits partial {} of key {key} a second time",
+                        entry.k
+                    )));
                 }
             }
         }
@@ -1511,6 +1956,10 @@ impl Preset {
         PartialShaping {
             gains: row(&self.notes.partial_gains, i),
             sigma_scale: row(&self.notes.partial_sigma_scale, i),
+            false_beat: match self.notes.false_beat.get(i) {
+                Some(row) => row,
+                None => &[],
+            },
         }
     }
 
@@ -1998,6 +2447,10 @@ impl Default for Preset {
                     .into_iter()
                     .map(|(hz, weight)| DamperAnchor { hz, weight })
                     .collect(),
+                // The fitted strike vector, at every velocity. Nothing in the
+                // tuner can fit a velocity dependence yet (`FUNDAMENTALS.md`
+                // §7.7's last row), and the default is the instrument as it was.
+                strike_direction: None,
             },
             hammer: HammerVoicing {
                 velocity_min: 0.2,
@@ -2049,6 +2502,10 @@ impl Default for Preset {
                 // No duplex segments: the instrument as it was before they
                 // existed. A preset that has them writes every one of them.
                 duplex: Vec::new(),
+                // No within-string splits: a false beat is a defect of one
+                // wire, and a synthetic instrument has none until one is
+                // measured on it.
+                false_beat: Vec::new(),
                 // No per-key override: `voicing.polarization_pan_spread`
                 // applies to the whole compass, as it always did.
                 pan_spread: Vec::new(),
@@ -2201,7 +2658,7 @@ mod short {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{HIGHEST_KEY, LOWEST_KEY};
+    use crate::types::{HIGHEST_KEY, LOWEST_KEY, MAX_PARTIAL_RATIO, SAMPLE_RATE};
 
     /// The file in `presets/` next to the workspace root.
     pub(crate) fn default_preset_path() -> std::path::PathBuf {
@@ -2342,6 +2799,30 @@ mod tests {
     }
 
     /// One anchor is not a curve: the backbone needs two to interpolate.
+    /// A whole compass of splits, one on E3's second partial, broken by `f`.
+    fn false_beat_with(break_it: impl Fn(&mut FalseBeat)) -> Vec<Vec<FalseBeat>> {
+        let mut entry = FalseBeat {
+            k: 2,
+            hz: 1.0,
+            db: -6.0,
+        };
+        break_it(&mut entry);
+        let mut rows = vec![Vec::new(); NUM_KEYS];
+        rows[39] = vec![entry];
+        rows
+    }
+
+    /// The neutral velocity law, broken by `f`.
+    fn direction_with(break_it: impl Fn(&mut StrikeDirection)) -> StrikeDirection {
+        let mut d = StrikeDirection {
+            vh_db_at_pp: 0.0,
+            vh_db_at_ff: 0.0,
+            share_tilt: 0.0,
+        };
+        break_it(&mut d);
+        d
+    }
+
     fn one_anchor_bridge() -> BridgeVoicing {
         let mut bridge = flat_bridge(Vec::new());
         bridge.backbone.truncate(1);
@@ -2366,7 +2847,7 @@ mod tests {
 
         // Every one of these would reach the DSP as a divide by zero, a NaN,
         // or a resonator pole outside the unit circle.
-        let breakages: [fn(&mut Preset); 117] = [
+        let breakages: [fn(&mut Preset); 138] = [
             |p: &mut Preset| p.notes.f0_hz[3] = 0.0,
             |p: &mut Preset| p.notes.sigma0[3] = -1.0,
             |p: &mut Preset| p.notes.inharmonicity_b[3] = -1e-4,
@@ -2644,6 +3125,94 @@ mod tests {
                     NoiseAnchor { key: 60, db: -20.0 },
                 ]
             },
+            // The within-string splits. Same all-or-nothing shape rule as the
+            // ragged tables, and every entry has to name a partial the key
+            // really has: an offset on the diagonal of a mode that is not in the
+            // bank is a table measured on a different instrument.
+            |p: &mut Preset| p.notes.false_beat = vec![Vec::new(); NUM_KEYS - 1],
+            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.k = 0),
+            |p: &mut Preset| {
+                // C8 has two partials.
+                let mut rows = vec![Vec::new(); NUM_KEYS];
+                rows[NUM_KEYS - 1] = vec![FalseBeat {
+                    k: 9,
+                    hz: 1.0,
+                    db: -6.0,
+                }];
+                p.notes.false_beat = rows;
+            },
+            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.hz = MIN_FALSE_BEAT_HZ * 0.5),
+            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.hz = MAX_FALSE_BEAT_HZ + 0.1),
+            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.hz = f32::NAN),
+            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.db = MAX_FALSE_BEAT_DB + 0.1),
+            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.db = MIN_FALSE_BEAT_DB - 0.1),
+            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.db = f32::NAN),
+            // One wire's one partial has one split.
+            |p: &mut Preset| {
+                let mut rows = vec![Vec::new(); NUM_KEYS];
+                rows[39] = vec![
+                    FalseBeat {
+                        k: 2,
+                        hz: 1.0,
+                        db: -6.0,
+                    },
+                    FalseBeat {
+                        k: 2,
+                        hz: 1.4,
+                        db: -8.0,
+                    },
+                ];
+                p.notes.false_beat = rows;
+            },
+            |p: &mut Preset| {
+                let mut rows = vec![Vec::new(); NUM_KEYS];
+                rows[39] = (1..=MAX_FALSE_BEATS_PER_KEY + 1)
+                    .map(|k| FalseBeat {
+                        k: k as u16,
+                        hz: 1.0,
+                        db: -6.0,
+                    })
+                    .collect();
+                p.notes.false_beat = rows;
+            },
+            // The velocity law for the strike vector's direction reaches the
+            // mode gains at note-on, so its two ends and its tilt are bounded
+            // exactly like everything else that does.
+            |p: &mut Preset| {
+                p.voicing.strike_direction = Some(direction_with(|d| {
+                    d.vh_db_at_pp = -MAX_STRIKE_DIRECTION_DB - 0.1
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.strike_direction = Some(direction_with(|d| {
+                    d.vh_db_at_ff = MAX_STRIKE_DIRECTION_DB + 0.1
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.strike_direction = Some(direction_with(|d| d.vh_db_at_ff = f32::NAN))
+            },
+            |p: &mut Preset| {
+                p.voicing.strike_direction =
+                    Some(direction_with(|d| d.share_tilt = MAX_SHARE_TILT + 0.01))
+            },
+            |p: &mut Preset| {
+                p.voicing.strike_direction =
+                    Some(direction_with(|d| d.share_tilt = -MAX_SHARE_TILT - 0.01))
+            },
+            |p: &mut Preset| {
+                p.voicing.strike_direction = Some(direction_with(|d| d.share_tilt = f32::NAN))
+            },
+            // The three tables whose only bound used to be a sign, and which
+            // `PianoString::new` rather than this function was left to discover
+            // (`DECISIONS.md` 257). A fundamental past the partial cap, which
+            // `StringParams::partial_count`'s `.max(1)` builds anyway; a unison
+            // spread that is not a unison; and a fitted decay rate so far under
+            // the arithmetic floor that the eigensolve's own rounding decides
+            // its sign.
+            |p: &mut Preset| p.notes.f0_hz[NUM_KEYS - 1] = 25_000.0,
+            |p: &mut Preset| p.notes.detune_cents[0] = MAX_DETUNE_CENTS + 0.1,
+            |p: &mut Preset| p.notes.sigma0[3] = 1.0e-44,
+            |p: &mut Preset| p.notes.sigma0[3] = MIN_MODE_SIGMA * 0.5,
         ];
         for break_it in breakages {
             let mut p = Preset::default();
@@ -2653,6 +3222,83 @@ mod tests {
 
         assert!(Preset::from_toml("name = 'nope'").is_err());
         assert!(Preset::from_toml("this is not toml").is_err());
+    }
+
+    /// Every preset `validate` accepts builds its whole compass without
+    /// panicking, and the three that used to panic are named by field.
+    ///
+    /// `validate`'s own doc states the policy — untrusted input "has to be
+    /// refused here, with a message naming the field, rather than reached at
+    /// note-on" — and `string::stable_sigma`'s doc leans on it, asserting rather
+    /// than clamping because "no preset a user could write can produce one".
+    /// Three could (`DECISIONS.md` 257), and the assertion that they cannot is
+    /// only worth what this test is worth: the refusals are checked *and* the
+    /// legal rails are built, because a bound that refuses the corner by
+    /// refusing everything near it would pass the first half alone.
+    #[test]
+    fn a_preset_that_would_panic_the_eigensolve_is_refused_by_field_name() {
+        for (field, break_it) in [
+            (
+                "notes.f0_hz",
+                Box::new(|p: &mut Preset| p.notes.f0_hz[NUM_KEYS - 1] = 25_000.0)
+                    as Box<dyn Fn(&mut Preset)>,
+            ),
+            (
+                "notes.detune_cents",
+                Box::new(|p: &mut Preset| {
+                    p.notes.detune_cents.iter_mut().for_each(|d| *d = 20_000.0)
+                }),
+            ),
+            (
+                "notes.sigma0",
+                Box::new(|p: &mut Preset| p.notes.sigma0.iter_mut().for_each(|s| *s = 1.0e-44)),
+            ),
+        ] {
+            let mut p = Preset::default();
+            break_it(&mut p);
+            let message = match p.validate() {
+                Ok(()) => panic!("{field} out of range validated"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                message.contains(field),
+                "the refusal does not name {field}: {message}"
+            );
+        }
+
+        // And the legal ends of the same three bounds are instruments: the
+        // whole compass is built, so nothing here is refused by being made
+        // unreachable.
+        for break_it in [
+            Box::new(|p: &mut Preset| {
+                p.notes
+                    .detune_cents
+                    .iter_mut()
+                    .for_each(|d| *d = MAX_DETUNE_CENTS)
+            }) as Box<dyn Fn(&mut Preset)>,
+            Box::new(|p: &mut Preset| {
+                p.notes.sigma0.iter_mut().for_each(|s| *s = MIN_MODE_SIGMA);
+                p.notes.sigma1.iter_mut().for_each(|s| *s = 0.0);
+            }),
+            // The top key's fundamental one hair under the cap, which is the
+            // rail the `.max(1)` floor sits on.
+            Box::new(|p: &mut Preset| {
+                p.notes.f0_hz[NUM_KEYS - 1] = 0.9 * MAX_PARTIAL_RATIO * SAMPLE_RATE
+            }),
+        ] {
+            let mut p = Preset::default();
+            break_it(&mut p);
+            p.validate().expect("a preset at the rails is still a preset");
+            for key in LOWEST_KEY..=HIGHEST_KEY {
+                let params = p.string_params(key);
+                let string =
+                    crate::string::PianoString::new(params, &p.voicing, PartialShaping::default());
+                assert!(
+                    string.partial_count() >= 1,
+                    "key {key} came out of a validated preset with no partials"
+                );
+            }
+        }
     }
 
     /// A preset that does not use the model's newer refinements does not
@@ -2673,6 +3319,8 @@ mod tests {
             "comb_floor",
             "partial_gains",
             "partial_sigma_scale",
+            "false_beat",
+            "strike_direction",
             "[noise.strike]",
             // The mechanism's default is the measured table rather than
             // silence, but it is skipped on the same terms and for the same
@@ -2695,13 +3343,17 @@ mod tests {
         assert!(back.notes.comb_floor.iter().all(|&f| f == 0.0));
         assert!(back.notes.partial_gains.is_empty());
         assert!(back.notes.partial_sigma_scale.is_empty());
+        assert!(back.notes.false_beat.is_empty());
+        assert_eq!(back.voicing.strike_direction, None);
         // ... and every key reads the neutral shaping, whatever it asks for.
         for key in LOWEST_KEY..=HIGHEST_KEY {
             let shaping = back.partial_shaping(key);
             assert!(shaping.gains.is_empty() && shaping.sigma_scale.is_empty());
+            assert!(shaping.false_beat.is_empty());
             for k in 1..=back.string_params(key).partial_count() {
                 assert_eq!(shaping.gain_at(k), 1.0);
                 assert_eq!(shaping.sigma_scale_at(k), 1.0);
+                assert_eq!(shaping.false_beat_at(k), None);
             }
         }
         // The hammer's noise is the one event whose default is silence, and
@@ -2766,6 +3418,60 @@ mod tests {
         assert!(text.contains("0.0125"));
         // Bit-exact, like every other number in a preset.
         assert_eq!(Preset::from_toml(&text).expect("round trip parses"), preset);
+    }
+
+    /// The two mechanisms the recording asks for and the model did not have —
+    /// the within-string split and the velocity-dependent strike direction —
+    /// write in full, read back bit for bit, and reach the key they describe.
+    ///
+    /// They are checked together because they are one finding: `FUNDAMENTALS.md`
+    /// §7.4 says the recording's mid and low partials each carry a companion
+    /// 4–7 dB down and 0.7–1.5 Hz away (the split), and that *how much of each
+    /// plane the hammer excites depends on how the hammer meets the string*,
+    /// which is the one thing that changes with velocity (the direction).
+    #[test]
+    fn the_two_motion_mechanisms_round_trip_and_reach_the_key() {
+        let mut preset = Preset::default();
+        let c4 = key_index(60).unwrap();
+        preset.notes.false_beat = vec![Vec::new(); NUM_KEYS];
+        preset.notes.false_beat[c4] = vec![
+            // C4's measured companions: −6.1 dB at 1.11 Hz on the fundamental,
+            // −3.6 at 1.48 on the second (`renders/jitter/EIGENMODE.md`).
+            FalseBeat {
+                k: 1,
+                hz: 1.11,
+                db: -6.1,
+            },
+            FalseBeat {
+                k: 2,
+                hz: 1.48,
+                db: -3.6,
+            },
+        ];
+        preset.voicing.strike_direction = Some(StrikeDirection {
+            vh_db_at_pp: -3.0,
+            vh_db_at_ff: 4.5,
+            share_tilt: 0.08,
+        });
+        assert!(
+            preset.validate().is_ok(),
+            "the two mechanisms did not validate: {:?}",
+            preset.validate().err()
+        );
+
+        let text = preset.to_toml();
+        assert!(text.contains("[[notes.false_beat]]") || text.contains("false_beat"));
+        assert!(text.contains("[voicing.strike_direction]"));
+        assert_eq!(Preset::from_toml(&text).expect("round trip parses"), preset);
+
+        // The split reaches the key it names and no other, through the same
+        // handle the string reads it by.
+        let shaping = preset.partial_shaping(60);
+        assert_eq!(shaping.false_beat.len(), 2);
+        assert_eq!(shaping.false_beat_at(1).map(|e| e.hz), Some(1.11));
+        assert_eq!(shaping.false_beat_at(2).map(|e| e.db), Some(-3.6));
+        assert_eq!(shaping.false_beat_at(3), None);
+        assert!(preset.partial_shaping(59).false_beat.is_empty());
     }
 
     /// The measured per-partial tables and the hammer's own noise write in

@@ -6,8 +6,11 @@
 //! REPL --(SPSC queue)--> Engine
 //!                          |
 //!                          +-- 88 Voice: Hammer pulse -> PianoString
-//!                          |              (unison group x 2 polarizations
-//!                          |               of ModalBank), damped per PedalState
+//!                          |              (the 2N coupled eigenmodes of one
+//!                          |               unison on one bridge point, split
+//!                          |               into two ModalBanks by polarization,
+//!                          |               solved at preset load), damped per
+//!                          |               PedalState
 //!                          |              + DuplexBank: the segments past the
 //!                          |                bridge and the agraffe, driven by
 //!                          |                the string and by the bus, never

@@ -39,6 +39,7 @@ pub mod audio;
 pub mod error;
 pub mod estimate;
 pub mod library;
+pub mod motion;
 pub mod numeric;
 pub mod pipeline;
 pub mod preset;

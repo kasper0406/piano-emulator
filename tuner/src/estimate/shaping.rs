@@ -109,6 +109,18 @@ pub struct ShapingConfig {
     /// partial to about 4 dB whatever produced it (`TUNING_REPORT.md` §2); a
     /// partial fitted worse than that has not measured its own rate.
     pub max_decay_residual_db: f64,
+    /// Fewest partials a layer must have measured on **both** sides before it
+    /// contributes to [`measured_over_rendered`]. Lower than
+    /// [`ShapingConfig::min_partials`], which gates a *polynomial* fit and
+    /// therefore needs more points than it has parameters: this is a
+    /// partial-by-partial ratio with no parameters at all, and the top of the
+    /// compass has three partials under Nyquist.
+    pub min_gain_partials: usize,
+    /// How far under a spectrum's own loudest partial a partial may be and still
+    /// contribute to [`measured_over_rendered`], in dB. Below it the tracker is
+    /// measuring its own floor on one side or the other and the ratio is a ratio
+    /// of two noises.
+    pub max_gain_range_db: f64,
 }
 
 impl Default for ShapingConfig {
@@ -122,6 +134,8 @@ impl Default for ShapingConfig {
             outlier_db: 6.0,
             min_floor_partials: 8,
             floor_bisections: 50,
+            min_gain_partials: 3,
+            max_gain_range_db: 60.0,
             max_decay_residual_db: 4.0,
         }
     }
@@ -460,6 +474,202 @@ pub fn partial_gains(
         gains.pop();
     }
     gains
+}
+
+/// The per-partial multiplier that puts the engine's **smooth spectral
+/// envelope** on the recording's.
+///
+/// # The half of the excitation [`partial_gains`] deliberately threw away
+///
+/// [`partial_gains`] fits a polynomial in `ln k` to each layer's spectrum and
+/// writes only what is left over — the roughness — on the reasoning that
+/// everything smooth in `ln k` is the hammer, the bridge and the microphone, and
+/// that the engine has models for all three. That reasoning is half right. The
+/// envelope really does contain the part of the blow that changes with velocity,
+/// which a velocity-independent table must not carry. What it also contains is
+/// the engine's own error in that envelope, and *that* does not change with
+/// velocity, and nothing else in the schema can carry it.
+///
+/// The measurement that convicts it is one number: at C4, velocity 90, the
+/// recording's strongest partial is **k = 2** and the engine's is **k = 1**. A
+/// note whose fundamental leads where the recording's second partial does is a
+/// note the ear places an octave differently at the attack — which is what a
+/// listener reported of the jitter A/B pair, before any of it was measured. It
+/// has been true since the felt fits landed in Phase E, and the roughness gains
+/// are innocent of it by construction: their geometric mean is 1 and their
+/// reference is a polynomial that has already absorbed the tilt.
+///
+/// # What this does instead
+///
+/// The same polynomial, fitted twice — once to the recording and once to a
+/// **render of the engine** at the same key and the same velocity, measured by
+/// the same tracker — and the difference of the two written into the same table.
+/// This is `estimate::directivity`'s pattern and `CombLine`'s and
+/// `strike_offset`'s (`DECISIONS.md` 137, 199, 211): a quantity that is only
+/// meaningful as "how far is the engine from the recording" is inverted *on the
+/// engine*, so everything both signals go through — the tracker's own bias, the
+/// window, the microphone's comb — divides out instead of being modelled.
+///
+/// Two properties it keeps, because they are what makes the table legal:
+///
+/// * **The level does not move.** The difference is offset so that its mean over
+///   the partials both spectra measured is zero, i.e. the multiplier's geometric
+///   mean is 1, exactly as the roughness half is normalised.
+/// * **It is velocity-independent.** Both envelopes are taken at the reference
+///   velocity, so what is written is the *mismatch* at that velocity and not the
+///   blow's own tilt, which is still absorbed on both sides.
+///
+/// Returns `None` when either spectrum has too few partials to fit an envelope
+/// to, which is a key that measured nothing rather than a key that needs no
+/// correction.
+pub fn envelope_tilt(
+    recording: &[(u32, f64)],
+    engine: &[(u32, f64)],
+    partials: usize,
+    config: &ShapingConfig,
+) -> Option<Vec<f32>> {
+    let fit = |spectrum: &[(u32, f64)]| -> Option<(Vec<f64>, u32, u32)> {
+        let points: Vec<(f64, f64)> = spectrum
+            .iter()
+            .filter(|&&(k, a)| k >= 1 && a > 0.0)
+            .map(|&(k, a)| (f64::from(k).ln(), a.ln()))
+            .collect();
+        if points.len() < config.min_partials.max(config.envelope_degree + 2) {
+            return None;
+        }
+        let x: Vec<f64> = points.iter().map(|p| p.0).collect();
+        let y: Vec<f64> = points.iter().map(|p| p.1).collect();
+        let lo = spectrum.iter().filter(|&&(_, a)| a > 0.0).map(|&(k, _)| k).min()?;
+        let hi = spectrum.iter().filter(|&&(_, a)| a > 0.0).map(|&(k, _)| k).max()?;
+        Some((robust_polyfit(&x, &y, config)?, lo, hi))
+    };
+    let (recorded, r_lo, r_hi) = fit(recording)?;
+    let (rendered, e_lo, e_hi) = fit(engine)?;
+    // Only where both were measured: extrapolating either polynomial past its
+    // own data is how a degree-3 fit turns into a ±40 dB correction.
+    let (lo, hi) = (r_lo.max(e_lo), r_hi.min(e_hi).min(partials as u32));
+    if hi <= lo {
+        return None;
+    }
+    let difference = |k: u32| poly_eval(&recorded, f64::from(k).ln()) - poly_eval(&rendered, f64::from(k).ln());
+    let mean: f64 =
+        (lo..=hi).map(difference).sum::<f64>() / f64::from(hi - lo + 1);
+    Some(
+        (1..=partials)
+            .map(|k| {
+                let k = (k as u32).clamp(lo, hi);
+                ((difference(k) - mean).exp() as f32)
+                    .clamp(MIN_PARTIAL_GAIN, MAX_PARTIAL_GAIN)
+            })
+            .collect(),
+    )
+}
+
+/// The per-partial gains as the schema now defines them: the **full** measured
+/// ratio `a_k(0) recorded / a_k(0) as the engine itself renders it`.
+///
+/// # Why this replaces the roughness fit and the envelope tilt both
+///
+/// [`partial_gains`] writes the residual left after a smooth polynomial in
+/// `ln k` is divided out; [`envelope_tilt`] writes the difference between two
+/// such polynomials. `DECISIONS.md` 237 settled what the field *is* — "`a_k(0)`
+/// measured over `a_k(0)` as the engine's own excitation model predicts it" —
+/// and once the engine is rendered and measured rather than predicted from a
+/// formula, the two halves are one subtraction and there is no reason to take it
+/// in two pieces. The smooth part and the rough part of the same log ratio do
+/// not need separating: nothing downstream reads them apart.
+///
+/// # Three properties, all of them load-bearing
+///
+/// * **Re-entrant.** The probe the engine is rendered from must have the key's
+///   own row *cleared*, and then the ratio is absolute: running the fit on its
+///   own output returns the same table. This is what `fit_partials`'s header
+///   warns is not true of the roughness fit, and it is true here by
+///   construction rather than by discipline.
+/// * **Layer-robust.** Each layer is rendered at its own velocity, so the
+///   engine's velocity law is applied on both sides and what is left is the
+///   velocity-independent mismatch. Every layer's ratio is levelled (its own mean
+///   over the partials both spectra measured is removed) before the layers are
+///   combined, so a layer that is simply louder does not tilt the median.
+/// * **The level does not move.** The result is offset so its geometric mean over
+///   the partials it was measured on is exactly 1, which is the same
+///   normalisation the roughness half had and the reason a fitted row cannot
+///   smuggle in a loudness change.
+///
+/// Returns `None` when no layer measured enough partials on both sides.
+pub fn measured_over_rendered(
+    recorded: &[Vec<(u32, f64)>],
+    rendered: &[Vec<(u32, f64)>],
+    partials: usize,
+    config: &ShapingConfig,
+) -> Option<Vec<f32>> {
+    let mut per_partial: Vec<Vec<f64>> = vec![Vec::new(); partials];
+    for (recording, engine) in recorded.iter().zip(rendered) {
+        let engine_at: std::collections::BTreeMap<u32, f64> = engine
+            .iter()
+            .filter(|&&(_, a)| a > 0.0)
+            .map(|&(k, a)| (k, a))
+            .collect();
+        // Only partials both sides measured *well*: a partial 60 dB under its
+        // own note is at the tracker's floor on either signal, and a ratio of
+        // two floors is a ratio of two noises.
+        let loudest = |spectrum: &[(u32, f64)]| {
+            spectrum
+                .iter()
+                .map(|&(_, a)| a)
+                .fold(0.0f64, f64::max)
+                .max(f64::MIN_POSITIVE)
+        };
+        let (recorded_top, engine_top) = (loudest(recording), loudest(engine));
+        let floor = 10f64.powf(-config.max_gain_range_db / 20.0);
+        let ratios: Vec<(u32, f64)> = recording
+            .iter()
+            .filter(|&&(k, a)| a > 0.0 && k >= 1 && (k as usize) <= partials)
+            .filter(|&&(_, a)| a >= floor * recorded_top)
+            .filter_map(|&(k, a)| engine_at.get(&k).map(|e| (k, a, *e)))
+            .filter(|&(_, _, e)| e >= floor * engine_top)
+            .map(|(k, a, e)| (k, (a / e).ln()))
+            .collect();
+        if ratios.len() < config.min_gain_partials {
+            continue;
+        }
+        // Levelled per layer, by the **median**: what is compared between layers
+        // is the *shape* of the mismatch, not how loud that layer happened to be
+        // rendered, and a mean over a table that spans 40 dB is set by its
+        // extremes.
+        let Some(centre) = median(ratios.iter().map(|&(_, r)| r)) else {
+            continue;
+        };
+        for (k, r) in ratios {
+            per_partial[k as usize - 1].push(r - centre);
+        }
+    }
+    let measured: Vec<Option<f64>> = per_partial
+        .iter()
+        .map(|values| {
+            (values.len() >= config.min_layers.min(recorded.len().max(1)))
+                .then(|| robust_median(values, config.outlier_db / NEPERS_TO_DB))
+                .flatten()
+        })
+        .collect();
+    let seen: Vec<f64> = measured.iter().flatten().copied().collect();
+    if seen.is_empty() {
+        return None;
+    }
+    // Pinned so the median partial is unmoved, which is what keeps the note's
+    // loudness where the decay and level fits put it.
+    let offset = median(seen.iter().copied()).expect("seen is not empty");
+    let mut gains: Vec<f32> = measured
+        .iter()
+        .map(|value| match value {
+            Some(ln) => ((ln - offset).exp() as f32).clamp(MIN_PARTIAL_GAIN, MAX_PARTIAL_GAIN),
+            None => 1.0,
+        })
+        .collect();
+    while gains.last() == Some(&1.0) {
+        gains.pop();
+    }
+    (!gains.is_empty()).then_some(gains)
 }
 
 /// The split the engine's composite envelope is built from: what a `sigma` table
@@ -1033,4 +1243,152 @@ mod tests {
         assert_eq!(trusted, 1, "{scales:?}");
         assert!(scales.is_empty(), "{scales:?}");
     }
+
+    /// A known tilt, put in and taken out.
+    ///
+    /// The engine's spectrum is the recording's with a 6 dB per octave slope on
+    /// it — the shape of the defect this exists for, and the size of it: at C4
+    /// the fitted `envelope_tilt` reads **-6.53 dB** on the fundamental against
+    /// **-0.05** on the fourth partial, a 7.5 dB span, which is a note whose
+    /// strongest partial is `k = 1` where the recording's is `k = 2`.
+    #[test]
+    fn a_known_tilt_comes_back_out_of_the_two_envelopes() {
+        let config = ShapingConfig::default();
+        // A smooth, plausible spectrum: -9 dB per octave with a little curvature.
+        let recording: Vec<(u32, f64)> = (1..=24u32)
+            .map(|k| {
+                let x = f64::from(k).ln();
+                (k, (-1.5 * x - 0.1 * x * x).exp())
+            })
+            .collect();
+        // The "engine" is that, 6 dB per octave steeper.
+        let engine: Vec<(u32, f64)> = recording
+            .iter()
+            .map(|&(k, a)| (k, a * f64::from(k).powf(-1.0)))
+            .collect();
+        let tilt = envelope_tilt(&recording, &engine, 24, &config).expect("both fit");
+        assert_eq!(tilt.len(), 24);
+        // The correction is `k`, normalised so its geometric mean over the
+        // measured partials is 1 — the same rule the roughness half obeys, and
+        // the reason writing this table cannot move the note's loudness.
+        let mean: f64 = tilt.iter().map(|&g| f64::from(g).ln()).sum::<f64>() / 24.0;
+        assert!(mean.abs() < 1e-3, "the tilt moved the level by {mean} nepers");
+        // ... so what is written is `k` divided by the geometric mean of `k`
+        // over the measured partials, which for 1..=24 is 9.66.
+        let geometric: f64 =
+            ((1..=24u32).map(|k| f64::from(k).ln()).sum::<f64>() / 24.0).exp();
+        for k in 1..=24usize {
+            let got = f64::from(tilt[k - 1]) * geometric;
+            assert!(
+                (got / k as f64 - 1.0).abs() < 0.05,
+                "partial {k}: the correction came back {got}, expected {k}"
+            );
+        }
+        // Two spectra with the same envelope need no correction at all.
+        let flat = envelope_tilt(&recording, &recording, 24, &config).expect("both fit");
+        for (k, g) in flat.iter().enumerate() {
+            assert!(
+                (f64::from(*g) - 1.0).abs() < 1e-3,
+                "partial {}: {g} where nothing differs",
+                k + 1
+            );
+        }
+        // A spectrum with nothing in it is a key that measured nothing, not a
+        // key that needs no correction.
+        assert!(envelope_tilt(&recording, &[], 24, &config).is_none());
+    }
+
+    // ---- the full measured ratio ----------------------------------------
+
+    /// A spectrum with one level per partial, as the tracker hands one over.
+    fn flat_spectrum(levels: &[f64]) -> Vec<(u32, f64)> {
+        levels
+            .iter()
+            .enumerate()
+            .map(|(i, &db)| (i as u32 + 1, 10f64.powf(db / 20.0)))
+            .collect()
+    }
+
+    /// A known per-partial error between two spectra comes back as the gain that
+    /// cancels it — and comes back with a geometric mean of one, so writing it
+    /// cannot move the note's loudness.
+    #[test]
+    fn the_full_ratio_returns_the_error_between_the_two_spectra() {
+        let engine: Vec<f64> = (0..12).map(|k| -2.0 * k as f64).collect();
+        // The recording is the same envelope with a tilt and two rough partials
+        // on it, plus 6 dB of level nobody should see in the answer.
+        let error = [3.0, -4.0, 0.0, 0.0, 1.5, 0.0, 0.0, -2.0, 0.0, 0.0, 0.0, 0.0];
+        let recorded: Vec<f64> = engine
+            .iter()
+            .zip(&error)
+            .map(|(e, x)| e + x + 6.0)
+            .collect();
+        let config = ShapingConfig::default();
+        let gains = measured_over_rendered(
+            &[flat_spectrum(&recorded), flat_spectrum(&recorded), flat_spectrum(&recorded)],
+            &[flat_spectrum(&engine), flat_spectrum(&engine), flat_spectrum(&engine)],
+            12,
+            &config,
+        )
+        .expect("a fit");
+        let db = |g: f32| 20.0 * f64::from(g).log10();
+        // Pinned on the median partial, which the error leaves at zero here.
+        for (k, (&want, &got)) in error.iter().zip(gains.iter()).enumerate() {
+            assert!(
+                (db(got) - want).abs() < 0.05,
+                "partial {}: {:.2} dB against {want}",
+                k + 1,
+                db(got)
+            );
+        }
+        let mean: f64 = gains.iter().map(|g| f64::from(*g).ln()).sum::<f64>()
+            / gains.len() as f64;
+        assert!(mean.abs() < 0.15, "geometric mean {:.3}", mean.exp());
+    }
+
+    /// Re-entrancy, which is the property the fit is built for: applying the
+    /// answer to the engine and fitting again returns nothing more to do.
+    #[test]
+    fn applying_the_full_ratio_leaves_nothing_to_fit() {
+        let engine: Vec<f64> = (0..10).map(|k| -1.5 * k as f64).collect();
+        let error = [2.0, -3.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0];
+        let recorded: Vec<f64> = engine.iter().zip(&error).map(|(e, x)| e + x).collect();
+        let config = ShapingConfig::default();
+        let three = |v: &[f64]| vec![flat_spectrum(v), flat_spectrum(v), flat_spectrum(v)];
+        let first =
+            measured_over_rendered(&three(&recorded), &three(&engine), 10, &config).expect("a fit");
+        // The engine, with the answer in it.
+        let corrected: Vec<f64> = engine
+            .iter()
+            .enumerate()
+            .map(|(i, e)| e + 20.0 * f64::from(first.get(i).copied().unwrap_or(1.0)).log10())
+            .collect();
+        let second = measured_over_rendered(&three(&recorded), &three(&corrected), 10, &config);
+        let residual = second.map_or(0.0, |g| {
+            g.iter()
+                .map(|v| (20.0 * f64::from(*v).log10()).abs())
+                .fold(0.0f64, f64::max)
+        });
+        assert!(residual < 0.05, "a second pass still moves partials by {residual:.3} dB");
+    }
+
+    /// A partial at the tracker's floor on either side is not a measurement, and
+    /// a layer that measured too few of them is not a layer.
+    #[test]
+    fn a_partial_in_the_floor_is_not_given_a_gain() {
+        let engine: Vec<f64> = (0..10).map(|k| -1.0 * k as f64).collect();
+        let mut recorded = engine.clone();
+        // One real error, so the row is not empty — a table of nothing but ones
+        // is correctly returned as `None`, which is a key with nothing to write.
+        recorded[1] += 4.0;
+        // ... and one partial 80 dB under this spectrum's loudest, which is past
+        // `max_gain_range_db` and is the tracker's floor rather than a partial.
+        recorded[7] = -80.0;
+        let config = ShapingConfig::default();
+        let three = |v: &[f64]| vec![flat_spectrum(v), flat_spectrum(v), flat_spectrum(v)];
+        let gains = measured_over_rendered(&three(&recorded), &three(&engine), 10, &config)
+            .expect("a fit");
+        assert_eq!(gains.get(7).copied().unwrap_or(1.0), 1.0, "{gains:?}");
+    }
+
 }

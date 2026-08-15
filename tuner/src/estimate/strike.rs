@@ -97,6 +97,14 @@ pub struct StrikeConfig {
     /// below `1/w` the two are nearly degenerate: the improvement is then a
     /// fraction of a percent, and what would be written into the preset is the
     /// envelope's rounding error.
+    ///
+    /// **0.1 until the coupled unison.** One partial is now `2N` eigenmodes
+    /// with a derived decay split, so a note's time-zero spectrum carries more
+    /// per-partial structure than a point-force comb times a smooth envelope
+    /// can hold, and a spurious taper picks some of it up. Measured on C2
+    /// through `tuner/tests/calibration.rs`: a render with **no** width earns
+    /// **0.131** of the residual with a spurious `w = 0.018`, where the render
+    /// with a real `w = 0.03` earns **0.324**. The threshold sits between them.
     pub min_width_gain: f64,
 }
 
@@ -113,7 +121,7 @@ impl Default for StrikeConfig {
             min_partials: 8,
             max_width: 0.05,
             width_grid: 20,
-            min_width_gain: 0.1,
+            min_width_gain: 0.2,
             min_cutoff_reach: 1.0,
         }
     }

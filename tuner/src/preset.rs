@@ -57,10 +57,33 @@ pub const MAX_SIGMA_SCALE: f32 = 2.0;
 /// Deepest a preset may soften the strike comb's nulls, as a fraction of the
 /// comb's crest (`engine::string::MAX_COMB_FLOOR`).
 pub const MAX_COMB_FLOOR: f32 = 0.5;
-/// Bounds on a per-partial excitation gain — ±20 dB
+/// Bounds on a per-partial excitation gain — a factor of twenty either way
 /// (`engine::string::{MIN,MAX}_PARTIAL_GAIN`).
-pub const MIN_PARTIAL_GAIN: f32 = 0.1;
-pub const MAX_PARTIAL_GAIN: f32 = 10.0;
+///
+/// Widened from ±20 dB when the field's semantics changed: it is the **full**
+/// measured ratio of a recorded partial to the engine's own prediction of it,
+/// not the roughness residual left after a smooth envelope has been divided out,
+/// so it now carries the engine's envelope error as well as the roughness — 7.5
+/// dB of tilt over C4's first four partials on its own (`DECISIONS.md` 231).
+pub const MIN_PARTIAL_GAIN: f32 = 0.05;
+pub const MAX_PARTIAL_GAIN: f32 = 20.0;
+/// Bounds on a `notes.false_beat` row (`engine::preset`). A within-string split
+/// is a defect of one wire at one partial; the rate band is the one the
+/// mechanism was measured in (0.74–1.48 Hz at C4 and A2, 2.22–5.19 at C6) and
+/// the level band runs from inaudible (−40 dB, 0.17 dB of beat depth, low
+/// enough to reach the fundamentals whose depth is under a decibel and whose
+/// frequency still moves a cent — `DECISIONS.md` 249) up to two planes of equal
+/// strength.
+pub const MAX_FALSE_BEATS_PER_KEY: usize = 8;
+pub const MIN_FALSE_BEAT_HZ: f32 = 0.2;
+pub const MAX_FALSE_BEAT_HZ: f32 = 3.0;
+pub const MIN_FALSE_BEAT_DB: f32 = -40.0;
+pub const MAX_FALSE_BEAT_DB: f32 = 0.0;
+/// Bounds on `[voicing.strike_direction]` (`engine::preset`): the velocity law
+/// for the *direction* of the hammer's excitation vector, which is the one place
+/// velocity enters a linear string model.
+pub const MAX_STRIKE_DIRECTION_DB: f32 = 12.0;
+pub const MAX_SHARE_TILT: f32 = 0.2;
 /// Bounds on a per-partial correction to the *fitted* decay rate
 /// (`engine::string::{MIN,MAX}_PARTIAL_SIGMA_SCALE`).
 pub const MIN_PARTIAL_SIGMA_SCALE: f32 = 0.25;
@@ -88,6 +111,19 @@ pub const MAX_PAN_SPREAD: f32 = 0.4;
 /// (`engine::preset::{MIN,MAX}_NOISE_DECAY_S`).
 pub const MIN_NOISE_DECAY_S: f32 = 0.01;
 pub const MAX_NOISE_DECAY_S: f32 = 10.0;
+/// Widest unison spread a key may declare, in cents
+/// (`engine::preset::MAX_DETUNE_CENTS`).
+///
+/// The spread multiplies the *top* of the partial series, so it spends the band
+/// between the partial cap and Nyquist; a whole semitone is also not one note.
+pub const MAX_DETUNE_CENTS: f32 = 100.0;
+/// Slowest decay rate a mode may be given, 1/s (`engine::string::MIN_MODE_SIGMA`)
+/// and therefore the floor on `notes.sigma0`.
+///
+/// Arithmetic, not musical: the resonator's pole radius is `exp(-sigma/48000)`
+/// in `f32`, which rounds to exactly one under about 5.7e-3. A T60 of 345 s is
+/// longer than any piano string rings.
+pub const MIN_MODE_SIGMA: f32 = 0.02;
 /// Partials the engine builds a bank from: the cap, and the fraction of the
 /// sample rate above which a partial is not admitted (`engine::types`).
 pub const MAX_PARTIALS: u32 = 80;
@@ -180,6 +216,53 @@ pub struct Voicing {
     )]
     pub unison_sigma_scale: Vec<UnisonSigmaScale>,
     pub damper_weight: Vec<DamperAnchor>,
+    /// How the hammer's blow changes *direction* with velocity: the
+    /// vertical/horizontal ratio at the two ends of the velocity range, and how
+    /// far the group's per-string share asymmetry tilts between them. Absent —
+    /// the default — is the fitted, velocity-independent strike vector, which is
+    /// what every preset written so far has. Nothing fits it yet
+    /// (`FUNDAMENTALS.md` §7.7's last row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike_direction: Option<StrikeDirection>,
+}
+
+/// The velocity law for the strike vector's direction. See
+/// `engine::preset::StrikeDirection` for what each field means and why the model
+/// has nowhere else to put a velocity dependence.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrikeDirection {
+    /// Offset on [`Voicing::horizontal_gain_db`] at MIDI velocity 1, in dB.
+    #[serde(serialize_with = "short::scalar")]
+    pub vh_db_at_pp: f32,
+    /// The same offset at MIDI velocity 127.
+    #[serde(serialize_with = "short::scalar")]
+    pub vh_db_at_ff: f32,
+    /// Full pianissimo-to-fortissimo swing of the group's share asymmetry, as a
+    /// fraction of that asymmetry, taken about mid-velocity.
+    #[serde(serialize_with = "short::scalar")]
+    pub share_tilt: f32,
+}
+
+/// One within-string split: the two transverse planes of **one wire** at
+/// genuinely different frequencies, which is Capleton's false beat (JASA 115(2),
+/// 2004) and the only mechanism `FUNDAMENTALS.md` §7.4's measurements support
+/// for the companion each recorded mid and low partial carries — 4–7 dB down,
+/// 0.7–1.5 Hz away, at a spacing that does **not** scale with the partial
+/// number. See `engine::preset::FalseBeat`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FalseBeat {
+    /// Which partial of this key is split, 1-based; at most one entry per
+    /// partial.
+    pub k: u16,
+    /// The split, in hertz.
+    #[serde(serialize_with = "short::scalar")]
+    pub hz: f32,
+    /// How loud the companion stands, in dB relative to the loudest mode of the
+    /// same partial — the quantity a measured beat depth inverts to.
+    #[serde(serialize_with = "short::scalar")]
+    pub db: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -470,6 +553,14 @@ pub struct NoteTables {
     /// row would be a harmonic ratio pretending to be a measurement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub duplex: Vec<Vec<DuplexMode>>,
+    /// Within-string splits: which partials of which key beat against
+    /// themselves, and how hard ([`FalseBeat`]). Empty — the default, and absent
+    /// from the file — is the instrument with no false beats at all. A table
+    /// that is present has one row per key, and a row may be empty: a
+    /// well-drawn wire in good condition has no measurable split, and most of
+    /// them are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub false_beat: Vec<Vec<FalseBeat>>,
     /// Per-key override of `voicing.polarization_pan_spread`. Empty — the
     /// default — means the global scalar applies to the whole compass. The
     /// compass does not want one number: at the engine's ceiling of 0.4 the
@@ -753,6 +844,24 @@ impl Preset {
                 n.strike_position[i]
             )));
         }
+        // The two tables the loop above could only check the sign of. The
+        // spread multiplies every partial's frequency, so it spends the headroom
+        // between the partial cap and Nyquist; and `sigma0` is the floor of the
+        // whole loss budget the eigensolve's roots come out of, which under the
+        // engine's `MIN_MODE_SIGMA` is decided by the solver's own rounding
+        // rather than by the fit. Mirrors `engine::preset::Preset::validate`
+        // (`DECISIONS.md` 257).
+        for (i, &c) in n.detune_cents.iter().enumerate() {
+            within(&format!("notes.detune_cents[{i}]"), c, 0.0, MAX_DETUNE_CENTS)?;
+        }
+        for (i, &s) in n.sigma0.iter().enumerate() {
+            if s < MIN_MODE_SIGMA {
+                return Err(Error::Preset(format!(
+                    "notes.sigma0[{i}] is {s}, expected at least {MIN_MODE_SIGMA} \
+                     (a T60 of 345 s)"
+                )));
+            }
+        }
         // The fourth-order inharmonicity is the one signed table — the sign is
         // the finding (`TUNING_REPORT.md` §1) — so entry by entry only
         // finiteness can be checked. What the value has to *do* is checked
@@ -841,8 +950,18 @@ impl Preset {
                     )));
                 }
                 // The legitimate end of the series: past the cap the engine
-                // never builds the partial.
+                // never builds the partial. Except at `k = 1`, which is not an
+                // end: `partial_count` floors at one, so a key whose own
+                // fundamental is past the cap still gets a bank — of one
+                // partial, outside the band the resonator is defined in.
                 if f >= limit {
+                    if k == 1 {
+                        return Err(Error::Preset(format!(
+                            "notes.f0_hz[{i}] = {} puts the key's own fundamental at {f} Hz, \
+                             at or past the {limit} Hz cap the partial series stops at",
+                            layout.f0
+                        )));
+                    }
                     break;
                 }
                 previous = f;
@@ -850,6 +969,7 @@ impl Preset {
         }
 
         self.validate_partial_tables(&partial_counts)?;
+        self.validate_false_beats(&partial_counts)?;
 
         let v = &self.voicing;
         positive("voicing.excitation_scale", v.excitation_scale)?;
@@ -876,6 +996,27 @@ impl Preset {
             0.0,
             MAX_PAN_SPREAD,
         )?;
+        // The velocity law for the strike vector's direction reaches the mode
+        // gains at note-on, so it is bounded exactly as the engine bounds it.
+        if let Some(d) = &v.strike_direction {
+            for (name, value) in [
+                ("vh_db_at_pp", d.vh_db_at_pp),
+                ("vh_db_at_ff", d.vh_db_at_ff),
+            ] {
+                within(
+                    &format!("voicing.strike_direction.{name}"),
+                    value,
+                    -MAX_STRIKE_DIRECTION_DB,
+                    MAX_STRIKE_DIRECTION_DB,
+                )?;
+            }
+            within(
+                "voicing.strike_direction.share_tilt",
+                d.share_tilt,
+                -MAX_SHARE_TILT,
+                MAX_SHARE_TILT,
+            )?;
+        }
         if v.horizontal_offset_hz.len() != MAX_UNISON {
             return Err(Error::Preset(format!(
                 "voicing.horizontal_offset_hz needs {MAX_UNISON} entries"
@@ -1104,6 +1245,48 @@ impl Preset {
                 }
                 for (k, &value) in row.iter().enumerate() {
                     within(&format!("notes.{name}[{i}][{k}]"), value, low, high)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The within-string splits: the engine's `validate_false_beats`, on the
+    /// same bounds and with the same messages.
+    fn validate_false_beats(&self, partial_counts: &[usize; NUM_KEYS]) -> Result<()> {
+        let table = &self.notes.false_beat;
+        if table.is_empty() {
+            return Ok(());
+        }
+        if table.len() != NUM_KEYS {
+            return Err(Error::Preset(format!(
+                "notes.false_beat has {} rows, expected {NUM_KEYS} (or none at all)",
+                table.len()
+            )));
+        }
+        for (i, row) in table.iter().enumerate() {
+            if row.len() > MAX_FALSE_BEATS_PER_KEY {
+                return Err(Error::Preset(format!(
+                    "notes.false_beat[{i}] has {} entries, expected at most \
+                     {MAX_FALSE_BEATS_PER_KEY}",
+                    row.len()
+                )));
+            }
+            for (e, entry) in row.iter().enumerate() {
+                let at = format!("notes.false_beat[{i}][{e}]");
+                if entry.k == 0 || entry.k as usize > partial_counts[i] {
+                    return Err(Error::Preset(format!(
+                        "{at}.k is {}, but that key has partials 1..={}",
+                        entry.k, partial_counts[i]
+                    )));
+                }
+                within(&format!("{at}.hz"), entry.hz, MIN_FALSE_BEAT_HZ, MAX_FALSE_BEAT_HZ)?;
+                within(&format!("{at}.db"), entry.db, MIN_FALSE_BEAT_DB, MAX_FALSE_BEAT_DB)?;
+                if row[..e].iter().any(|other| other.k == entry.k) {
+                    return Err(Error::Preset(format!(
+                        "{at} splits partial {} a second time",
+                        entry.k
+                    )));
                 }
             }
         }
@@ -1819,9 +2002,20 @@ impl PresetBuilder {
             // The damper's grip. Interpolated in the log domain because it is a
             // rate that spans an order of magnitude across the compass.
             ("damper_sigma", |n| n.damper_sigma, true, 0.0, f64::MAX),
-            ("sigma0", |n| n.sigma0, true, 1e-3, f64::MAX),
+            // The two survey clamps are the schema's own bounds, not looser
+            // ones: an interpolated table that the engine would refuse is a
+            // preset the pipeline cannot write. Neither moves a fitted value —
+            // the measured preset's smallest `sigma0` is 0.126 and its widest
+            // spread is 3.89 cents.
+            ("sigma0", |n| n.sigma0, true, f64::from(MIN_MODE_SIGMA), f64::MAX),
             ("sigma1", |n| n.sigma1, false, 0.0, f64::MAX),
-            ("detune_cents", |n| n.detune_cents, true, 0.0, 50.0),
+            (
+                "detune_cents",
+                |n| n.detune_cents,
+                true,
+                0.0,
+                f64::from(MAX_DETUNE_CENTS),
+            ),
             ("hammer_mass", |n| n.hammer_mass, true, 1e-4, 1.0),
             ("hammer_stiffness", |n| n.hammer_stiffness, true, 1.0, f64::MAX),
             ("hammer_exponent", |n| n.hammer_exponent, false, 1.0, 6.0),
@@ -2152,6 +2346,18 @@ mod tests {
         preset.notes.partial_gains[0] = vec![0.5, 1.75];
         preset.notes.partial_sigma_scale = vec![Vec::new(); NUM_KEYS];
         preset.notes.partial_sigma_scale[39] = vec![0.6, 1.0, 1.9];
+        // The two motion mechanisms: a within-string split on one key, and the
+        // velocity law for the strike vector's direction.
+        preset.notes.false_beat = vec![Vec::new(); NUM_KEYS];
+        preset.notes.false_beat[39] = vec![
+            piano_emulator::preset::FalseBeat { k: 1, hz: 1.11, db: -6.1 },
+            piano_emulator::preset::FalseBeat { k: 3, hz: 0.74, db: -6.6 },
+        ];
+        preset.voicing.strike_direction = Some(piano_emulator::preset::StrikeDirection {
+            vh_db_at_pp: -2.5,
+            vh_db_at_ff: 3.75,
+            share_tilt: 0.06,
+        });
         preset.noise.strike = piano_emulator::preset::StrikeNoise {
             centroid_hz: 1_450.0,
             decay_s: 0.06,
@@ -2176,6 +2382,8 @@ mod tests {
         assert!(text.contains("voicing.bridge"));
         assert!(text.contains("duplex"));
         assert!(text.contains("pan_spread = ["));
+        assert!(text.contains("false_beat"));
+        assert!(text.contains("[voicing.strike_direction]"));
 
         let ours = Preset::from_toml(&text).expect("the tuner reads it");
         assert_eq!(ours.to_toml(), text);
@@ -2194,6 +2402,17 @@ mod tests {
         assert_eq!(ours.notes.partial_gains[39], vec![1.4, 0.7, 1.0, 2.5]);
         assert!(ours.notes.partial_gains[1].is_empty());
         assert_eq!(ours.notes.partial_sigma_scale[39], vec![0.6, 1.0, 1.9]);
+        assert_eq!(ours.notes.false_beat[39].len(), 2);
+        assert_eq!(ours.notes.false_beat[39][0].hz, 1.11);
+        assert_eq!(ours.notes.false_beat[39][1].k, 3);
+        assert!(ours.notes.false_beat[40].is_empty());
+        let direction = ours
+            .voicing
+            .strike_direction
+            .expect("the strike direction came through");
+        assert_eq!(direction.vh_db_at_pp, -2.5);
+        assert_eq!(direction.vh_db_at_ff, 3.75);
+        assert_eq!(direction.share_tilt, 0.06);
         assert_eq!(ours.noise.strike.bandwidth_hz, 7_000.0);
         assert_eq!(ours.noise.strike.level_db.len(), 3);
         assert!(ours.validate().is_ok(), "{:?}", ours.validate().err());
@@ -2261,9 +2480,43 @@ mod tests {
         table
     }
 
+    /// A well-formed split table with the one entry broken.
+    fn split_with(break_it: impl Fn(&mut FalseBeat)) -> Vec<Vec<FalseBeat>> {
+        let mut entry = FalseBeat {
+            k: 2,
+            hz: 1.0,
+            db: -6.0,
+        };
+        break_it(&mut entry);
+        let mut table = vec![Vec::new(); NUM_KEYS];
+        table[39] = vec![entry];
+        table
+    }
+
     #[test]
     fn both_crates_refuse_the_same_broken_voicing() {
-        let breakages: [fn(&mut Preset); 98] = [
+        let breakages: [fn(&mut Preset); 110] = [
+            // The two motion mechanisms, on the same bounds the engine states.
+            |p| p.notes.false_beat = vec![Vec::new(); NUM_KEYS - 1],
+            |p| p.notes.false_beat = split_with(|e| e.k = 0),
+            |p| p.notes.false_beat = split_with(|e| e.hz = 0.05),
+            |p| p.notes.false_beat = split_with(|e| e.hz = 4.0),
+            |p| p.notes.false_beat = split_with(|e| e.db = 1.0),
+            |p| p.notes.false_beat = split_with(|e| e.db = f32::NAN),
+            |p| {
+                p.voicing.strike_direction = Some(StrikeDirection {
+                    vh_db_at_pp: 20.0,
+                    vh_db_at_ff: 0.0,
+                    share_tilt: 0.0,
+                })
+            },
+            |p| {
+                p.voicing.strike_direction = Some(StrikeDirection {
+                    vh_db_at_pp: 0.0,
+                    vh_db_at_ff: 0.0,
+                    share_tilt: 0.5,
+                })
+            },
             |p| p.voicing.horizontal_offset_hz[1] = f32::NAN,
             |p| p.voicing.horizontal_offset_hz[0] = -100.0,
             |p| p.voicing.unison_coupling = f32::NAN,
@@ -2476,6 +2729,15 @@ mod tests {
                     NUM_KEYS
                 ];
             },
+            // The three tables that decide where a mode *lands*, each of which
+            // both crates used to accept and the engine then panicked on inside
+            // the eigensolve (`DECISIONS.md` 257): a fundamental past the cap
+            // the series stops at, a spread that is not a unison, and a decay
+            // rate under the floor the pole radius rounds at.
+            |p| p.notes.f0_hz[NUM_KEYS - 1] = 25_000.0,
+            |p| p.notes.detune_cents[0] = MAX_DETUNE_CENTS + 0.1,
+            |p| p.notes.sigma0[3] = 1.0e-44,
+            |p| p.notes.sigma0[3] = MIN_MODE_SIGMA * 0.5,
         ];
         for (i, break_it) in breakages.into_iter().enumerate() {
             let mut preset = default_preset();

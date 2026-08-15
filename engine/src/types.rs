@@ -40,7 +40,18 @@ pub const OUTPUT_GAIN: f32 = 9.0;
 
 /// Per-mode amplitude below which a resonator contributes less than -90 dBFS to
 /// the master output and may be skipped. Expressed in internal (pre-`OUTPUT_GAIN`) units.
-pub const CULL_AMPLITUDE: f32 = 3.162e-5 / OUTPUT_GAIN;
+///
+/// Divided by [`MAX_UNISON`] x 2 since the string became a coupled group, and
+/// that factor is the whole of the correction: one partial is now `2N`
+/// eigenmodes that **add coherently at the output**, so `2N` modes each a
+/// hair under a per-mode threshold are together `2N` times over it. The
+/// free-running construction had the same arithmetic on paper and got away with
+/// it because its energy sat in one or two modes per partial rather than six.
+/// Measured on `a_prepared_string_rings_on_after_the_note_that_excited_it`: with
+/// the undivided threshold a sympathetically prepared C3 holding 3.2e-11 of
+/// energy was zeroed outright, where the free-running string holding *less*
+/// (1.8e-11) survived because all of it was in one mode.
+pub const CULL_AMPLITUDE: f32 = 3.162e-5 / (OUTPUT_GAIN * 2.0 * MAX_UNISON as f32);
 
 /// Bank energy (sum of |s_k|^2) below which a bank reports itself idle, i.e.
 /// contributes less than -100 dBFS to the master output.

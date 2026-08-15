@@ -20,6 +20,8 @@
 //! recordings of the action ──> noise::fit_noise ───> the [noise] section
 //! stereo recordings of notes ─> directivity::balance_drift -> pan spread
 //! release resonances ────────> duplex::residual_modes ──> notes.duplex
+//! per-partial beat depth/rate > motion::fit_false_beat -> notes.false_beat
+//!         the same, across velocities > motion::fit_strike_direction
 //! engine renders (stage 2) ──> halo::refine ───────────> coupling, [voicing.bridge]
 //! ```
 //!
@@ -39,6 +41,7 @@ pub mod duplex;
 pub mod halo;
 pub mod hammer;
 pub mod inharmonic;
+pub mod motion;
 pub mod noise;
 pub mod shaping;
 pub mod spread;
@@ -53,6 +56,10 @@ pub use directivity::{
     KeyDriftLine,
 };
 pub use duplex::{duplex_row, residual_modes, DuplexConfig, ResidualMode};
+pub use motion::{
+    fit_false_beat, fit_strike_direction, strike_direction_for, Companion, FalseBeatFit,
+    FalseBeatVerdict, MotionConfig, StrikeDirectionFit, SwingLine, VelocityCell,
+};
 pub use halo::{
     between_partials, peaks_from_body_modes, refine as refine_halo, BetweenPartials, HaloConfig,
     HaloError, HaloTarget, HaloVoicing,

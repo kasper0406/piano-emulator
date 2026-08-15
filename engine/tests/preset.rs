@@ -60,27 +60,45 @@ fn the_checked_in_default_is_character_for_character_what_the_engine_writes() {
     );
 }
 
-/// The instrument the strings make is bit for bit the one v1 made.
+/// The sounding path, pinned.
 ///
-/// `presets/default.toml` no longer renders the demo byte-identically to the
-/// engine that had no action: the mechanism is on by default (its neutral value
-/// is a measurement — `DECISIONS.md`), a note-off now thumps, and a damper on
-/// its way down soft-limits the string it is landing on. Both are *wanted*, and
-/// both are audible: the demo's samples differ from the pre-mechanism render by
-/// −12.7 dB RMS.
-///
-/// What must not have changed is the sounding path underneath them, and that is
-/// what this measures. The material is ten strikes across the compass with no
-/// release and no pedal move, so no damper is ever between its two seats and no
-/// event ever fires: everything it touches — hammer, string, unison, the
-/// resonance bus, the soundboard, the master chain — is the code that was there
-/// before `notes.inharmonicity_b4`, `notes.contact_width`,
-/// `voicing.unison_sigma_scale`, `voicing.polarization_pan_spread` and
-/// `noise.rs` were written. The fingerprint below was taken from the engine
-/// built at commit `16307c4`, the last one before any of them.
+/// Ten strikes across the compass with no release and no pedal move, so no
+/// damper is ever between its two seats and no event ever fires: everything the
+/// probe touches is the sounding path — hammer, string, unison, the resonance
+/// bus, the soundboard, the master chain — and nothing else.
 ///
 /// A failure here is not "update the constant". It means a change reached the
 /// strings, and the question to answer is which one and whether it was meant.
+///
+/// # The two times it has been meant
+///
+/// The constant stood at `63686423443ec4d3` from the engine built at commit
+/// `16307c4` — the last one before `notes.inharmonicity_b4`,
+/// `notes.contact_width`, `voicing.unison_sigma_scale`,
+/// `voicing.polarization_pan_spread` and `noise.rs` — through every milestone
+/// that added a schema field, because item 103's rule is that a preset without a
+/// new field renders what it always rendered, and each of them held it.
+///
+/// It moved to `61e29d4abaa316f9` when the unison stopped being `2N`
+/// free-running oscillators and became the `2N` coupled eigenmodes of one
+/// bridge (`FUNDAMENTALS.md` §5, `DECISIONS.md` 223-230). That is not a field
+/// with a neutral value; it is a different construction of the same instrument
+/// from the same numbers, and it *cannot* be bit-exact — the poles are the
+/// eigenvalues of a matrix where they used to be the diagonal of it. What was
+/// held instead is measured equivalence, and it is pinned in
+/// `tests/partials.rs` and in `string`'s own tests: **0.5 cents of pitch, 5 % of
+/// T60, 0.5 dB of level**, each asserted at that number on the quantity the
+/// construction sets and with the harness's own share stated separately
+/// (`DECISIONS.md` 259). The demo's samples differ from the free-running render
+/// by **-7.7 dB RMS** (the sweep by -8.8, the measured preset's demo by -12.1),
+/// which is most of what a change of construction is worth and is stated rather
+/// than avoided.
+///
+/// It has not moved since, and the one change measured against it that would
+/// have moved it was not taken: `decay_scale` returning the best point of its
+/// bisection rather than the last is worth 4.5 points of the worst T60 error,
+/// costs -61.8 dB RMS here, and takes two of `tuner/tests/calibration.rs`'s
+/// round trips red (`DECISIONS.md` 259).
 #[test]
 fn the_sounding_path_is_what_it_was_before_the_mechanism() {
     let mut events = Vec::new();
@@ -100,8 +118,8 @@ fn the_sounding_path_is_what_it_was_before_the_mechanism() {
     assert!(l.iter().any(|v| v.abs() > 0.02), "the probe made no sound");
     assert_eq!(
         fingerprint(&l, &r),
-        "63686423443ec4d3",
-        "the sounding path has moved since the engine that had no action"
+        "61e29d4abaa316f9",
+        "the sounding path has moved since the coupled-eigenmode unison"
     );
 }
 
