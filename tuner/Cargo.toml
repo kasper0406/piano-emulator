@@ -65,6 +65,10 @@ name = "audit_render"
 required-features = ["diagnostics"]
 
 [[example]]
+name = "brilliance"
+required-features = ["diagnostics"]
+
+[[example]]
 name = "drift_line"
 required-features = ["diagnostics"]
 
@@ -126,4 +130,8 @@ required-features = ["diagnostics"]
 
 [[example]]
 name = "verify_scan"
+required-features = ["diagnostics"]
+
+[[example]]
+name = "melody_line"
 required-features = ["diagnostics"]

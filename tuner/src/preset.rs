@@ -561,6 +561,23 @@ pub struct NoteTables {
     /// them are.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub false_beat: Vec<Vec<FalseBeat>>,
+    /// MIDI key numbers whose [`NoteTables::partial_gains`] and
+    /// [`NoteTables::false_beat`] rows were **synthesized** from the fitted
+    /// keys' own distributions rather than measured
+    /// ([`estimate::texture`](crate::estimate::texture), `DECISIONS.md` 284).
+    ///
+    /// A parallel field and not a comment, because a comment does not survive
+    /// the round trip every emitted preset makes. The engine reads nothing here
+    /// — a synthesized row plays exactly like a measured one — and what it buys
+    /// is that a library which later samples one of these keys can replace its
+    /// rows without guessing which rows were measurements, and that the draw is
+    /// idempotent: the re-fit clears exactly the keys named here before drawing
+    /// again.
+    ///
+    /// Strictly ascending, inside 21..=108. Empty — the default, and absent from
+    /// the file — is a preset every row of which is a measurement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_texture: Vec<u8>,
     /// Per-key override of `voicing.polarization_pan_spread`. Empty — the
     /// default — means the global scalar applies to the whole compass. The
     /// compass does not want one number: at the engine's ceiling of 0.4 the
@@ -970,6 +987,7 @@ impl Preset {
 
         self.validate_partial_tables(&partial_counts)?;
         self.validate_false_beats(&partial_counts)?;
+        self.validate_synthesized_texture()?;
 
         let v = &self.voicing;
         positive("voicing.excitation_scale", v.excitation_scale)?;
@@ -1289,6 +1307,29 @@ impl Preset {
                     )));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// The provenance list: the engine's `validate_synthesized_texture`, on the
+    /// same bounds and with the same messages.
+    fn validate_synthesized_texture(&self) -> Result<()> {
+        let mut previous: Option<u8> = None;
+        for &key in &self.notes.synthesized_texture {
+            if !(LOWEST_KEY..=HIGHEST_KEY).contains(&key) {
+                return Err(Error::Preset(format!(
+                    "notes.synthesized_texture names key {key}, outside \
+                     {LOWEST_KEY}..={HIGHEST_KEY}"
+                )));
+            }
+            if let Some(last) = previous {
+                if key <= last {
+                    return Err(Error::Preset(format!(
+                        "notes.synthesized_texture is not strictly ascending: {key} after {last}"
+                    )));
+                }
+            }
+            previous = Some(key);
         }
         Ok(())
     }
@@ -2495,9 +2536,14 @@ mod tests {
 
     #[test]
     fn both_crates_refuse_the_same_broken_voicing() {
-        let breakages: [fn(&mut Preset); 110] = [
+        let breakages: [fn(&mut Preset); 114] = [
             // The two motion mechanisms, on the same bounds the engine states.
             |p| p.notes.false_beat = vec![Vec::new(); NUM_KEYS - 1],
+            // The provenance list: real keys, in order, once each.
+            |p| p.notes.synthesized_texture = vec![LOWEST_KEY - 1],
+            |p| p.notes.synthesized_texture = vec![HIGHEST_KEY + 1],
+            |p| p.notes.synthesized_texture = vec![61, 60],
+            |p| p.notes.synthesized_texture = vec![60, 60],
             |p| p.notes.false_beat = split_with(|e| e.k = 0),
             |p| p.notes.false_beat = split_with(|e| e.hz = 0.05),
             |p| p.notes.false_beat = split_with(|e| e.hz = 4.0),

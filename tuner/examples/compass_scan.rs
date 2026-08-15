@@ -33,10 +33,16 @@
 //! `irregular` is the one that is not in any existing report and it is the one
 //! that found the note this tool was written for. Every mechanism in the engine
 //! that shapes a spectrum is smooth in `ln k` — the hammer, the bridge, the
-//! comb, the microphone — with exactly one exception, the fitted
+//! comb, the microphone — with exactly one exception, the
 //! `notes.partial_gains` row, which is a free number per partial. So a jagged
-//! harmonic series is a *fitted* defect by construction, and the metric points
+//! harmonic series is a *table* defect by construction, and the metric points
 //! straight at the table that carries it.
+//!
+//! Since `DECISIONS.md` 284 that table covers most of the compass in two ways:
+//! 28 keys carry rows measured against their own recordings, and 49 carry rows
+//! **drawn** from those keys' distributions. The `sampled` column says which a
+//! key is, because the two are meant to be indistinguishable here and that is
+//! the claim this report exists to check.
 //!
 //! # The score
 //!
@@ -737,9 +743,12 @@ exactly as much as on the engine, and two contaminated readings do not cancel. T
 this tool was written for.\n\n\
 `irregular` is in no other report. Every mechanism in the engine that shapes a spectrum is \
 smooth in `ln k` - the hammer, the bridge admittance, the strike comb, the microphone - with \
-exactly one exception, the fitted `notes.partial_gains` row, which is a free number per partial. \
-A jagged harmonic series is therefore a *fitted* defect by construction, and the metric points \
-at the table that carries it.\n\n"
+exactly one exception, the `notes.partial_gains` row, which is a free number per partial. \
+A jagged harmonic series is therefore a *table* defect by construction, and the metric points \
+at the table that carries it. Since `DECISIONS.md` 284 that table covers most of the compass in \
+two ways: 28 keys carry rows measured against their own recordings, and 49 carry rows **drawn** \
+from those keys' distributions. The `sampled` column says which a key is, because the two are \
+meant to be indistinguishable here and that is the claim this report exists to check.\n\n"
     ));
 
     // ---- the ranked outlier list ----
@@ -752,7 +761,7 @@ the same metric's score on the *recording* of the same key - a genuine oddity of
 shows up in both columns and is not a defect of the model.\n\n"
     ));
     s.push_str(
-        "| key | note | N | fitted | metric | engine z | engine | neighbours | recording z |\n",
+        "| key | note | N | sampled | metric | engine z | engine | neighbours | recording z |\n",
     );
     s.push_str("|---|---|---|---|---|---|---|---|---|\n");
     for f in &flags {

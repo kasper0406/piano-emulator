@@ -35,11 +35,25 @@
 //!    a_k(0) as the engine itself renders it` (`DECISIONS.md` 231, 237), taken
 //!    against a probe whose own row is **cleared** first, which is what makes
 //!    this fit re-entrant where `fit_partials` is not.
+//! 5. **The unsampled keys' texture** — `notes.partial_gains` and
+//!    `notes.false_beat` **drawn** for the 58 keys the library never sampled
+//!    (plus A7 and C8, which it sampled and which measured nothing) from the
+//!    distributions the other 28 measured: `estimate::texture`, seeded from the
+//!    key number, disciplined by the same rails, the same power pin and the
+//!    same `close_on_the_render` as the fitted rows, and recorded in
+//!    `notes.synthesized_texture`. `DECISIONS.md` 284-291. Its splits are then
+//!    closed on the render too, by `close_splits_on_the_render`, against the
+//!    recordings' own beat depth by register and partial — the half item 284
+//!    left open and both boards found (`DECISIONS.md` 289, 298, 300).
 //!
 //! Without `--out` it measures and prints and writes nothing.
+//! `--draw-over-measured` is item 290's control and not a way to build an
+//! instrument: it draws over the 28 *measured* keys and leaves the rest bare.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+use rayon::prelude::*;
 
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::types::Event;
@@ -48,12 +62,14 @@ use piano_tuner::estimate::motion::{
     MotionConfig, SwingLine, VelocityCell,
 };
 use piano_tuner::estimate::shaping::{
-    flatten_row, measured_over_rendered_report, ShapingConfig,
+    energy_offset, flatten_row, measured_over_rendered_report, ShapingConfig, MAX_ROW_CELLS,
 };
+use piano_tuner::estimate::texture::{fit_texture, SynthesizedTexture, TextureModel};
 use piano_tuner::motion::{partial_motion, Motion, Spectrum, WINDOW_HI_S};
 use piano_tuner::pipeline::analyze_note;
 use piano_tuner::preset::{
-    equal_temperament, key_index, FalseBeat, Preset, MAX_PARTIAL_GAIN, MIN_PARTIAL_GAIN,
+    equal_temperament, key_index, FalseBeat, Preset, MAX_PARTIAL_GAIN, MIN_FALSE_BEAT_DB,
+    MIN_PARTIAL_GAIN,
 };
 use piano_tuner::series::{amp_db, Series, PARTIALS, WINDOW_S};
 use piano_tuner::survey::SurveyConfig;
@@ -61,6 +77,9 @@ use piano_tuner::trajectory::InharmonicModel;
 use piano_tuner::{audio, detect_onset, Sample, SampleLibrary, SAMPLE_RATE};
 
 const SR: f64 = SAMPLE_RATE as f64;
+
+/// Decibels per neper.
+const NEPERS_TO_DB: f64 = 8.685_889_638_065_035;
 
 /// Velocity every fit is anchored at — `TUNING_REPORT.md` §5's own convention,
 /// and the velocity every per-note table in the preset was measured at.
@@ -86,9 +105,6 @@ const SERIES_RENDER_S: f32 = 1.6;
 /// left in the ratio is the mismatch and not the blow, and three of them is what
 /// makes the median mean anything.
 const GAIN_LAYER_SPAN: i32 = 1;
-
-/// How many partials the gains are written for at most.
-const MAX_GAIN_PARTIALS: usize = 48;
 
 /// The keys the swing line is measured on, and the partials: exactly Column B's
 /// own cells (`realism::MOTION_KEYS`, `MOTION_PARTIALS`), because what the field
@@ -149,12 +165,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out: Option<PathBuf> = None;
     let mut only: Vec<u8> = Vec::new();
     let mut stages: Vec<String> = Vec::new();
+    let mut draw_over_measured = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--preset" => preset_path = PathBuf::from(args.next().expect("--preset <file>")),
             "--out" => out = Some(PathBuf::from(args.next().expect("--out <file>"))),
             "--key" => only.push(args.next().expect("--key <n>").parse()?),
             "--stage" => stages.push(args.next().expect("--stage <name>")),
+            "--draw-over-measured" => draw_over_measured = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -496,7 +514,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rendered.push(engine);
             }
             let Some(report) =
-                measured_over_rendered_report(&recorded, &rendered, MAX_GAIN_PARTIALS, &shaping)
+                measured_over_rendered_report(&recorded, &rendered, MAX_ROW_CELLS, &shaping)
             else {
                 println!("{key:>4}  {:>6}  nothing fitted", recorded.len());
                 continue;
@@ -505,8 +523,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // criterion lives. See `close_on_the_render`.
             let mut fitted = report.gains.clone();
             fitted.truncate(partial_count(&preset, key));
-            let target = reference_series(&library, key, &preset);
-            let closed = close_on_the_render(&preset, &probe, key, &fitted, target, &shaping);
+            let target = reference_series(&library, key, &preset).map(|s| s.irregularity());
+            let closed =
+                close_on_the_render(&preset, &probe, key, &fitted, target, LEVEL_BAND_DB, &shaping);
             let gains = closed.row.clone();
             let db = |g: f32| 20.0 * f64::from(g).log10();
             let span = gains.iter().fold(f64::MIN, |m, &g| m.max(db(g)))
@@ -560,6 +579,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // ---- 5. the unsampled keys' texture, drawn from the sampled ones' -------
+    if wants("texture") {
+        let shaping = ShapingConfig::default();
+        synthesize_texture(
+            &mut preset,
+            &library,
+            &only,
+            draw_over_measured,
+            &survey,
+            &shaping,
+            &config,
+        );
+    }
+
     if let Some(path) = out {
         preset.validate()?;
         preset.save(&path)?;
@@ -586,12 +619,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// * The recording's `irregular` is measured through the sampler's own noise
 ///   floor and the engine's is not, so landing exactly on it transfers the
 ///   recording's measurement noise into the instrument.
-/// * The compass scores a key against its **neighbours**, and 58 of the 88 are
-///   unsampled and carry no row at all. Measured with no margin, C2 renders at
-///   9.80 dB of `irregular` against its own recording's 9.81 — a 0.01 dB match —
-///   and still reads `z` +4.2 because the keys either side of it render at 4.5.
-///   Half a decibel is what that costs to clear, and it leaves C2 inside the
-///   band its own recording sits in.
+/// * The compass scores a key against its **neighbours**. When this constant
+///   was set, 58 of the 88 were unsampled and carried no row at all: measured
+///   with no margin, C2 rendered at 9.80 dB of `irregular` against its own
+///   recording's 9.81 — a 0.01 dB match — and still read `z` +4.2, because the
+///   keys either side of it rendered at 4.5. Those keys now carry drawn rows
+///   (`DECISIONS.md` 284) and are trimmed against the same margin, so what it
+///   buys now is the first reason on both halves of the compass rather than the
+///   second on one.
 const IRREGULAR_MARGIN_DB: f64 = 0.5;
 
 /// How far the rendered level of a fitted key may sit from where the bare key
@@ -630,6 +665,21 @@ const IRREGULAR_MARGIN_DB: f64 = 0.5;
 /// at z +6.0. That, and not the scoreboard, is the reason it is kept.
 const LEVEL_BAND_DB: f64 = 2.96;
 
+/// The same band for a **drawn** row: zero.
+///
+/// [`LEVEL_BAND_DB`] is the width of the piano's own key-to-key level scatter,
+/// and what it licenses is a *measured* row carrying the part of a key's level
+/// that the piano itself has. A drawn row has measured nothing about this key's
+/// level and must therefore carry none of it: what `estimate::texture` draws is
+/// a roughness, and a roughness that moved a note's loudness would be a level
+/// control with a random number in it.
+///
+/// Item 282 measured that pinning the *fitted* rows this way costs the
+/// scoreboard 0.00 dB and moves no compass flag, so the two settings are not in
+/// tension — the band is kept where a row has evidence and closed where it does
+/// not.
+const DRAWN_LEVEL_BAND_DB: f64 = 0.0;
+
 /// How close to the band edge the loop has to land before it stops.
 const LEVEL_TOLERANCE_DB: f64 = 0.15;
 
@@ -643,6 +693,16 @@ struct ClosedRow {
     keep: f64,
     target_irregular: f64,
     rendered_irregular: f64,
+    /// Whether the render ended up under the ceiling at all.
+    ///
+    /// False is the case `temper`'s header names from the other side: even a
+    /// row flattened to its own tilt renders rougher than the recordings of
+    /// this register, so the roughness is the engine's and the row is not the
+    /// place to fix it. A *measured* row is kept anyway — it is evidence, and
+    /// F#7 is the compass's own example (`DECISIONS.md` 280) — and a **drawn**
+    /// one is refused by `synthesize_texture`, because a draw that cannot be
+    /// brought under the ceiling is not evidence of anything.
+    reached: bool,
     /// What the row did to the rendered level, dB — the number
     /// [`LEVEL_BAND_DB`] bounds.
     level_moved_db: f64,
@@ -685,7 +745,8 @@ fn close_on_the_render(
     probe: &Preset,
     key: u8,
     fitted: &[f32],
-    target: Option<Series>,
+    target_irregular: Option<f64>,
+    level_band_db: f64,
     shaping: &ShapingConfig,
 ) -> ClosedRow {
     let Some(index) = key_index(key) else {
@@ -694,6 +755,7 @@ fn close_on_the_render(
             keep: 1.0,
             target_irregular: f64::NAN,
             rendered_irregular: f64::NAN,
+            reached: false,
             level_moved_db: 0.0,
         };
     };
@@ -703,16 +765,16 @@ fn close_on_the_render(
         rendered_series(&candidate, key)
     };
     let (bare_level, _) = rendered_series(probe, key);
-    let Some(target) = target else {
+    let Some(target_irregular) = target_irregular else {
         return ClosedRow {
             row: fitted.to_vec(),
             keep: 1.0,
             target_irregular: f64::NAN,
             rendered_irregular: f64::NAN,
+            reached: false,
             level_moved_db: 0.0,
         };
     };
-    let target_irregular = target.irregularity();
 
     // 1. the roughness.
     let mut keep = 1.0f64;
@@ -742,7 +804,7 @@ fn close_on_the_render(
     for _ in 0..LEVEL_ROUNDS {
         let (level, _) = with(&row);
         let moved = level - bare_level;
-        let excess = moved - moved.clamp(-LEVEL_BAND_DB, LEVEL_BAND_DB);
+        let excess = moved - moved.clamp(-level_band_db, level_band_db);
         if excess.abs() <= LEVEL_TOLERANCE_DB {
             break;
         }
@@ -755,8 +817,697 @@ fn close_on_the_render(
         keep,
         target_irregular,
         rendered_irregular: got,
+        reached: got <= target_irregular - IRREGULAR_MARGIN_DB + LEVEL_TOLERANCE_DB,
         level_moved_db: level - bare_level,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The drawn splits, closed on the render
+// ---------------------------------------------------------------------------
+
+/// Bisection steps on a drawn split's level, after the baseline and after the
+/// draw itself have been rendered.
+///
+/// Six halvings of a bracket that is at most the schema's 40 dB wide leaves
+/// 0.6 dB of level, which is under a decibel of the quantity being bounded: the
+/// rendered depth moves roughly decibel for decibel with the companion's level
+/// while the companion is well under the partial. The cost is
+/// `2 + CEILING_STEPS` renders of one key, once, for the 35 keys that draw a
+/// split at all.
+const CEILING_STEPS: usize = 6;
+
+/// How far under its ceiling a drawn split has to land before the bisection
+/// stops asking, dB.
+///
+/// The same shape of margin as [`IRREGULAR_MARGIN_DB`] and for the first of its
+/// two reasons: the ceiling is drawn from depths measured through the sampler's
+/// own noise floor, and landing exactly on it would transfer that measurement's
+/// noise into the instrument.
+const BEAT_MARGIN_DB: f64 = 0.25;
+
+/// One key's drawn splits after the render has had its say.
+struct ClosedSplits {
+    rows: Vec<FalseBeat>,
+    /// Per row of `rows`: the ceiling it was held under and what the render
+    /// finally read at that partial, dB.
+    ceiling_db: Vec<f64>,
+    rendered_db: Vec<f64>,
+    /// Rows whose level the ceiling moved, and by how much in total.
+    trimmed: usize,
+    trimmed_db: f64,
+    /// Rows thrown away because the partial beats over its ceiling with the
+    /// least this mechanism can add: `(k, the depth the quietest render read,
+    /// the ceiling)`. Printed rather than counted, because a refusal is a
+    /// statement about the engine's own unison at that partial and the number
+    /// is the evidence for it.
+    refused: Vec<(u16, f64, f64)>,
+    /// Rows the render never resolved, which are kept as drawn: nothing can be
+    /// concluded from a partial that did not measure, which is
+    /// [`FalseBeatLoop::observe`]'s own rule.
+    unobserved: usize,
+}
+
+/// Puts the drawn splits on the engine and bisects each one's level until the
+/// **rendered** beat depth of its partial is under the ceiling drawn for it.
+///
+/// # Why this cannot be done in the estimator
+///
+/// The same reason `close_on_the_render` gives for the gain rows, in a place
+/// where the fitted keys already act on it. `notes.false_beat` names a
+/// *companion* — a second component `db` under the partial, `hz` away — and the
+/// depth that companion produces is a property of the render: the partial is a
+/// pair of coupled eigenmodes with its own beating, the master chain is between
+/// it and the measurement, and a rate slow against the 2.7 s window shows only
+/// part of a cycle. A fitted key therefore never writes what its recording
+/// implied — [`FalseBeatLoop`] bisects the ask until the rendered depth **is**
+/// the recording's — and before `DECISIONS.md` 300 a drawn key wrote its ask
+/// straight out of a distribution whose residual is 10.55 dB.
+///
+/// # The three verdicts, and the order they are reached in
+///
+/// 1. **The baseline**, this key with its splits cleared, exactly as
+///    [`FalseBeatLoop`]'s round zero. A partial that already beats over its
+///    ceiling with no split at all is *refused*: a companion only adds, so
+///    there is no level that reaches the target, and the roughness the key has
+///    is its unison's and not a wire's to write.
+/// 2. **The draw as it stands.** Under the ceiling, it is kept whole — the
+///    amount is a draw and not a target, and lifting a quiet key onto its
+///    ceiling would be the seam with its sign reversed.
+/// 3. **The bisection**, between the schema's quietest companion and the drawn
+///    ask, keeping the loudest level whose render came in under the ceiling.
+///    The depth is monotone in the level, so that level is simply the bracket's
+///    own lower end and there is no separate best-point bookkeeping — which is
+///    the one place this differs from [`FalseBeatLoop`], whose objective also
+///    contains a frequency deviation, is not monotone in anything, and has to
+///    keep the best point it visited rather than the one it stopped on.
+///
+/// The rate is never touched. It is drawn i.i.d. of the partial number and of
+/// the register because that is what the fitted rows measured (`DECISIONS.md`
+/// 285), it passes item 233's falsification as drawn, and a loop that moved it
+/// against a rendered deviation would be fitting a quantity this key has no
+/// recording of.
+fn close_splits_on_the_render(
+    base: &Preset,
+    key: u8,
+    drawn: &[FalseBeat],
+    ceilings: &[f64],
+    config: &MotionConfig,
+) -> ClosedSplits {
+    let mut out = ClosedSplits {
+        rows: Vec::new(),
+        ceiling_db: Vec::new(),
+        rendered_db: Vec::new(),
+        trimmed: 0,
+        trimmed_db: 0.0,
+        refused: Vec::new(),
+        unobserved: 0,
+    };
+    assert_eq!(
+        drawn.len(),
+        ceilings.len(),
+        "key {key} drew {} splits and {} ceilings",
+        drawn.len(),
+        ceilings.len()
+    );
+    if drawn.is_empty() {
+        return out;
+    }
+    let depths = |probe: &Preset| -> Vec<(u32, Motion)> {
+        let signal = render(probe, key, REFERENCE_VELOCITY, RENDER_S);
+        measure(probe, key, &signal, config.max_partial)
+    };
+    let depth_of = |seen: &[(u32, Motion)], k: u16| -> Option<f64> {
+        seen.iter()
+            .find(|(index, _)| *index == u32::from(k))
+            .filter(|(_, m)| m.peak_db >= config.min_peak_db)
+            .map(|(_, m)| m.beat_depth_db)
+    };
+
+    // 1. the baseline: this key with no splits at all.
+    let mut probe = base.clone();
+    set_false_beat(&mut probe, key, &[]);
+    let bare = depths(&probe);
+
+    struct State {
+        row: FalseBeat,
+        ceiling: f64,
+        /// The bracket on the ask, in dB: `lo` is quiet enough to be under the
+        /// ceiling and `hi` is the drawn ask.
+        lo: f64,
+        hi: f64,
+        /// The loudest ask whose render came in under the ceiling, and what
+        /// that render read.
+        best: Option<(f64, f64)>,
+        /// The last depth any round read at this partial, for the report that
+        /// has to say why a draw was thrown away.
+        seen: f64,
+        settled: bool,
+    }
+    impl State {
+        /// What to ask the engine for in this round: the draw itself first,
+        /// then the midpoint of the bracket, and nothing more once the draw has
+        /// been accepted whole.
+        fn ask(&self, round: usize) -> f64 {
+            match self.best {
+                Some((db, _)) if self.settled => db,
+                _ if round == 0 => self.hi,
+                _ => 0.5 * (self.lo + self.hi),
+            }
+        }
+    }
+    let mut states: Vec<State> = Vec::new();
+    for (row, &ceiling) in drawn.iter().zip(ceilings) {
+        match depth_of(&bare, row.k) {
+            // The partial already out-beats the piano's own register with
+            // nothing written. A companion only adds.
+            Some(depth) if depth > ceiling - BEAT_MARGIN_DB => {
+                out.refused.push((row.k, depth, ceiling));
+                continue;
+            }
+            Some(depth) => states.push(State {
+                row: *row,
+                ceiling,
+                lo: f64::from(MIN_FALSE_BEAT_DB),
+                hi: f64::from(row.db),
+                best: None,
+                seen: depth,
+                settled: false,
+            }),
+            // Not resolved on the render: nothing can be concluded, so the draw
+            // stands. `FalseBeatLoop::observe` does the same.
+            None => {
+                out.unobserved += 1;
+                out.rows.push(*row);
+                out.ceiling_db.push(ceiling);
+                out.rendered_db.push(f64::NAN);
+            }
+        }
+    }
+    if states.is_empty() {
+        return out.sorted();
+    }
+
+    // 2. the draw as it stands, and 3. the bisection.
+    for round in 0..=CEILING_STEPS {
+        let rows: Vec<FalseBeat> = states
+            .iter()
+            .map(|s| FalseBeat {
+                db: s.ask(round) as f32,
+                ..s.row
+            })
+            .collect();
+        set_false_beat(&mut probe, key, &rows);
+        let seen = depths(&probe);
+        for state in &mut states {
+            let asked = state.ask(round);
+            let Some(depth) = depth_of(&seen, state.row.k) else {
+                // The render stopped resolving this partial. The state stands,
+                // which for round zero means the drawn ask stands.
+                continue;
+            };
+            state.seen = depth;
+            if depth <= state.ceiling - BEAT_MARGIN_DB {
+                state.best = Some((asked, depth));
+                state.lo = asked;
+                if round == 0 {
+                    // The draw is already under its ceiling: it is a draw and
+                    // not a target, so nothing is trimmed.
+                    state.settled = true;
+                }
+            } else {
+                state.hi = asked;
+            }
+        }
+        if states.iter().all(|s| s.settled) {
+            break;
+        }
+    }
+
+    for state in states {
+        let Some((db, depth)) = state.best else {
+            // Every level the bracket held rendered over the ceiling, including
+            // the schema's quietest companion. Same verdict as the baseline's.
+            out.refused.push((state.row.k, state.seen, state.ceiling));
+            continue;
+        };
+        if (db - f64::from(state.row.db)).abs() > 1e-6 {
+            out.trimmed += 1;
+            out.trimmed_db += f64::from(state.row.db) - db;
+        }
+        out.rows.push(FalseBeat {
+            db: db as f32,
+            ..state.row
+        });
+        out.ceiling_db.push(state.ceiling);
+        out.rendered_db.push(depth);
+    }
+    out.sorted()
+}
+
+impl ClosedSplits {
+    /// Rows in partial order, which is the order the schema and every report
+    /// read them in.
+    fn sorted(mut self) -> ClosedSplits {
+        let mut order: Vec<usize> = (0..self.rows.len()).collect();
+        order.sort_by_key(|&i| self.rows[i].k);
+        self.rows = order.iter().map(|&i| self.rows[i]).collect();
+        self.ceiling_db = order.iter().map(|&i| self.ceiling_db[i]).collect();
+        self.rendered_db = order.iter().map(|&i| self.rendered_db[i]).collect();
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The unsampled keys' texture, drawn and then closed on the same render
+// ---------------------------------------------------------------------------
+
+/// Draws `notes.partial_gains` and `notes.false_beat` for every key that has no
+/// measured row, and writes the provenance list beside them.
+///
+/// # The order, and why each step is where it is
+///
+/// 1. **Clear first.** Every key `notes.synthesized_texture` names is emptied
+///    before anything is fitted, so the distributions are measured from the
+///    *measured* keys only and a second run of this stage is the first run.
+///    That is item 214's re-entrancy rule applied to a draw: the fit must be a
+///    function of the recordings, not of its own last output.
+/// 2. **Fit the distributions** from what is left, with two numbers per fitted
+///    key coming from outside the preset: the recording's own `irregular`,
+///    measured through `series::Series`, which is the ceiling a row is trimmed
+///    against; and the recording's own beat depth per partial, measured through
+///    `motion`, which is the ceiling a *split* is trimmed against. Both are
+///    measured the way the acceptance test measures them, because that is what
+///    an acceptance criterion is.
+/// 3. **Draw, then discipline, splits first.** The splits are closed on the
+///    render by [`close_splits_on_the_render`] before the row is, because that
+///    is the order the fitted keys are fitted in — stage 1 solves
+///    `notes.false_beat` on a preset that does not yet carry stage 4's row — and
+///    because the row is then pinned and trimmed on a key that beats the way it
+///    will ship. Then the row: rails from its own spread, the power pin on the
+///    engine's own rendered spectrum, and [`close_on_the_render`] — the fitted
+///    keys' own function, with the drawn ceiling in place of the recording's.
+///    A drawn row that renders rougher than the recordings of its register is
+///    trimmed exactly as a measured one is, and a drawn row that renders smoother
+///    is left alone exactly as a measured one is: the amount is a *draw*, not a
+///    target, and forcing every drawn key up onto its ceiling would put the
+///    unsampled keys systematically rougher than the sampled ones — the same
+///    seam with its sign reversed. The splits are closed under the same two
+///    rules.
+///
+/// The loop is parallel and collects in key order (item 283): each key renders
+/// its own engine from its own clone of the preset and shares nothing.
+fn synthesize_texture(
+    preset: &mut Preset,
+    library: &SampleLibrary,
+    only: &[u8],
+    draw_over_measured: bool,
+    survey: &SurveyConfig,
+    shaping: &ShapingConfig,
+    motion: &MotionConfig,
+) {
+    println!("\n== notes.partial_gains / notes.false_beat, synthesized ==");
+    // 1. clear
+    for key in std::mem::take(&mut preset.notes.synthesized_texture) {
+        if let Some(index) = key_index(key) {
+            if index < preset.notes.partial_gains.len() {
+                preset.notes.partial_gains[index] = Vec::new();
+            }
+            set_false_beat(preset, key, &[]);
+        }
+    }
+    if preset.notes.partial_gains.len() != piano_tuner::preset::NUM_KEYS {
+        preset.notes.partial_gains = vec![Vec::new(); piano_tuner::preset::NUM_KEYS];
+    }
+    if preset.notes.false_beat.len() != piano_tuner::preset::NUM_KEYS {
+        preset.notes.false_beat = vec![Vec::new(); piano_tuner::preset::NUM_KEYS];
+    }
+
+    // 2. fit
+    let measured: Vec<u8> = (piano_tuner::preset::LOWEST_KEY..=piano_tuner::preset::HIGHEST_KEY)
+        .filter(|&key| key_index(key).is_some_and(|i| !preset.notes.partial_gains[i].is_empty()))
+        .collect();
+    let targets: Vec<(u8, f64)> = measured
+        .par_iter()
+        .filter_map(|&key| {
+            reference_series(library, key, preset).map(|s| (key, s.irregularity()))
+        })
+        .collect();
+    // The second measurement from outside the preset: how deeply the piano's
+    // own partials beat, key by key and partial by partial, read with the same
+    // `measure` the fitted keys' own `FalseBeatLoop` targets are read with. It
+    // is the ceiling the drawn splits are closed on — `DECISIONS.md` 300 — and
+    // it cannot be taken from the preset, because what a preset carries is the
+    // companion level a fit *asked* for and not the depth it produced.
+    let beat_depths: Vec<(u8, u16, f64)> = measured
+        .par_iter()
+        .flat_map(|&key| {
+            let Some(sample) = layer_for(library, key, REFERENCE_VELOCITY) else {
+                return Vec::new();
+            };
+            let Ok(signal) = recording(sample) else {
+                return Vec::new();
+            };
+            measure(preset, key, &signal, motion.max_partial)
+                .into_iter()
+                .filter(|(_, m)| m.peak_db >= motion.min_peak_db)
+                .map(|(k, m)| (key, k as u16, m.beat_depth_db))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let model = fit_texture(
+        &preset.notes.partial_gains,
+        &preset.notes.false_beat,
+        &targets,
+        &beat_depths,
+        shaping,
+    );
+    report_model(&model);
+
+    // The control the refusal rate has to be read against, measured on the
+    // *sampled* keys and not assumed: how often the engine's own unison already
+    // beats deeper than the recording of the same key at the same partial, with
+    // `notes.false_beat` cleared. Those are the cells `FalseBeatLoop` drops for
+    // a fitted key — a companion only adds, so no level reaches the target — and
+    // a drawn key's ceiling refuses exactly the same cells for exactly the same
+    // reason. If the two rates agree, the splits a drawn key loses are the
+    // instrument's own statistic rather than the ceiling's severity.
+    let bare_over: Vec<(bool, f64)> = measured
+        .par_iter()
+        .filter(|&&key| key <= piano_tuner::estimate::texture::HIGHEST_FALSE_BEAT_KEY)
+        .flat_map(|&key| {
+            let Some(index) = key_index(key) else {
+                return Vec::new();
+            };
+            let mut probe = preset.clone();
+            probe.notes.false_beat[index] = Vec::new();
+            let signal = render(&probe, key, REFERENCE_VELOCITY, RENDER_S);
+            let rendered = measure(&probe, key, &signal, motion.max_partial);
+            beat_depths
+                .iter()
+                .filter(|&&(k, _, _)| k == key)
+                .filter_map(|&(_, k, recorded)| {
+                    rendered
+                        .iter()
+                        .find(|(index, _)| *index == u32::from(k))
+                        .filter(|(_, m)| m.peak_db >= motion.min_peak_db)
+                        .map(|(_, m)| (m.beat_depth_db >= recorded, m.beat_depth_db - recorded))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if !bare_over.is_empty() {
+        let over = bare_over.iter().filter(|c| c.0).count();
+        let mut signed: Vec<f64> = bare_over.iter().map(|c| c.1).collect();
+        signed.sort_by(f64::total_cmp);
+        println!(
+            "  control    with no split written at all, the engine's own unison already beats \
+             over the recording's own depth at {over} of {} sampled cells ({:.0} %), median \
+             {:+.2} dB — the cells a fitted key's loop drops, and the same cells a drawn key's \
+             ceiling refuses",
+            bare_over.len(),
+            100.0 * over as f64 / bare_over.len() as f64,
+            signed[signed.len() / 2],
+        );
+    }
+
+    // `--draw-over-measured` is `DECISIONS.md` 284's own control and not a way
+    // to build an instrument: it draws over the **measured** keys and leaves
+    // the unsampled ones bare, which is the shipped preset with the same 28
+    // rows *drawn* instead of fitted. The scoreboard read on it is what
+    // separates "texture costs the mel board" from "these particular 60 keys
+    // cost it", because a mean absolute distance is minimised by the reference's
+    // own mean and a row that is right in distribution and wrong in detail is
+    // further from it than no row at all.
+    let drawn: Vec<u8> = (piano_tuner::preset::LOWEST_KEY..=piano_tuner::preset::HIGHEST_KEY)
+        .filter(|key| measured.contains(key) == draw_over_measured)
+        .filter(|key| only.is_empty() || only.contains(key))
+        .collect();
+    if draw_over_measured {
+        println!("CONTROL: drawing over the {} measured keys", measured.len());
+        for &key in &measured {
+            if let Some(index) = key_index(key) {
+                preset.notes.partial_gains[index] = Vec::new();
+                preset.notes.false_beat[index] = Vec::new();
+            }
+        }
+    }
+    println!(
+        "\n key  cells  amount drawn/written  rail railed   level   keep  irreg target/rendered  \
+         moved   splits (k: hz / dB)"
+    );
+
+    // 3. draw and close
+    let rows: Vec<(u8, SynthesizedTexture, ClosedSplits, ClosedRow)> = drawn
+        .par_iter()
+        .filter_map(|&key| {
+            let index = key_index(key)?;
+            let partials = partial_count(preset, key);
+            let synthesized = model.synthesize(key, partials, shaping);
+            // The splits first, in the order the fitted keys are fitted in:
+            // stage 1 solves `notes.false_beat` on a preset that does not yet
+            // carry stage 4's gain row, so a drawn key closes its splits on the
+            // same instrument a measured one did.
+            let mut bare = preset.clone();
+            bare.notes.partial_gains[index] = Vec::new();
+            bare.notes.false_beat[index] = Vec::new();
+            let splits = close_splits_on_the_render(
+                &bare,
+                key,
+                &synthesized.false_beat,
+                &synthesized.beat_ceiling_db,
+                motion,
+            );
+            // The instrument the row is measured on and against: this key with
+            // its own closed splits and no gain row at all.
+            let mut base = preset.clone();
+            base.notes.partial_gains[index] = Vec::new();
+            base.notes.false_beat[index] = splits.rows.clone();
+            // The power pin, on the engine's own spectrum — the same quantity
+            // `measured_over_rendered_report` pins against, and the same
+            // function.
+            let engine = rendered_spectrum(survey, &base, key, REFERENCE_VELOCITY)?;
+            let cells = synthesized.gains_db.len();
+            let row: Vec<Option<f64>> = synthesized
+                .gains_db
+                .iter()
+                .map(|db| Some(db / NEPERS_TO_DB))
+                .collect();
+            let mut engine_line = vec![None; cells];
+            for (k, amplitude) in engine {
+                if k >= 1 && (k as usize) <= cells && amplitude > 0.0 {
+                    engine_line[k as usize - 1] = Some(amplitude.ln());
+                }
+            }
+            let (levelled, _) = energy_offset(&row, &engine_line);
+            let fitted: Vec<f32> = levelled
+                .iter()
+                .map(|cell| match cell {
+                    Some(ln) => (ln.exp() as f32).clamp(MIN_PARTIAL_GAIN, MAX_PARTIAL_GAIN),
+                    None => 1.0,
+                })
+                .collect();
+            let closed = close_on_the_render(
+                &base,
+                &base,
+                key,
+                &fitted,
+                Some(synthesized.target_irregular),
+                DRAWN_LEVEL_BAND_DB,
+                shaping,
+            );
+            Some((key, synthesized, splits, closed))
+        })
+        .collect();
+
+    let mut refused = 0usize;
+    for (key, synthesized, splits, closed) in &rows {
+        let Some(index) = key_index(*key) else { continue };
+        // A draw the ceiling refused writes nothing. See `ClosedRow::reached`:
+        // the key already renders rougher than the recordings of its register
+        // without any row at all, and the answer to that is not a row.
+        let mut row: Vec<f32> = if closed.reached {
+            closed
+                .row
+                .iter()
+                .map(|g| g.clamp(MIN_PARTIAL_GAIN, MAX_PARTIAL_GAIN))
+                .collect()
+        } else {
+            refused += 1;
+            Vec::new()
+        };
+        while row.last() == Some(&1.0) {
+            row.pop();
+        }
+        preset.notes.partial_gains[index] = row;
+        preset.notes.false_beat[index] = splits.rows.clone();
+        // Named only if something was written. A key whose gain row the ceiling
+        // refused and whose wire drew no split carries no drawn number, so it
+        // has no provenance to record: the field says which *rows* are drawn,
+        // and an empty row is not one.
+        if !preset.notes.partial_gains[index].is_empty()
+            || !preset.notes.false_beat[index].is_empty()
+        {
+            preset.notes.synthesized_texture.push(*key);
+        }
+        let db: Vec<f64> = preset.notes.partial_gains[index]
+            .iter()
+            .map(|&g| 20.0 * f64::from(g).log10())
+            .collect();
+        println!(
+            "{:>4}  {:>5}  {:>6.2}/{:<6.2}  {:>5.2} {:>5}  {:>+6.2}  {:>4.2}  {:>5.2}/{:<5.2}  \
+             {:>+5.2}  {}{}",
+            key,
+            preset.notes.partial_gains[index].len(),
+            synthesized.drawn_amount_db,
+            piano_tuner::estimate::texture::robust_sigma(&db),
+            synthesized.rail_db,
+            synthesized.railed_cells,
+            closed.level_moved_db,
+            closed.keep,
+            synthesized.target_irregular,
+            closed.rendered_irregular,
+            closed.level_moved_db,
+            if closed.reached { "" } else { "REFUSED  " },
+            // Per written split: the partial, its rate, the ask that survived
+            // the ceiling, the ceiling it was held under and what the render
+            // read at it. A row whose ask the draw wrote whole prints the same
+            // number twice, which is how a key that needed no trim reads.
+            splits
+                .rows
+                .iter()
+                .zip(splits.ceiling_db.iter().zip(&splits.rendered_db))
+                .map(|(r, (ceiling, rendered))| {
+                    format!(
+                        "{}: {:.2}/{:.1} <= {:.1} ({:.1})",
+                        r.k, r.hz, r.db, rendered, ceiling
+                    )
+                })
+                .chain(splits.refused.iter().map(|&(k, bare, ceiling)| {
+                    format!("{k}: refused ({bare:.1} > {ceiling:.1})")
+                }))
+                .collect::<Vec<_>>()
+                .join("  ")
+        );
+    }
+    let written: usize = rows.iter().map(|r| r.2.rows.len()).sum();
+    let with_splits = rows.iter().filter(|r| !r.2.rows.is_empty()).count();
+    let drew: usize = rows.iter().map(|r| r.1.false_beat.len()).sum();
+    let trimmed: usize = rows.iter().map(|r| r.2.trimmed).sum();
+    let trimmed_db: f64 = rows.iter().map(|r| r.2.trimmed_db).sum();
+    let refused_splits: usize = rows.iter().map(|r| r.2.refused.len()).sum();
+    let unobserved: usize = rows.iter().map(|r| r.2.unobserved).sum();
+    println!(
+        "drawn: {} keys, {} gain cells, {} split rows over {} keys; \
+         {refused} rows refused by their own ceiling; {} keys keep their measured rows",
+        rows.len(),
+        rows.iter()
+            .filter_map(|r| key_index(r.0))
+            .map(|i| preset.notes.partial_gains[i].len())
+            .sum::<usize>(),
+        written,
+        with_splits,
+        measured.len()
+    );
+    println!(
+        "splits closed on the render: {drew} drawn, {trimmed} trimmed by \
+         {:.1} dB on average, {refused_splits} refused (the partial already beats \
+         over its ceiling with nothing written), {unobserved} kept unclosed (the \
+         render did not resolve the partial)",
+        if trimmed > 0 {
+            trimmed_db / trimmed as f64
+        } else {
+            0.0
+        }
+    );
+}
+
+/// Prints the fitted distributions, which are the milestone's own report.
+fn report_model(model: &TextureModel) {
+    println!(
+        "fitted from {} keys ({} split rows)\n  \
+         cells      exp({:+.5} key {:+.3}), scatter x{:.2}, r {:+.3} -> {:.0} at A0, {:.0} at C4, \
+         {:.0} at F#7\n  \
+         amount     exp({:+.5} key {:+.3}) dB, scatter x{:.2}, r {:+.3} -> {:.2} at A0, {:.2} at \
+         C4, {:.2} at F#7\n  \
+         lag-1 rho  {:+.3} over {} rows\n  \
+         ceiling    exp({:+.3} {:+.5} key {:+.7} key^2), scatter x{:.2}, R2 {:.3} -> {:.1} at A0, \
+         {:.1} at C4, {:.1} at F#7\n  \
+         splits     P(any) {:.2} at or under key {}, none above; count exp({:+.5} key {:+.3}), \
+         scatter x{:.2}, r {:+.3}\n  \
+         rate       lognormal ln-mean {:+.3} ln-sd {:.3} ({:.2} Hz median, {:.2}..{:.2} band), \
+         r(k, rate) {:+.3} within a key, r(key, rate) {:+.3}\n  \
+         depth      {:.2} {:+.4} key {:+.3} k dB, scatter {:.2} dB, R2 {:.3}\n  \
+         beat       exp({:+.3} {:+.5} key {:+.4} k) dB over {} cells at {} keys, scatter x{:.2} \
+         (x{:.2} between keys, x{:.2} within one), R2 {:.3} (key alone {:.3}, k alone {:.3}) -> \
+         {:.2} at A0 k1, {:.2} at C4 k1, {:.2} at C4 k8\n  \
+         partials   {}",
+        model.fitted_keys.len(),
+        model.false_beat_rows,
+        model.cells.slope,
+        model.cells.intercept,
+        model.cells.sigma.exp(),
+        model.cells.correlation,
+        model.cells.at(21),
+        model.cells.at(60),
+        model.cells.at(102),
+        model.amount.slope,
+        model.amount.intercept,
+        model.amount.sigma.exp(),
+        model.amount.correlation,
+        model.amount.at(21),
+        model.amount.at(60),
+        model.amount.at(102),
+        model.rho,
+        model.rho_rows,
+        model.target.coefficients[0],
+        model.target.coefficients[1],
+        model.target.coefficients[2],
+        model.target.sigma.exp(),
+        model.target.r_squared,
+        model.target.at(21),
+        model.target.at(60),
+        model.target.at(102),
+        model.false_beat_probability,
+        piano_tuner::estimate::texture::HIGHEST_FALSE_BEAT_KEY,
+        model.false_beat_count.slope,
+        model.false_beat_count.intercept,
+        model.false_beat_count.sigma.exp(),
+        model.false_beat_count.correlation,
+        model.rate_ln_mean,
+        model.rate_ln_sigma,
+        model.rate_ln_mean.exp(),
+        piano_tuner::estimate::texture::MIN_FITTED_HZ,
+        f64::from(piano_tuner::preset::MAX_FALSE_BEAT_HZ),
+        model.rate_vs_partial,
+        model.rate_vs_key,
+        model.depth[0],
+        model.depth[1],
+        model.depth[2],
+        model.depth_sigma,
+        model.depth_r_squared,
+        model.beat_ceiling.coefficients[0],
+        model.beat_ceiling.coefficients[1],
+        model.beat_ceiling.coefficients[2],
+        model.beat_ceiling.points,
+        model.beat_ceiling.keys,
+        model.beat_ceiling.sigma.exp(),
+        model.beat_ceiling.sigma_key.exp(),
+        model.beat_ceiling.sigma_cell.exp(),
+        model.beat_ceiling.r_squared,
+        model.beat_ceiling.r_squared_key_only,
+        model.beat_ceiling.r_squared_partial_only,
+        model.beat_ceiling.at(21, 1),
+        model.beat_ceiling.at(60, 1),
+        model.beat_ceiling.at(60, 8),
+        model
+            .partial_weights
+            .iter()
+            .enumerate()
+            .map(|(i, w)| format!("k{}: {:.2}", i + 1, w))
+            .collect::<Vec<_>>()
+            .join("  "),
+    );
 }
 
 /// `(level dBFS, series)` of one key struck alone through `preset`, measured
@@ -872,21 +1623,32 @@ fn set_false_beat(preset: &mut Preset, key: u8, rows: &[FalseBeat]) {
     preset.notes.false_beat[index] = rows.to_vec();
 }
 
+/// Writes the fitted rows into the table, leaving every key this fit did not
+/// measure as it found it.
+///
+/// A merge and not a replacement, because since `DECISIONS.md` 284 the table
+/// also carries the 60 unsampled keys' **drawn** rows and this stage runs over
+/// the 30 sampled ones. Replacing it wholesale would silently empty the other
+/// sixty and leave `notes.synthesized_texture` naming keys with nothing in
+/// them.
 fn write_false_beats(
     preset: &mut Preset,
     fits: &BTreeMap<u8, piano_tuner::estimate::motion::FalseBeatFit>,
 ) {
-    let mut table: Vec<Vec<FalseBeat>> = vec![Vec::new(); piano_tuner::preset::NUM_KEYS];
-    let mut any = false;
+    if fits.is_empty() {
+        return;
+    }
+    if preset.notes.false_beat.len() != piano_tuner::preset::NUM_KEYS {
+        preset.notes.false_beat = vec![Vec::new(); piano_tuner::preset::NUM_KEYS];
+    }
     for (&key, fit) in fits {
         if let Some(index) = key_index(key) {
-            if !fit.rows.is_empty() {
-                any = true;
-            }
-            table[index] = fit.rows.clone();
+            preset.notes.false_beat[index] = fit.rows.clone();
         }
     }
-    preset.notes.false_beat = if any { table } else { Vec::new() };
+    if preset.notes.false_beat.iter().all(Vec::is_empty) {
+        preset.notes.false_beat = Vec::new();
+    }
 }
 
 /// The library layer of `key` that a strike at `velocity` would trigger.
@@ -1057,7 +1819,7 @@ fn rendered_velocity_spread(probe: &Preset, keys: &[u8]) -> (f64, f64) {
     )
 }
 
-/// One layer's time-zero spectrum as the recording has it./// One layer's time-zero spectrum as the recording has it.
+/// One layer's time-zero spectrum as the recording has it.
 fn recorded_spectrum(
     survey: &SurveyConfig,
     preset: &Preset,

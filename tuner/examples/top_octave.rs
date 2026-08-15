@@ -27,10 +27,18 @@
 //!    what `ResonanceBus::is_active` tests, so lowering it keeps the bus alive,
 //!    keeps the string driven, and suppresses culling instead of measuring it.)
 //! 3. **The T60 solve and the level calibration.** `sigma` / `T60` per mode and
-//!    `peak` against `ref peak`. Neither is what switched the note off, and one
-//!    of them is a real defect the fix does not touch: `eng -60` against
-//!    `ref -60` says the engine's top octave is 60 dB down at 1.3-1.9 s where
-//!    the recordings take 3.4-3.7.
+//!    `peak` against `ref peak`. Neither is what switched the note off.
+//!
+//! **`eng -60` against `ref -60` is not a decay comparison, and this file used
+//! to say it was** — "the engine's top octave is 60 dB down at 1.3-1.9 s where
+//! the recordings take 3.4-3.7". Both columns are **broadband**, and at those
+//! keys the recording's late broadband energy is its room and its neighbouring
+//! strings: the note's own partial is 72-92 dB under the peak out there while
+//! the broadband level is only ~58 dB under it. Measured on the partial
+//! instead, the engine's top-octave fundamental lasts **1.5 to 2.9 times
+//! longer** than the recording's, which is the opposite defect.
+//! `examples/brilliance.rs` is where that measurement lives and
+//! `DECISIONS.md` 293 is the refusal.
 //!
 //! `cull @` is the analytic crossing time of each partial's loudest and
 //! longest-lived mode; `cliff @s` is the first instant after which the render is

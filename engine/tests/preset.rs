@@ -182,3 +182,50 @@ fn a_retuned_preset_produces_a_different_render() {
         "retuning the preset did not reach the strings"
     );
 }
+
+/// Every key the shipped measured preset says is drawn has rows, and no key it
+/// does not say is drawn has one it should not.
+///
+/// The provenance field (`DECISIONS.md` 291) is only worth having if it is
+/// true, and the two ways it can go wrong are both silent: a stage that rebuilt
+/// a whole table would empty the drawn rows and leave the list naming keys with
+/// nothing in them, and a fit that measured a key for the first time would
+/// leave it named as drawn. Both are checked here rather than trusted, because
+/// the second one is exactly what this file exists for — a library that samples
+/// one of these 60 keys is the next thing that happens to this preset.
+#[test]
+fn the_measured_presets_provenance_list_matches_its_own_tables() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../presets/salamander-c5.toml");
+    let preset = Preset::load(&path).expect("presets/salamander-c5.toml loads");
+    let drawn = &preset.notes.synthesized_texture;
+    // 50 and not 60: the draw visits the 58 keys the library never sampled plus
+    // A7 and C8, whose recordings measured nothing, and ten of those sixty end
+    // up carrying nothing — the eight top-octave keys whose drawn row came out
+    // shorter than a roughness can live in, and D3 and D4, whose gain rows
+    // their own roughness ceiling refused and whose wires wrote no split (D3
+    // drew none; D4's two were refused by the beat-depth ceiling of
+    // `DECISIONS.md` 300, its own unison already beating over the piano's at
+    // both partials). A key that carries nothing declares nothing.
+    assert_eq!(drawn.len(), 50, "drawn keys: {drawn:?}");
+    for &key in drawn {
+        let index = usize::from(key - piano_emulator::types::LOWEST_KEY);
+        assert!(
+            !preset.notes.partial_gains[index].is_empty()
+                || !preset.notes.false_beat[index].is_empty(),
+            "key {key} is named as drawn and carries neither a gain row nor a split"
+        );
+    }
+    // The 28 measured keys are every third semitone from A0, and none of them
+    // is in the list.
+    let measured: Vec<u8> = (21..=108u8)
+        .filter(|key| {
+            let index = usize::from(key - piano_emulator::types::LOWEST_KEY);
+            !preset.notes.partial_gains[index].is_empty() && !drawn.contains(key)
+        })
+        .collect();
+    assert_eq!(measured.len(), 28, "measured keys: {measured:?}");
+    assert!(
+        measured.iter().all(|key| (key - 21) % 3 == 0),
+        "the measured keys are not the library's own: {measured:?}"
+    );
+}

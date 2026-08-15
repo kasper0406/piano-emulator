@@ -1706,32 +1706,14 @@ pub fn alberti_fast() -> Phrase {
     }
 }
 
-/// Eight bars of the Ode to Joy theme (Beethoven, Symphony No. 9 — public
-/// domain), harmonised with a bass note, a left-hand chord and a pedal change
-/// on every harmony. The only phrase with three simultaneous textures, and
-/// therefore the only one where masking between them can go wrong.
-pub fn excerpt() -> Phrase {
-    const C: [u8; 4] = [36, 48, 52, 55];
-    const G: [u8; 4] = [43, 47, 50, 55];
-    const G7: [u8; 4] = [43, 47, 53, 55];
-    // (bar-relative onset in beats, chord)
-    let harmony: [(f64, [u8; 4]); 13] = [
-        (0.0, C),
-        (4.0, C),
-        (6.0, G),
-        (8.0, C),
-        (10.0, G),
-        (12.0, G7),
-        (16.0, C),
-        (20.0, C),
-        (22.0, G),
-        (24.0, C),
-        (26.0, G),
-        (28.0, G7),
-        (30.0, C),
-    ];
-    // (onset in beats, key, length in beats)
-    let melody: [(f64, u8, f64); 30] = [
+/// The Ode to Joy melody line of [`excerpt`]: `(onset in beats, key, length in
+/// beats)`, thirty notes over five distinct pitches (C4, D4, E4, F4, G4).
+///
+/// A `const` rather than a local because a second tool plays exactly this line
+/// on its own: `estimate::melody`'s evenness gate renders the soprano solo and
+/// asks whether any one of its notes is textured unlike the rest. That question
+/// is only about *this* phrase if the two lists cannot drift apart.
+pub const ODE_MELODY: [(f64, u8, f64); 30] = [
         (0.0, 64, 1.0),
         (1.0, 64, 1.0),
         (2.0, 65, 1.0),
@@ -1763,8 +1745,43 @@ pub fn excerpt() -> Phrase {
         (29.5, 60, 0.5),
         (30.0, 60, 3.0),
     ];
-    let beat = 0.5;
-    let start = 0.2;
+
+/// Seconds per beat in [`excerpt`] and in the soprano line taken out of it.
+pub const ODE_BEAT: f64 = 0.5;
+
+/// Seconds of silence before [`excerpt`] begins.
+pub const ODE_START: f64 = 0.2;
+
+/// Velocity every melody note of [`excerpt`] is struck at.
+pub const ODE_MELODY_VEL: u8 = 88;
+
+/// Eight bars of the Ode to Joy theme (Beethoven, Symphony No. 9 — public
+/// domain), harmonised with a bass note, a left-hand chord and a pedal change
+/// on every harmony. The only phrase with three simultaneous textures, and
+/// therefore the only one where masking between them can go wrong.
+pub fn excerpt() -> Phrase {
+    const C: [u8; 4] = [36, 48, 52, 55];
+    const G: [u8; 4] = [43, 47, 50, 55];
+    const G7: [u8; 4] = [43, 47, 53, 55];
+    let melody = ODE_MELODY;
+    let beat = ODE_BEAT;
+    let start = ODE_START;
+    // (bar-relative onset in beats, chord)
+    let harmony: [(f64, [u8; 4]); 13] = [
+        (0.0, C),
+        (4.0, C),
+        (6.0, G),
+        (8.0, C),
+        (10.0, G),
+        (12.0, G7),
+        (16.0, C),
+        (20.0, C),
+        (22.0, G),
+        (24.0, C),
+        (26.0, G),
+        (28.0, G7),
+        (30.0, C),
+    ];
     let mut events = Vec::new();
     for (i, (at, chord)) in harmony.iter().enumerate() {
         let t = start + at * beat;
@@ -1780,7 +1797,7 @@ pub fn excerpt() -> Phrase {
         sustain(&mut events, t + 0.10, true);
     }
     for (at, key, len) in melody {
-        note(&mut events, start + at * beat, key, 88, (len * beat - 0.05).max(0.08));
+        note(&mut events, start + at * beat, key, ODE_MELODY_VEL, (len * beat - 0.05).max(0.08));
     }
     sustain(&mut events, start + 34.0 * beat, false);
     Phrase {

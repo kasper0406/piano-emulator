@@ -84,6 +84,15 @@ use crate::preset::{
 /// Decibels per neper.
 const NEPERS_TO_DB: f64 = 8.685_889_638_065_035;
 
+/// Longest a `notes.partial_gains` row is ever written, in cells.
+///
+/// The bank is longer — 80 partials at C4 — and the *recording* is not: past
+/// the fortieth partial of a bass note the tracker is measuring its own floor,
+/// and `estimate::texture` draws a row length from what the recordings reached
+/// rather than from what the engine has. Lives here rather than in the driver
+/// because both the fit and the draw are bounded by it.
+pub const MAX_ROW_CELLS: usize = 48;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShapingConfig {
     /// Degree of the polynomial in `ln k` standing in for the smooth spectral
@@ -835,17 +844,10 @@ fn rail_cells(measured: &mut [Option<Cell>], offset: f64, config: &ShapingConfig
         .flatten()
         .map(|c| c.centre - offset)
         .collect();
-    let schema = f64::from(MAX_PARTIAL_GAIN).ln().min(-f64::from(MIN_PARTIAL_GAIN).ln());
-    let Some(centre) = median(deviations.iter().copied()) else {
-        return (NEPERS_TO_DB * schema, 0);
-    };
-    let mad = median(deviations.iter().map(|d| (d - centre).abs())).unwrap_or(0.0);
-    let earned = if deviations.len() >= config.min_rail_cells {
-        config.rail_sigmas * 1.4826 * mad
-    } else {
-        0.0
-    };
-    let rail = earned.max(config.min_rail_db / NEPERS_TO_DB).min(schema);
+    let (centre, rail) = own_rail(&deviations, config);
+    if deviations.is_empty() {
+        return (NEPERS_TO_DB * rail, 0);
+    }
     let mut railed = 0usize;
     for cell in measured.iter_mut().flatten() {
         let deviation = cell.centre - offset;
@@ -860,6 +862,34 @@ fn rail_cells(measured: &mut [Option<Cell>], offset: f64, config: &ShapingConfig
     (NEPERS_TO_DB * rail, railed)
 }
 
+/// The rail one row of log-cells earns from its **own** spread, in nepers, with
+/// the centre it is taken about: `rail_sigmas * 1.4826 MAD`, floored at
+/// `min_rail_db` and capped by the schema, and refused outright to a row of
+/// fewer than `min_rail_cells` cells.
+///
+/// Split out of [`rail_cells`] because `estimate::texture` rails a **drawn**
+/// row by the same rule, and a rule that is the fitted rows' discipline and the
+/// drawn rows' discipline has to be one function or it is two rules that happen
+/// to agree today.
+pub fn own_rail(deviations: &[f64], config: &ShapingConfig) -> (f64, f64) {
+    let schema = f64::from(MAX_PARTIAL_GAIN)
+        .ln()
+        .min(-f64::from(MIN_PARTIAL_GAIN).ln());
+    let Some(centre) = median(deviations.iter().copied()) else {
+        return (0.0, schema);
+    };
+    let mad = median(deviations.iter().map(|d| (d - centre).abs())).unwrap_or(0.0);
+    let earned = if deviations.len() >= config.min_rail_cells {
+        config.rail_sigmas * 1.4826 * mad
+    } else {
+        0.0
+    };
+    (
+        centre,
+        earned.max(config.min_rail_db / NEPERS_TO_DB).min(schema),
+    )
+}
+
 /// Smooths the written row until the harmonic series it predicts the engine will
 /// render is **no more jagged than the recording's own**, and returns
 /// `(row, target, achieved, lambda)` in dB.
@@ -872,6 +902,13 @@ fn rail_cells(measured: &mut [Option<Cell>], offset: f64, config: &ShapingConfig
 /// at all. A listener found the second half of that as one note of a melody that
 /// "sounds different from the rest": C4 renders at 13.9 dB of `irregular`
 /// against its own recording's 7.0 and its unfitted neighbours' 5-6.
+///
+/// This function is the first half of the answer and closed the 4 dB. The
+/// second half — the 5 dB, which is the *seam* and was what the listener
+/// actually reported — is `estimate::texture` (`DECISIONS.md` 284-290): the
+/// unsampled keys are given rows drawn from these keys' own distributions, and
+/// they are trimmed against the recordings' register curve by this same
+/// bisection.
 ///
 /// The row cannot be blamed for having steps in it — the recording has 5-10 dB
 /// of measured scatter and reproducing it is the entire reason the field exists.
@@ -1117,7 +1154,7 @@ fn whittaker(y: &[f64], precision: &[f64], gaps: &[f64], lambda: f64) -> Vec<f64
 ///   have, against a `match` improvement of 1-2 dB at the three keys with the
 ///   largest shifts. So an unmeasured partial keeps its `1.0` and the step at
 ///   the end of the row is accepted, with this measurement as the reason.
-fn energy_offset(row: &[Option<f64>], engine: &[Option<f64>]) -> (Vec<Option<f64>>, f64) {
+pub fn energy_offset(row: &[Option<f64>], engine: &[Option<f64>]) -> (Vec<Option<f64>>, f64) {
     let weights: Vec<(usize, f64)> = row
         .iter()
         .enumerate()

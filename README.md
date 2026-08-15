@@ -35,14 +35,26 @@ the root runs both crates, including the self-calibration gate, which puts the
 tuner's whole estimation pipeline over notes the engine rendered from a known
 preset and checks that the parameters come back.
 
-**One of those gates is red, on purpose and by name.**
+**Two of those gates are red, on purpose and by name.**
+
 `a_known_duplex_comes_back_from_the_engines_own_render_of_it` fails and has
-since the unison became a coupled eigenproblem: 487 green, one red. It is not a
-tolerance and it is not the estimator — with the modal culling switched off the
-injected segment comes back at −0.05 cents having rung 1.38 s of the 1.4 s it
-was given — it is the duplex bullet below, and the gate is left failing rather
-than skipped because that is the only honest way to carry it
-(`DECISIONS.md` 260).
+since the unison became a coupled eigenproblem. It is not a tolerance and it is
+not the estimator — with the modal culling switched off the injected segment
+comes back at −0.05 cents having rung 1.38 s of the 1.4 s it was given — it is
+the duplex bullet below (`DECISIONS.md` 260).
+
+`no_note_of_the_line_wobbles_unlike_the_rest` fails because one note of a melody
+does not belong. `tuner/tests/melody.rs` renders the Ode to Joy melody line
+solo through the engine and through the recordings of the same piano and asks
+whether any note stands further off the line's own register trend than the
+piano's own worst note stands off its. F4 stands **1.28 dB** off in beating
+where the recordings' worst note stands 0.21 dB off theirs, and clearing the
+`notes.false_beat` splits that key was *drawn* takes it to 0.56: split depth is
+the one thing `DECISIONS.md` 284 drew without closing it on the render, and
+until it is closed the gate says so (`DECISIONS.md` 296-298).
+
+Both are left failing rather than skipped because that is the only honest way to
+carry a defect nobody has fixed.
 
 The default (dev) profile is built with `opt-level = 3` — the DSP is unusable unoptimized — so plain `cargo run`/`cargo test` are real-time capable while keeping fast incremental builds. `--release` additionally enables thin LTO and disables debug assertions; it is the profile performance is measured on, and the performance acceptance test only runs there. The binary opens the default output device and drops you into a REPL:
 
@@ -148,6 +160,20 @@ it, and `notes.partial_gains` as the full measured ratio of the recording's time
 the engine's own render of the same note. Unlike `fit_partials` it is re-entrant: every fit clears
 the field it writes from the probe before rendering it. `DECISIONS.md` 239-248.
 
+Its fifth stage, `--stage texture`, is the one that reaches the 58 keys the library never sampled.
+A per-partial row and a within-string split are *measurements* and cannot be invented for a key
+nobody recorded — but the **distributions** the 28 measured keys carry are statements about the
+instrument, and those can be drawn from: how much roughness a row has (register-free, 4.4 dB of
+robust spread), how tied neighbouring partials are (lag-1 +0.11), how far up the series a row
+reaches, how many splits a wire has and at what rate and depth. Every cell is a draw seeded from
+the key number and one named constant, so a re-emitted preset is the same preset; no cell is ever
+copied from a neighbour, because the recordings say the roughness is *not* shared between notes at
+the same frequency; nothing is drawn that the fitted rows cannot separate from a *colour*, which is
+why the tilt is not drawn and a row shorter than four cells is not written; and the drawn rows go
+through the same rails, the same power pin and the same close-on-the-render the measured ones do. Which rows were drawn is written down in
+`notes.synthesized_texture` so a library that later samples one of those keys can replace them
+without guessing. `DECISIONS.md` 284-291.
+
 `survey` is stage 1: everything an isolated recorded note can identify.
 `fit_sympathetic` is stage 2, which is render-and-measure — it fits the duplex
 segments from the library's release-resonance recordings, the sympathetic
@@ -166,5 +192,20 @@ measure and print without writing anything.
 - `DECISIONS.md` — the running log of every design decision and deviation.
 - `TUNING.md` — the plan for estimating parameters automatically from recordings of real pianos (in progress; stage 1, its self-calibration gate and the first measured preset are built, in `tuner/`).
 - `renders/realism/REALISM.md` — the standing realism scoreboard: six fixed phrases rendered from one event list through both the engine and the Salamander recordings, with `TUNING.md`'s stage-2 losses measured over each pair *and* the same measurement between two recordings of the same piano, which is the noise floor that makes the first number readable. It also carries **Columns A and B** (`FUNDAMENTALS.md` §II.3): four per-cell measurements of how a single partial *moves* — instantaneous-frequency mismatch and placement, beat-depth error and velocity coherence — over sixteen key × partial cells at three velocities, each with a gate, because every other column on the board is a functional of energy and the artefact those were built to catch is not. All four gates pass on the measured preset (`DECISIONS.md` 253); `cargo run --release -p piano-tuner --example motion_score` is the same four numbers with every cell printed, in seven seconds, for iterating a fit against them. Written by `cargo run --release -p piano-tuner --example realism_bench` (needs `data/fetch_salamander.sh`); the metrics themselves live in `tuner/src/realism.rs` so the scoreboard and the loss an optimizer minimises are one piece of code.
+- **The melody gate** is the listener's own test, made permanent
+  (`DECISIONS.md` 296-298): `cargo test -p piano-tuner --test melody` plays the
+  Ode to Joy melody line alone — the soprano of the `excerpt` phrase, the same
+  notes from the same `realism::ODE_MELODY` — through the engine and through the
+  recordings, measures each note's roughness, beating and 2-6 kHz share, and
+  asserts that no note stands further off the line's own register trend than the
+  recordings' worst note stands off theirs. It exists because every other
+  standing number here is either a *compass* statistic (88 keys struck alone) or
+  a mean over a phrase, and neither of those is a tune with one note wrong in it.
+  `cargo run --release -p piano-tuner --features diagnostics --example melody_line`
+  is the same measurement printed in full, with flags that undo one table at a
+  time so a failure can be attributed to the table that causes it; it writes
+  `renders/melody/MELODY.md` and the two rendered lines beside it, because the
+  complaint this gate exists for was made by listening to them.
+- **Brilliance** has no standing report, because the audit that measured it (`DECISIONS.md` 292-295) moved nothing: `cargo run --release -p piano-tuner --features diagnostics --example brilliance` prints, per key and per phrase, how much 2-6 kHz and 6-12 kHz energy the engine carries against the recording of the same note at 0.1 s and at 1 s, each against the reference's own velocity-layer spread. It exists because `COMPASS.md`'s `centroid` is a mean *partial index* and the ear's brightness is absolute. It refused the top octave's decay (the recording's late energy there is its room, 20-30 dB over the note's own partial), acquitted the master shelf on its measured leverage, and convicted the partial envelope above the fitted rows — an error in partial *number* rather than in frequency, and one whose fix is a decay re-fit rather than a filter. The measurements are in `tuner/src/estimate/brilliance.rs`.
 - `presets/default.toml` — the hand-tuned v1 instrument, written out in full.
-- `presets/salamander-c5.toml` — the same instrument with everything stage 1 could measure off a real Yamaha C5 written into it.
+- `presets/salamander-c5.toml` — the same instrument with everything stage 1 could measure off a real Yamaha C5 written into it. Its `notes.partial_gains` and `notes.false_beat` tables now cover the whole compass: 28 keys measured against their own recordings and 50 **drawn** from those keys' distributions, named in `notes.synthesized_texture` (`DECISIONS.md` 284-291, 300). Both halves of a drawn key are closed on the **render** — the row against the recordings' own roughness of that register, the splits against their own beat depth — which is what a fitted key's row and a fitted key's splits are each closed against too.

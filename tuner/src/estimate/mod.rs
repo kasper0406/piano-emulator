@@ -33,6 +33,7 @@
 //! cached to disk once and the fits run against it in milliseconds.
 
 pub mod attack;
+pub mod brilliance;
 pub mod compass;
 pub mod damper;
 pub mod decay;
@@ -41,11 +42,13 @@ pub mod duplex;
 pub mod halo;
 pub mod hammer;
 pub mod inharmonic;
+pub mod melody;
 pub mod motion;
 pub mod noise;
 pub mod shaping;
 pub mod spread;
 pub mod strike;
+pub mod texture;
 pub mod unison;
 
 pub use attack::{fit_strike, residual_metrics, AttackConfig, AttackResidual, StrikeFitReport};

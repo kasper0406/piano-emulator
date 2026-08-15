@@ -70,7 +70,7 @@ use crate::string::{
 };
 use crate::types::{
     amp_to_db, db_to_amp, index_to_note, interp_anchors, key_index, key_position, note_to_freq,
-    LOWEST_KEY, MAX_UNISON, NUM_KEYS,
+    HIGHEST_KEY, LOWEST_KEY, MAX_UNISON, NUM_KEYS,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -1047,6 +1047,31 @@ pub struct NoteTables {
     /// condition has no measurable split, and most of them are.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub false_beat: Vec<Vec<FalseBeat>>,
+    /// MIDI key numbers whose [`NoteTables::partial_gains`] and
+    /// [`NoteTables::false_beat`] rows were **synthesized** from the fitted
+    /// keys' own distributions rather than measured from a recording of this
+    /// key.
+    ///
+    /// The engine does not read this: a synthesized row is played exactly like a
+    /// measured one, which is the point of synthesizing it. It is carried in the
+    /// preset because a number's *provenance* is part of the instrument's
+    /// description, and because the alternative — a comment — does not survive
+    /// the round trip through `serde` that every emitted preset makes. A library
+    /// that later samples one of these keys can replace its rows and strike it
+    /// from this list without having to guess which rows were measured, and
+    /// `DECISIONS.md` 284's own re-fit is idempotent because it clears exactly
+    /// the keys named here before drawing again.
+    ///
+    /// A key appears here only if a drawn row was actually *written* for it:
+    /// the field says which rows are drawn, and a key whose draw was refused
+    /// carries no drawn number and so has nothing to declare.
+    ///
+    /// Empty — the default, and absent from the file — is a preset every row of
+    /// which is a measurement. Entries are strictly ascending and inside
+    /// [`LOWEST_KEY`](crate::types::LOWEST_KEY)..=[`HIGHEST_KEY`](crate::types::HIGHEST_KEY),
+    /// so the list cannot name a key twice or a key that does not exist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_texture: Vec<u8>,
     /// Per-key override of [`Voicing::polarization_pan_spread`].
     ///
     /// The global scalar is one number for the whole compass, and the compass
@@ -1304,6 +1329,7 @@ impl Preset {
         // build.
         self.validate_partial_tables()?;
         self.validate_false_beats()?;
+        self.validate_synthesized_texture()?;
 
         let v = &self.voicing;
         // `excitation_scale` divides the unison bridge coupling, and the
@@ -1639,6 +1665,32 @@ impl Preset {
                     )));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Checks the provenance list: real keys, in order, each named once.
+    ///
+    /// Strictly ascending does both jobs at once, and it is checked rather than
+    /// sorted on load because a list that names a key twice is a list somebody
+    /// built by appending, and the second entry is the one that would be lost.
+    fn validate_synthesized_texture(&self) -> Result<(), PresetError> {
+        let mut previous: Option<u8> = None;
+        for &key in &self.notes.synthesized_texture {
+            if !(LOWEST_KEY..=HIGHEST_KEY).contains(&key) {
+                return Err(PresetError::invalid(format!(
+                    "notes.synthesized_texture names key {key}, outside \
+                     {LOWEST_KEY}..={HIGHEST_KEY}"
+                )));
+            }
+            if let Some(last) = previous {
+                if key <= last {
+                    return Err(PresetError::invalid(format!(
+                        "notes.synthesized_texture is not strictly ascending: {key} after {last}"
+                    )));
+                }
+            }
+            previous = Some(key);
         }
         Ok(())
     }
@@ -2506,6 +2558,9 @@ impl Default for Preset {
                 // wire, and a synthetic instrument has none until one is
                 // measured on it.
                 false_beat: Vec::new(),
+                // Every row of the default preset is a law or a measurement,
+                // and none of it is drawn.
+                synthesized_texture: Vec::new(),
                 // No per-key override: `voicing.polarization_pan_spread`
                 // applies to the whole compass, as it always did.
                 pan_spread: Vec::new(),
@@ -2847,7 +2902,7 @@ mod tests {
 
         // Every one of these would reach the DSP as a divide by zero, a NaN,
         // or a resonator pole outside the unit circle.
-        let breakages: [fn(&mut Preset); 138] = [
+        let breakages: [fn(&mut Preset); 142] = [
             |p: &mut Preset| p.notes.f0_hz[3] = 0.0,
             |p: &mut Preset| p.notes.sigma0[3] = -1.0,
             |p: &mut Preset| p.notes.inharmonicity_b[3] = -1e-4,
@@ -3175,6 +3230,13 @@ mod tests {
                     .collect();
                 p.notes.false_beat = rows;
             },
+            // The provenance list names real keys, in order, once each: a list
+            // that names one twice is a list somebody built by appending, and
+            // the second entry is the one that would be lost.
+            |p: &mut Preset| p.notes.synthesized_texture = vec![LOWEST_KEY - 1],
+            |p: &mut Preset| p.notes.synthesized_texture = vec![HIGHEST_KEY + 1],
+            |p: &mut Preset| p.notes.synthesized_texture = vec![61, 60],
+            |p: &mut Preset| p.notes.synthesized_texture = vec![60, 60],
             // The velocity law for the strike vector's direction reaches the
             // mode gains at note-on, so its two ends and its tilt are bounded
             // exactly like everything else that does.
