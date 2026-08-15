@@ -36,6 +36,7 @@
 //! ```
 
 pub mod audio;
+pub mod cache;
 pub mod error;
 pub mod estimate;
 pub mod library;

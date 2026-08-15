@@ -37,9 +37,37 @@
 //! it. See `DECISIONS.md` items 80-84; the bounds below are what is actually
 //! achieved, and each one that is looser than `TUNING.md`'s is written next to
 //! the target it replaces.
+//!
+//! # Running it
+//!
+//! Every test here is `#[cfg_attr(debug_assertions, ignore)]`: a gate on what
+//! the estimators recover from the instrument is meaningless at the accuracy an
+//! unoptimised render has, so plain `cargo test` skips the lot and this file
+//! costs a dev-cycle nothing. In release the whole gate is
+//!
+//! ```sh
+//! cargo test --release -p piano-tuner --test calibration
+//! ```
+//!
+//! and the subsets worth naming, with what each cost **before** this file was
+//! parallelised (`DECISIONS.md` 284) — the ranking is unchanged, the numbers are
+//! now a quarter of these:
+//!
+//! | filter | what it is | was |
+//! |---|---|---|
+//! | `per_partial::` | the four per-partial and attack fits, including the comb floor — five probes of eight layers of a 26 s A1, which was by itself the whole gate's wall time | 230 s |
+//! | `a_known_contact_width` | the hammer's contact width and what it buys the felt | 21 s |
+//! | `a_known_strike_direction` | the swing, off a sixteen-layer regression and a four-point line | 14 s |
+//! | `an_engine_loaded_` | the round trip: estimates -> TOML -> engine -> the same partials | 13 s |
+//!
+//! Nothing about what any of them asserts depends on which subset it is run in:
+//! the four notes every test shares ([`cases`]) are built on first use, per
+//! process, so a filtered run pays for exactly the notes its tests read.
 
 use std::f64::consts::{FRAC_PI_4, PI};
 use std::sync::OnceLock;
+
+use rayon::prelude::*;
 
 use piano_emulator::preset::Preset as EnginePreset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
@@ -61,11 +89,11 @@ use piano_tuner::estimate::motion::{
 use piano_tuner::estimate::spread::{note_spread, SpreadConfig};
 use piano_tuner::motion::{partial_motion, Motion, Spectrum};
 use piano_tuner::estimate::{DecayConfig, StrikeConfig};
-use piano_tuner::pipeline::{analyze_note, NoteAnalysis, NoteConfig};
+use piano_tuner::pipeline::{analyze_trajectories, track_refined, NoteAnalysis, NoteConfig};
 use piano_tuner::preset::{equal_temperament, key_index, Preset, PresetBuilder};
 use piano_tuner::stft::StftConfig;
 use piano_tuner::tracker::TrackerConfig;
-use piano_tuner::trajectory::InharmonicModel;
+use piano_tuner::trajectory::{InharmonicModel, NoteTrajectories};
 
 const SAMPLE_RATE: f64 = 48_000.0;
 
@@ -186,9 +214,114 @@ fn analysis_config() -> NoteConfig {
     }
 }
 
-/// Renders one note and runs the whole of stage 1 on it, seeded deliberately
-/// wrong — ten cents flat and with no inharmonicity at all — so that nothing an
-/// estimator returns can have come from the seed.
+// ------------------------------------------------- the tracked-note corpus
+//
+// The gate's cost is not the engine. Measured on this machine, one of the notes
+// it leans on hardest — A1 held for 26 s — costs **0.32 s to render and 3.2 s
+// to track**, and the estimators that read the tracks cost milliseconds. So the
+// thing worth keeping between runs is the tracker's output, and `pipeline` has
+// already split exactly there: `track_refined` does the transform and the
+// association, `analyze_trajectories` does every fit. Only the first half is
+// cached; **every estimator, every tolerance and every assertion runs fresh on
+// every run**, which is what makes this a speed-up rather than a weakening.
+//
+// # What the key has to contain
+//
+// A cached trajectory is a function of the preset that was rendered, the note
+// asked of it, the engine that rendered it and the tracker that followed it. The
+// first two are named directly. The last two have no version number to read, so
+// they are fingerprinted by *what they do*: [`corpus_base`] renders one short
+// note through `render_note` and tracks it, and hashes both the audio and the
+// tracks. Any change to the engine's sounding path, to `presets/default.toml`,
+// to `render_note`'s own un-panning, or to the tuner's transform or association
+// moves that probe and misses the whole corpus. There is nothing to remember to
+// bump.
+
+/// Bump when the *format* of a corpus entry changes — i.e. when
+/// [`NoteTrajectories`]'s serialisation changes shape. Everything else that
+/// could invalidate an entry is hashed rather than declared.
+const CORPUS_VERSION: u32 = 1;
+
+/// The note [`corpus_base`] fingerprints the engine and the tracker with. Short,
+/// three-strung and mid-compass: long enough to give the tracker a dozen frames
+/// of every partial, cheap enough to pay for on every run of the binary.
+const PROBE: (u8, u8, f32) = (60, 90, 1.0);
+
+fn corpus_dir() -> std::path::PathBuf {
+    piano_tuner::cache::calibration_dir(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".."),
+    )
+}
+
+/// Everything a corpus entry depends on that is not the note itself: the code on
+/// both sides of the render, measured by running it.
+fn corpus_base() -> piano_tuner::cache::Fingerprint {
+    static BASE: OnceLock<piano_tuner::cache::Fingerprint> = OnceLock::new();
+    *BASE.get_or_init(|| {
+        let (key, vel, duration_s) = PROBE;
+        let signal = render_note(&gate_preset(), key, vel, duration_s);
+        let config = analysis_config();
+        let (probe, _) = track_refined(&signal, SAMPLE_RATE, seed_for(&gate_preset(), key), &config)
+            .expect("the probe note tracks");
+        let mut fingerprint = piano_tuner::cache::Fingerprint::new();
+        fingerprint
+            .str("calibration/corpus")
+            .u64(u64::from(CORPUS_VERSION))
+            // What the engine sounds like, through this file's own render path.
+            .samples(&signal)
+            // ... and what the tracker makes of it.
+            .f64(probe.onset_s)
+            .u64(probe.tracks.len() as u64);
+        for track in &probe.tracks {
+            fingerprint.u64(u64::from(track.k)).u64(track.len() as u64);
+            for point in &track.points {
+                fingerprint
+                    .f64(point.time_s)
+                    .f64(point.frequency_hz)
+                    .f64(point.amplitude);
+            }
+        }
+        fingerprint
+    })
+}
+
+/// The seed every note in this file is tracked from: deliberately wrong — ten
+/// cents flat and with no inharmonicity at all — so that nothing an estimator
+/// returns can have come from it.
+fn seed_for(preset: &EnginePreset, key: u8) -> InharmonicModel {
+    let f0 = f64::from(preset.notes.f0_hz[key_index(key).expect("a key")]);
+    InharmonicModel::harmonic(f0 * (-10.0f64 / 1200.0).exp2())
+}
+
+/// One note, rendered and tracked — from the corpus if it is there.
+fn tracked(
+    preset: &EnginePreset,
+    key: u8,
+    vel: u8,
+    duration_s: f32,
+    config: &NoteConfig,
+) -> NoteTrajectories {
+    let mut fingerprint = corpus_base();
+    fingerprint
+        // The preset as the engine will read it, which is the only description
+        // of it both crates agree on.
+        .str(&preset.to_toml())
+        .u64(u64::from(key))
+        .u64(u64::from(vel))
+        .f32(duration_s)
+        // The two halves of `NoteConfig` that reach the tracker. The rest of it
+        // is read by `analyze_trajectories`, which is not cached.
+        .str(&format!("{:?}", config.tracker))
+        .str(&format!("{:?}", config.refinement));
+    let path = corpus_dir().join(format!("note{key:03}-vel{vel:03}-{}.bin", fingerprint.hex()));
+    piano_tuner::cache::stored(&path, || {
+        let signal = render_note(preset, key, vel, duration_s);
+        track_refined(&signal, SAMPLE_RATE, seed_for(preset, key), config).map(|(t, _)| t)
+    })
+    .unwrap_or_else(|e| panic!("key {key} vel {vel}: {e}"))
+}
+
+/// Renders one note and runs the whole of stage 1 on it.
 fn analyze(preset: &EnginePreset, key: u8, vel: u8, duration_s: f32) -> NoteAnalysis {
     analyze_with(preset, key, vel, duration_s, &analysis_config())
 }
@@ -200,10 +333,9 @@ fn analyze_with(
     duration_s: f32,
     config: &NoteConfig,
 ) -> NoteAnalysis {
-    let signal = render_note(preset, key, vel, duration_s);
-    let f0 = f64::from(preset.notes.f0_hz[key_index(key).expect("a key")]);
-    let seed = InharmonicModel::harmonic(f0 * (-10.0f64 / 1200.0).exp2());
-    analyze_note(&signal, SAMPLE_RATE, seed, config)
+    // Exactly `analyze_note`'s two steps, with the corpus between them.
+    let trajectories = tracked(preset, key, vel, duration_s, config);
+    analyze_trajectories(trajectories, config)
         .unwrap_or_else(|e| panic!("key {key} vel {vel}: {e}"))
 }
 
@@ -329,12 +461,16 @@ struct Case {
 /// The analyses, computed once for the whole test binary: rendering and
 /// tracking these four notes is most of the gate's runtime and every test wants
 /// the same answers.
+///
+/// The four are independent — a render builds its own engine and a track reads
+/// nothing but its own signal — so they are taken in parallel and collected back
+/// into `NOTES` order.
 fn cases() -> &'static [Case] {
     static CASES: OnceLock<Vec<Case>> = OnceLock::new();
     CASES.get_or_init(|| {
         let preset = gate_preset();
         NOTES
-            .iter()
+            .par_iter()
             .map(|&(key, duration)| Case {
                 truth: Truth::of(&preset, key),
                 analysis: analyze(&preset, key, 90, duration),
@@ -602,8 +738,9 @@ fn the_felt_and_the_velocity_map_come_back_from_a_velocity_ladder() {
         },
         ..NoteConfig::default()
     };
+    // Five independent layers of one note.
     let analyses: Vec<NoteAnalysis> = velocities
-        .iter()
+        .par_iter()
         .map(|&vel| analyze_with(&preset, key, vel, 4.0, &config))
         .collect();
 
@@ -776,9 +913,20 @@ fn a_known_fourth_order_inharmonicity_comes_back_within_a_tenth() {
         },
         ..NoteConfig::default()
     };
-    for &(key, b4) in &truth {
-        let preset = preset_with_b4(&[(key, b4)]);
-        let fit = analyze_with(&preset, key, 90, 20.0, &long).inharmonic;
+    // Four independent twenty-second notes: a fit and a control for each of the
+    // two coefficients. They are taken together and reported in `truth` order.
+    let analysed: Vec<(piano_tuner::InharmonicFit, piano_tuner::InharmonicFit)> = truth
+        .par_iter()
+        .map(|&(key, b4)| {
+            let preset = preset_with_b4(&[(key, b4)]);
+            rayon::join(
+                || analyze_with(&preset, key, 90, 20.0, &long).inharmonic,
+                || analyze_with(&neutral, key, 90, 20.0, &long).inharmonic,
+            )
+        })
+        .collect();
+
+    for (&(key, b4), (fit, control)) in truth.iter().zip(&analysed) {
         let bands = fit.bands.expect("two bands");
         println!(
             "key {key}: B4 {:+.3e} vs {b4:+.3e} ({:+.1} %), bands {:.3} +- {:.3} \
@@ -803,7 +951,6 @@ fn a_known_fourth_order_inharmonicity_comes_back_within_a_tenth() {
 
         // The control: the same note from the same preset with the coefficient
         // at zero comes back at zero, because the two bands agree.
-        let control = analyze_with(&neutral, key, 90, 20.0, &long).inharmonic;
         println!(
             "key {key}: control B4 {:+.3e}, bands {:.3} ({:.1} sigma)",
             control.model.b4,
@@ -864,9 +1011,12 @@ fn the_bridge_splits_a_unisons_decay_rates_and_the_drift_measures_it() {
     // composite's pitch settles below its own mean here (-2.04 c at C4) where a
     // free-running unison's settled towards its slowest string. What
     // `estimate::spread` inverts is how far the pitch moves, not which way.
-    let locked = drift_at(0.0).abs();
-    let middle = drift_at(1.5).abs();
-    let wide = drift_at(3.0).abs();
+    // Three independent renders of one key.
+    let drifts: Vec<f64> = [0.0f32, 1.5, 3.0]
+        .par_iter()
+        .map(|&cents| drift_at(cents).abs())
+        .collect();
+    let (locked, middle, wide) = (drifts[0], drifts[1], drifts[2]);
     println!("C4: 0 / 1.5 / 3 cents of tuning -> {locked:.2} / {middle:.2} / {wide:.2} c of drift");
     assert!(
         wide - locked > 1.0,
@@ -921,7 +1071,7 @@ fn the_pan_spread_comes_back_from_the_drift_it_puts_in_the_image() {
         preset.voicing.polarization_pan_spread = spread;
         let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
         let mut drifts: Vec<f64> = KEYS
-            .iter()
+            .par_iter()
             .filter_map(|&key| {
                 let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })];
                 let (left, right) = render_to_buffer(&preset, &events, 8.0);
@@ -942,15 +1092,20 @@ fn the_pan_spread_comes_back_from_the_drift_it_puts_in_the_image() {
         drifts[drifts.len() / 2]
     };
 
-    let zero = median_drift(0.0);
+    // The three spreads are independent lines of eight independent renders, so
+    // the whole 24-render grid goes to the pool at once.
+    let measured_at: Vec<f64> = [0.0f32, 0.15, 0.30]
+        .par_iter()
+        .map(|&spread| median_drift(spread))
+        .collect();
+    let zero = measured_at[0];
     println!("drift at spread 0: {zero:.2} dB against DRIFT_AT_ZERO_DB {DRIFT_AT_ZERO_DB}");
     assert!(
         zero < DRIFT_AT_ZERO_DB + 1.5,
         "an unspread instrument drifts {zero:.2} dB, which is not 'cannot move'"
     );
 
-    for truth in [0.15f32, 0.30] {
-        let measured = median_drift(truth);
+    for (truth, &measured) in [0.15f32, 0.30].iter().copied().zip(&measured_at[1..]) {
         let predicted = DRIFT_AT_ZERO_DB + DRIFT_PER_SPREAD_DB * f64::from(truth);
         let recovered = pan_spread_for_drift(measured);
         println!(
@@ -995,10 +1150,18 @@ fn a_known_contact_width_comes_back_and_takes_the_felt_with_it() {
         },
         ..NoteConfig::default()
     };
-    let analyses: Vec<NoteAnalysis> = velocities
-        .iter()
-        .map(|&vel| analyze_with(&preset, KEY, vel, 6.0, &config))
-        .collect();
+    // Six independent notes: the five-layer ladder, and the point-hammer control
+    // the second half of this test compares against. `join` puts the control
+    // beside the ladder rather than after it.
+    let (analyses, neutral): (Vec<NoteAnalysis>, NoteAnalysis) = rayon::join(
+        || {
+            velocities
+                .par_iter()
+                .map(|&vel| analyze_with(&preset, KEY, vel, 6.0, &config))
+                .collect()
+        },
+        || analyze_with(&gate_preset(), KEY, 120, 6.0, &config),
+    );
     let loudest = analyses.last().expect("a ladder");
     let fit = loudest.strike.clone().expect("C2 has a strike position");
     let width = fit.contact_width.expect("a width whose null was measured");
@@ -1021,7 +1184,6 @@ fn a_known_contact_width_comes_back_and_takes_the_felt_with_it() {
         fit.position
     );
     // The control: the same note struck by a point hammer is not given one.
-    let neutral = analyze_with(&gate_preset(), KEY, 120, 6.0, &config);
     let point = neutral.strike.clone().expect("a strike position");
     println!(
         "C2 control: w {:?}, residual {:.3} dB against {:.3} dB point-force (gain {:.3})",
@@ -1115,7 +1277,14 @@ fn an_engine_loaded_with_the_recovered_preset_plays_the_notes_it_was_measured_fr
         EnginePreset::from_toml(&recovered.to_toml()).expect("the engine accepts the preset");
     engine_preset.soundboard.board_mix = 0.0;
 
-    for case in cases() {
+    // The four replays are independent; the assertions below then walk them in
+    // `NOTES` order, so what the test prints and what it checks are unchanged.
+    let replayed: Vec<NoteAnalysis> = cases()
+        .par_iter()
+        .map(|case| analyze(&engine_preset, case.truth.key, 90, 6.0))
+        .collect();
+
+    for (case, replayed) in cases().iter().zip(&replayed) {
         let truth = &case.truth;
         let index = key_index(truth.key).expect("a key");
         // Every measured key keeps its own estimate: the compass interpolant
@@ -1136,7 +1305,6 @@ fn an_engine_loaded_with_the_recovered_preset_plays_the_notes_it_was_measured_fr
         // other — a few cents of the difference is a property of the
         // instrument, present identically in both renders, and the round trip
         // is the question of whether the *pitch has moved*.
-        let replayed = analyze(&engine_preset, truth.key, 90, 6.0);
         let mut compared = 0;
         for k in 1..=TOP_PARTIAL {
             let (Some(fit), Some(rendered)) = (replayed.decays.fit(k), case.analysis.decays.fit(k))
@@ -1647,15 +1815,33 @@ fn a_known_per_key_spread_comes_back_key_by_key() {
         table[key_index(key).unwrap()] = spread;
     }
 
+    // Three keys, three renders each, all nine independent.
+    let probed: Vec<(piano_tuner::estimate::directivity::KeyDriftLine, f64)> = KEYS
+        .par_iter()
+        .map(|&key| {
+            let (ends, truth_drift) = rayon::join(
+                || {
+                    rayon::join(
+                        || drift(None, 0.0, key).expect("a drift at zero"),
+                        || drift(None, 0.4, key).expect("a drift at the ceiling"),
+                    )
+                },
+                || drift(Some(&table), 0.0, key).expect("a drift at the truth"),
+            );
+            (
+                piano_tuner::estimate::directivity::KeyDriftLine {
+                    key,
+                    at_zero_db: ends.0,
+                    at_ceiling_db: ends.1,
+                },
+                truth_drift,
+            )
+        })
+        .collect();
+
     let mut lines = Vec::new();
     let mut measured = Vec::new();
-    for &key in &KEYS {
-        let line = piano_tuner::estimate::directivity::KeyDriftLine {
-            key,
-            at_zero_db: drift(None, 0.0, key).expect("a drift at zero"),
-            at_ceiling_db: drift(None, 0.4, key).expect("a drift at the ceiling"),
-        };
-        let truth_drift = drift(Some(&table), 0.0, key).expect("a drift at the truth");
+    for (&key, &(line, truth_drift)) in KEYS.iter().zip(&probed) {
         println!(
             "key {key}: line {:.2}..{:.2} dB, the table's own spread drifted {truth_drift:.2} dB \
              -> {:.3}",
@@ -1744,9 +1930,13 @@ mod per_partial {
     }
 
     /// Every layer of one key, analysed.
+    ///
+    /// Eight independent notes and the most expensive call in the file — the
+    /// three tests below spend nearly all of their time in it — so the layers
+    /// are taken in parallel and collected back into [`LAYERS`] order.
     fn layers(preset: &EnginePreset, key: u8, duration_s: f32) -> Vec<NoteAnalysis> {
         LAYERS
-            .iter()
+            .par_iter()
             .map(|&vel| analyze(preset, key, vel, duration_s))
             .collect()
     }
@@ -1840,23 +2030,42 @@ mod per_partial {
         let index = key_index(KEY).expect("a key");
         let config = ShapingConfig::default();
 
-        let depth_at = |floor: f32| -> f64 {
+        /// One probe of the comb: every layer's time-zero spectrum at that
+        /// floor, and the deepest partial in them.
+        type ProbedFloor = (Vec<Vec<(u32, f64)>>, f64);
+
+        // The spectra at one floor, and the deepest partial in them. It returns
+        // both because the block at the end of this test wants the *same*
+        // spectra at `TRUTH` that the line's last point was read from: they used
+        // to be rendered and tracked twice, forty-eight note analyses where
+        // forty do.
+        let measured_at = |floor: f32| -> ProbedFloor {
             let mut preset = gate_preset();
             preset.notes.comb_floor[index] = floor;
             let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
-            let analyses = layers(&preset, KEY, 26.0);
-            measured_deepest(&spectra(&analyses), &config)
+            let spectra = spectra(&layers(&preset, KEY, 26.0));
+            let deepest = measured_deepest(&spectra, &config)
                 .expect("a deepest partial")
-                .0
+                .0;
+            (spectra, deepest)
         };
+
+        // Five independent probes of forty independent notes. The whole grid
+        // goes to the thread pool at once — `layers` is parallel inside this
+        // loop and rayon nests — and comes back in order.
+        let mut floors: Vec<f32> = PROBES.to_vec();
+        floors.push(TRUTH);
+        let mut probed: Vec<ProbedFloor> =
+            floors.par_iter().map(|&floor| measured_at(floor)).collect();
+        let (truth_spectra, deepest) = probed.pop().expect("the truth was probed last");
         let line = CombLine {
             key: KEY,
             probes: PROBES
                 .iter()
-                .map(|&floor| (f64::from(floor), depth_at(floor)))
+                .zip(&probed)
+                .map(|(&floor, &(_, depth))| (f64::from(floor), depth))
                 .collect(),
         };
-        let deepest = depth_at(TRUTH);
         let recovered = line.floor_for(deepest).expect("a line");
         println!(
             "comb floor {TRUTH} -> {recovered:.3}; the line reads {:?} and the render {deepest:.2} dB",
@@ -1872,10 +2081,14 @@ mod per_partial {
         // is left for them to fill. Against the *bare* comb the same render asks
         // for far more, at exactly the partial the floor exists for — which is
         // why the floor is fitted first and the gains against it.
+        //
+        // "The same render" is now literally the same render: these are the
+        // spectra the line's `TRUTH` point was read from, rather than a second
+        // pass over the identical preset.
         let mut preset = gate_preset();
         preset.notes.comb_floor[index] = TRUTH;
         let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
-        let measured = spectra(&layers(&preset, KEY, 26.0));
+        let measured = truth_spectra;
         let bare = EngineComb::new(
             f64::from(preset.notes.strike_position[index]),
             f64::from(preset.notes.contact_width[index]),
@@ -2042,8 +2255,11 @@ mod per_partial {
             (20.0 * (whole / reference).log10(), seen.level_db)
         };
 
-        let mut levels: Vec<f64> = Vec::new();
-        for vel in LAYERS {
+        // Eight independent layers: an analysis of the quiet render and a
+        // residual measured on the noisy one, per layer.
+        let mut levels: Vec<f64> = LAYERS
+            .par_iter()
+            .map(|&vel| {
             let analysis = analyze(&quiet, KEY, vel, 2.0);
             let partial_hz: Vec<f64> = analysis
                 .decays
@@ -2064,8 +2280,9 @@ mod per_partial {
                 &config,
             )
             .expect("a residual");
-            levels.push(metrics.level_db);
-        }
+                metrics.level_db
+            })
+            .collect();
         levels.sort_by(f64::total_cmp);
         let median = levels[levels.len() / 2];
         println!(
@@ -2148,12 +2365,14 @@ fn a_known_false_beat_comes_back_from_the_engines_own_render_of_it() {
     // Inside `MIN/MAX_FALSE_BEAT_HZ`, and at or above the 1 Hz where the
     // cubically-detrended count stops biasing upward (`motion`'s module doc
     // measures the bias: a 0.7 Hz split reads 1.11 Hz on a clean pair).
-    for asked in [1.0f32, 1.4, 2.2] {
-        let preset = preset_with_split(KEY, &[(PARTIAL, asked, LEVEL_DB)]);
-        let motions = motion_of(&preset, KEY, 90, 4);
+    let asked_motions: Vec<Vec<(u32, Motion)>> = [1.0f32, 1.4, 2.2]
+        .par_iter()
+        .map(|&asked| motion_of(&preset_with_split(KEY, &[(PARTIAL, asked, LEVEL_DB)]), KEY, 90, 4))
+        .collect();
+    for (asked, motions) in [1.0f32, 1.4, 2.2].iter().copied().zip(&asked_motions) {
         let fit = fit_false_beat(
             KEY,
-            &motions,
+            motions,
             &MotionConfig {
                 // One partial is split and the others are not, so the key does
                 // not have three companions to correlate; this round trip is
@@ -2193,11 +2412,9 @@ fn a_known_false_beat_comes_back_from_the_engines_own_render_of_it() {
             .map(|(_, m)| m.beat_depth_db)
             .expect("a measured partial")
     };
-    let none = depth_at(&[]);
-    let (quiet, loud) = (
-        depth_at(&[(PARTIAL, 1.4, -16.0)]),
-        depth_at(&[(PARTIAL, 1.4, -3.0)]),
-    );
+    let rows: [&[(u16, f32, f32)]; 3] = [&[], &[(PARTIAL, 1.4, -16.0)], &[(PARTIAL, 1.4, -3.0)]];
+    let depths: Vec<f64> = rows.par_iter().map(|rows| depth_at(rows)).collect();
+    let (none, quiet, loud) = (depths[0], depths[1], depths[2]);
     println!(
         "beat depth: no split {none:.2} dB, -16 dB companion {quiet:.2}, -3 dB {loud:.2}"
     );
@@ -2246,7 +2463,7 @@ fn a_known_strike_direction_comes_back_from_the_engines_own_renders() {
         preset.voicing.strike_direction = (swing != 0.0).then(|| strike_direction_of(swing));
         preset.validate().expect("a legal preset");
         let depths: Vec<f64> = VELOCITIES
-            .iter()
+            .par_iter()
             .filter_map(|&vel| {
                 motion_of(&preset, KEY, vel, 4)
                     .into_iter()
@@ -2267,7 +2484,8 @@ fn a_known_strike_direction_comes_back_from_the_engines_own_renders() {
         let mut voiced = preset_with_split(KEY, &[SPLIT]);
         voiced.voicing.strike_direction = Some(strike_direction_of(truth));
         voiced.validate().expect("a legal preset");
-        let cells: Vec<VelocityCell> = (1..=16)
+        let cells: Vec<VelocityCell> = (1..=16u32)
+            .into_par_iter()
             .filter_map(|layer| {
                 let velocity = (layer * 8) as u8;
                 motion_of(&voiced, KEY, velocity, 4)
@@ -2290,11 +2508,14 @@ fn a_known_strike_direction_comes_back_from_the_engines_own_renders() {
             regression.correlation
         );
 
-        // The size, off the engine's own line.
-        let mut line = SwingLine::default();
-        for probe in [0.0f64, 4.0, 8.0, 16.0] {
-            line.probes.push((probe, depth_spread(truth.signum() * probe)));
-        }
+        // The size, off the engine's own line: four probes of three renders
+        // each, all independent.
+        let line = SwingLine {
+            probes: [0.0f64, 4.0, 8.0, 16.0]
+                .par_iter()
+                .map(|&probe| (probe, depth_spread(truth.signum() * probe)))
+                .collect(),
+        };
         let recovered = line.swing_for(target).expect("a line that rises");
         println!(
             "strike direction {truth:+.1} dB -> regression {:+.2} dB (r {:+.3}), \

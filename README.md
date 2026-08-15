@@ -81,6 +81,35 @@ examples in `tuner/examples/` are behind the `diagnostics` feature so routine
 builds skip them; run them with
 `cargo run --release -p piano-tuner --features diagnostics --example <name>`.
 
+**The measurement tools are parallel and cache what is not under test.** The
+batch drivers render tens of independent notes per run — each render builds its
+own engine and shares nothing — so they run across the cores, and every parallel
+loop collects into an ordered container: `COMPASS.md`, `REALISM.md` and every
+rendered file are the same bytes at any thread count. On top of that, the
+*reference* side of a comparison is cached to disk under `data/cache/`, keyed by
+content, because it does not move when the engine does:
+
+| cache | holds | keyed on |
+|---|---|---|
+| `data/cache/reference/` | the Salamander recordings played by `piano_tuner::sampler`, as f32 WAV | `sampler::SAMPLER_VERSION`, the SFZ file's bytes, and the phrase (or key and velocity), duration and sample rate asked for |
+| `data/cache/calibration/` | the self-calibration gate's tracked notes | a fingerprint of the engine's own audio and the tracker's own output on a probe note, plus the preset TOML, the note and the tracker settings |
+
+Nothing is invalidated by a timestamp or a `--refresh` flag: a changed input
+simply hashes to a different name and misses, so an entry is either the answer
+to exactly this question or it is not read at all. The one thing hashing cannot
+see is a change to the sampler's own code, which is what `SAMPLER_VERSION` is
+for — **bump it in the same commit as any change that moves a rendered sample**;
+its doc comment says exactly which changes those are. A cache hit is
+bit-identical to a fresh render, not merely close, and
+`tuner/tests/reference_cache.rs` is the test that says so. The caches are pure
+speed: deleting `data/cache/` changes no number anywhere, and `data/` is
+gitignored, so a fresh checkout simply starts cold.
+
+Measured on an M4 Pro (`DECISIONS.md` 284): `compass_scan` 39 s -> 4.2 s cold and
+3.1 s warm, `realism_bench` 59 s -> 14.3 s and 6.2 s, and
+`cargo test --release -p piano-tuner --test calibration` 161 s -> 41 s and 36 s.
+The calibration gate's own subsets are named in that file's header.
+
 ## Presets
 
 Every number that voices the instrument — the per-note tables (tuning, inharmonicity, decay, unison detuning, strike position, impedance, damper and hammer parameters), the global constants (polarization balance, couplings, the bridge admittance, hammer felt, soundboard) and the action's own noises — lives in a preset file. `--preset <file.toml>` voices both the live engine and offline renders from it; without it the built-in default is used, which is exactly `presets/default.toml`.

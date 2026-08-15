@@ -81,6 +81,30 @@ use crate::audio::{self, Audio};
 use crate::error::{Error, Result};
 use crate::library::{note_number, tokens, Token};
 
+/// What this player *is*, for the benefit of anything that caches its output.
+///
+/// The reference renders `examples/compass_scan.rs` and
+/// `examples/realism_bench.rs` measure the engine against are a pure function of
+/// three things: the SFZ (and the recordings it names), the events asked for,
+/// and this module. The first two are hashed by content into every cache key
+/// ([`crate::cache`]); this constant stands for the third, because no cheap
+/// hash of a compiled module exists.
+///
+/// **Bump it in the same commit as any change that moves a rendered sample.**
+/// That is: the mixing and gain law in [`Sampler::render`] and its helpers, the
+/// release curve, the velocity law, the pitch shift, the voice selection, the
+/// event grain, the seeded round-robin draw, or any constant above that feeds
+/// them. Changing a doc comment, a `Debug` impl, an error message, or
+/// [`Instrument::ignored_opcodes`] does not move a sample and does not need a
+/// bump.
+///
+/// Getting this wrong is the one way the cache can lie, so the rule is: **if
+/// you are unsure whether your change moves a sample, bump it.** A needless
+/// bump costs one re-render of the reference (about 30 s for the compass, 40 s
+/// for the phrase set); a missed one silently scores a new engine against a
+/// stale piano.
+pub const SAMPLER_VERSION: u32 = 1;
+
 /// Level a released voice has fallen to when `ampeg_release` has elapsed, in
 /// dB. Below −100 dB the voice is 5 ppm of full scale and stopping it is
 /// inaudible by any measure this crate can take.
@@ -552,7 +576,7 @@ impl Sampler {
                 let previous = state.cc64;
                 state.cc64 = cc;
                 if previous >= SUSTAIN_THRESHOLD && cc < SUSTAIN_THRESHOLD {
-                    let keys: Vec<u8> = state.sounding.keys().copied().collect();
+                    let keys = state.released_in_order();
                     for key in keys {
                         let notes = state.sounding.remove(&key).unwrap_or_default();
                         let (up, down): (Vec<_>, Vec<_>) =
@@ -571,7 +595,7 @@ impl Sampler {
             // change a sample.
             SamplerEvent::Sostenuto(_) | SamplerEvent::UnaCorda(_) => {}
             SamplerEvent::AllOff => {
-                let keys: Vec<u8> = state.sounding.keys().copied().collect();
+                let keys = state.released_in_order();
                 for key in keys {
                     let notes = state.sounding.remove(&key).unwrap_or_default();
                     for note in notes {
@@ -773,6 +797,30 @@ struct Render {
     cc64: i32,
     rng: SplitMix64,
     master: f64,
+}
+
+impl Render {
+    /// The sounding keys, **lowest first**, for the two events that let go of
+    /// more than one key at once: the sustain pedal coming up, and `AllOff`.
+    ///
+    /// The order matters and used to be the hash map's. Releasing a key appends
+    /// its release voices to `voices`, and [`Sampler::render`] sums that list
+    /// into the output buffers in order, so the order keys are released in is
+    /// the order a pedal-up chord's voices are *added together* — and floating
+    /// point addition is not associative. `HashMap`'s iteration order is seeded
+    /// randomly per process, so two runs of the same phrase produced reference
+    /// audio differing by an ulp wherever the pedal lifted a chord: measured on
+    /// `realism_bench`'s six phrases, `chords_pedal` and `excerpt` (the two that
+    /// pedal) came back with 60-90 thousand samples one ulp apart between runs,
+    /// and the other four bit-identical. No metric in `REALISM.md` moved by so
+    /// much as a printed digit — but a reference that is not reproducible cannot
+    /// be cached, cannot be diffed between machines, and cannot be quoted, so
+    /// the order is now the keyboard's (`DECISIONS.md` 284).
+    fn released_in_order(&self) -> Vec<u8> {
+        let mut keys: Vec<u8> = self.sounding.keys().copied().collect();
+        keys.sort_unstable();
+        keys
+    }
 }
 
 /// Adds one voice to the output. The release envelope is exponential — linear

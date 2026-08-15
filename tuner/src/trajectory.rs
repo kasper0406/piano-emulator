@@ -290,6 +290,136 @@ impl NoteTrajectories {
     }
 }
 
+/// The exact, compact form the self-calibration gate keeps its corpus in.
+///
+/// The JSON above is the *human's* copy — a survey writes it, and somebody reads
+/// it when an estimator misbehaves. This is the machine's: every float as its
+/// own bit pattern, so a decode is exactly the value that was encoded, and a
+/// note that costs 3.2 s to track reads back in milliseconds instead of the
+/// couple of seconds `serde_json`'s exact float parser wants for five megabytes
+/// of digits ([`crate::cache::Cacheable`], `DECISIONS.md` 284).
+///
+/// **The encoder destructures the struct exhaustively on purpose.** Adding a
+/// field to [`NoteTrajectories`] or to anything it holds is then a compile
+/// error here rather than a field silently dropped from every cached note.
+impl crate::cache::Cacheable for NoteTrajectories {
+    fn encode(&self) -> Vec<u8> {
+        use crate::cache::write;
+        let NoteTrajectories {
+            source,
+            note,
+            sample_rate,
+            window_s,
+            hop_s,
+            seed,
+            onset_s,
+            tracks,
+        } = self;
+        let mut out = Vec::with_capacity(64 + 24 * self.point_count());
+        out.extend_from_slice(CORPUS_MAGIC);
+        write::string(&mut out, source);
+        match note {
+            None => out.push(0),
+            Some(NoteId { key, velocity_layer }) => {
+                out.push(1);
+                out.push(*key);
+                match velocity_layer {
+                    None => out.push(0),
+                    Some(layer) => {
+                        out.push(1);
+                        out.push(*layer);
+                    }
+                }
+            }
+        }
+        write::f64(&mut out, *sample_rate);
+        write::f64(&mut out, *window_s);
+        write::f64(&mut out, *hop_s);
+        let InharmonicModel { f0_hz, b, b4 } = seed;
+        write::f64(&mut out, *f0_hz);
+        write::f64(&mut out, *b);
+        write::f64(&mut out, *b4);
+        write::f64(&mut out, *onset_s);
+        write::u64(&mut out, tracks.len() as u64);
+        for PartialTrack { k, points } in tracks {
+            write::u32(&mut out, *k);
+            write::u64(&mut out, points.len() as u64);
+            for TrackPoint {
+                time_s,
+                frequency_hz,
+                amplitude,
+            } in points
+            {
+                write::f64(&mut out, *time_s);
+                write::f64(&mut out, *frequency_hz);
+                write::f64(&mut out, *amplitude);
+            }
+        }
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        use crate::cache::read;
+        let mut rest = bytes.strip_prefix(CORPUS_MAGIC)?;
+        let bytes = &mut rest;
+        let source = read::string(bytes)?;
+        let note = match read::u8(bytes)? {
+            0 => None,
+            1 => {
+                let key = read::u8(bytes)?;
+                let velocity_layer = match read::u8(bytes)? {
+                    0 => None,
+                    1 => Some(read::u8(bytes)?),
+                    _ => return None,
+                };
+                Some(NoteId { key, velocity_layer })
+            }
+            _ => return None,
+        };
+        let sample_rate = read::f64(bytes)?;
+        let window_s = read::f64(bytes)?;
+        let hop_s = read::f64(bytes)?;
+        let seed = InharmonicModel {
+            f0_hz: read::f64(bytes)?,
+            b: read::f64(bytes)?,
+            b4: read::f64(bytes)?,
+        };
+        let onset_s = read::f64(bytes)?;
+        // Every count is checked against what is left in the buffer before it is
+        // reserved, so a corrupt length is a miss and not an allocation.
+        let track_count = read::len(bytes)?;
+        let mut tracks = Vec::with_capacity(track_count);
+        for _ in 0..track_count {
+            let k = read::u32(bytes)?;
+            let point_count = read::len(bytes)?;
+            let mut points = Vec::with_capacity(point_count);
+            for _ in 0..point_count {
+                points.push(TrackPoint {
+                    time_s: read::f64(bytes)?,
+                    frequency_hz: read::f64(bytes)?,
+                    amplitude: read::f64(bytes)?,
+                });
+            }
+            tracks.push(PartialTrack { k, points });
+        }
+        // Anything left over is a file this decoder does not understand.
+        bytes.is_empty().then_some(NoteTrajectories {
+            source,
+            note,
+            sample_rate,
+            window_s,
+            hop_s,
+            seed,
+            onset_s,
+            tracks,
+        })
+    }
+}
+
+/// Identifies the compact encoding, and versions it: a changed layout gets a
+/// changed magic and every old entry misses.
+const CORPUS_MAGIC: &[u8] = b"PTNT0001";
+
 fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
     let mut v: Vec<f64> = values.collect();
     if v.is_empty() {

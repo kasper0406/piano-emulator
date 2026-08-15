@@ -29,9 +29,12 @@
 //! phrase set to the engine's own event type itself — but the engine is a
 //! dev-dependency either way, so the plain command works too.
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+use rayon::prelude::*;
 
 use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
@@ -43,13 +46,44 @@ use piano_tuner::realism::{
     MOTION_KEYS, MOTION_PARTIALS, MOTION_REFERENCE_VELOCITY, MOTION_VELOCITIES, MULTI_RES_WINDOWS,
     PHRASE_SET_VERSION,
 };
+use piano_tuner::cache;
 use piano_tuner::{audio, detect_onset};
-use piano_tuner::sampler::{Sampler, SamplerEvent, TimedEvent};
+use piano_tuner::sampler::{Sampler, SamplerEvent, TimedEvent, SAMPLER_VERSION};
 use piano_tuner::{SampleLibrary, SAMPLE_RATE};
 
 /// The preset the engine is voiced from. The measured one: the whole point is
 /// how close the *estimated* instrument is to the piano it was estimated from.
 const DEFAULT_PRESET: &str = "presets/salamander-c5.toml";
+
+thread_local! {
+    /// One reference player per worker thread.
+    ///
+    /// [`Sampler::render`] reseeds its round-robin draw from the config at the
+    /// top of every call and its decoded-buffer cache is a speed device nothing
+    /// reads, so a phrase rendered on a fresh player is the same bytes as the
+    /// same phrase rendered sixth on a shared one. The `clear_cache()` this
+    /// replaces was there to stop six phrases' worth of recordings — a few
+    /// gigabytes — piling up; per phrase and per thread it is the same bound.
+    static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
+}
+
+fn with_sampler<T>(
+    sfz: &Path,
+    body: impl FnOnce(&mut Sampler) -> Result<T, piano_tuner::Error>,
+) -> Result<T, piano_tuner::Error> {
+    SAMPLER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(Sampler::new(sfz)?);
+        }
+        let sampler = slot.as_mut().expect("a player was just built");
+        let out = body(sampler);
+        // Each phrase touches a few dozen recordings; keeping every one of them
+        // decoded across all six would be gigabytes for no gain.
+        sampler.clear_cache();
+        out
+    })
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -68,57 +102,106 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&out)?;
 
     let preset = Preset::load(&preset_path)?;
-    let mut sampler = Sampler::new(&sfz)?;
     let layers = VelocityLayers::from_library(&SampleLibrary::from_sfz(&sfz)?)?;
     let sample_rate = f64::from(SAMPLE_RATE);
+
+    // The reference and its noise-floor partner are a function of the sampler,
+    // the SFZ and the phrase set, none of which move when the engine does — so
+    // they are cached to disk and an iteration on the engine pays for the engine
+    // side alone. The key carries all three (`piano_tuner::cache`).
+    let reference_cache = cache::reference_dir(&data);
+    let mut reference_key = cache::Fingerprint::new();
+    reference_key
+        .str("realism-bench/reference")
+        .u64(u64::from(SAMPLER_VERSION))
+        .file(&sfz)?
+        .u64(u64::from(SAMPLE_RATE))
+        .u64(u64::from(PHRASE_SET_VERSION));
 
     println!(
         "phrase set v{PHRASE_SET_VERSION}, engine on {}, reference {}",
         preset_path.display(),
         sfz.display()
     );
+    println!("reference cache: {}", reference_cache.display());
 
-    let mut rows: Vec<Row> = Vec::new();
-    for phrase in realism::phrase_set() {
-        let started = Instant::now();
-        print!("{:<18}", phrase.name);
+    // A phrase is an independent measurement — two renders, a level match and a
+    // page of pictures — so the six run across the cores. Every line they print
+    // and every row they contribute is emitted below in phrase-set order, so the
+    // console and `REALISM.md` read the same at any thread count.
+    let phrases: Vec<Phrase> = realism::phrase_set();
+    let done: Vec<(Row, String)> = phrases
+        .into_par_iter()
+        // Errors cross a thread boundary here, so they travel as their printed
+        // form: every one of them ends up in front of a person anyway.
+        .map(|phrase| -> Result<(Row, String), String> {
+            let started = Instant::now();
 
-        let engine_raw = render_engine(&preset, &phrase);
-        let reference_raw = sampler.render(&phrase.events, phrase.duration_s)?;
-        // The noise-floor partner: the same music out of the layer next door.
-        let alt_raw = sampler.render(&layers.shift(&phrase.events), phrase.duration_s)?;
-        // Each phrase touches a few dozen recordings; keeping every one of them
-        // decoded across all six would be gigabytes for no gain.
-        sampler.clear_cache();
+            let engine_raw = render_engine(&preset, &phrase);
+            let cached = |name: &str, events: &[TimedEvent]| -> Result<Audio, piano_tuner::Error> {
+                let mut key = reference_key;
+                key.str(name).str(phrase.name).f64(phrase.duration_s);
+                let path = reference_cache.join(format!(
+                    "realism-{}-{name}-{}.wav",
+                    phrase.name,
+                    key.hex()
+                ));
+                cache::audio(&path, || {
+                    with_sampler(&sfz, |s| s.render(events, phrase.duration_s))
+                })
+            };
+            let say = |e: piano_tuner::Error| e.to_string();
+            let reference_raw = cached("reference", &phrase.events).map_err(say)?;
+            // The noise-floor partner: the same music out of the layer next door.
+            let alt_raw = cached("alt-layer", &layers.shift(&phrase.events)).map_err(say)?;
 
-        let (engine, reference) = realism::level_match(&engine_raw, &reference_raw)?;
-        let (reference_b, alt) = realism::level_match(&reference_raw, &alt_raw)?;
+            let (engine, reference) =
+                realism::level_match(&engine_raw, &reference_raw).map_err(say)?;
+            let (reference_b, alt) =
+                realism::level_match(&reference_raw, &alt_raw).map_err(say)?;
 
-        engine.write_wav(out.join(format!("{}_engine.wav", phrase.name)))?;
-        reference.write_wav(out.join(format!("{}_reference.wav", phrase.name)))?;
+            engine
+                .write_wav(out.join(format!("{}_engine.wav", phrase.name)))
+                .map_err(say)?;
+            reference
+                .write_wav(out.join(format!("{}_reference.wav", phrase.name)))
+                .map_err(say)?;
 
-        let ons = phrase.note_on_times();
-        let offs = phrase.note_off_times();
-        let measured = realism::compare(&engine.mono(), &reference.mono(), sample_rate, &ons, &offs)?;
-        let floor = realism::compare(&alt.mono(), &reference_b.mono(), sample_rate, &ons, &offs)?;
+            let ons = phrase.note_on_times();
+            let offs = phrase.note_off_times();
+            let measured =
+                realism::compare(&engine.mono(), &reference.mono(), sample_rate, &ons, &offs)
+                    .map_err(say)?;
+            let floor =
+                realism::compare(&alt.mono(), &reference_b.mono(), sample_rate, &ons, &offs)
+                    .map_err(say)?;
 
-        draw_page(
-            &out.join(format!("{}_mel.png", phrase.name)),
-            &phrase,
-            &engine.mono(),
-            &reference.mono(),
-            sample_rate,
-        )?;
+            draw_page(
+                &out.join(format!("{}_mel.png", phrase.name)),
+                &phrase,
+                &engine.mono(),
+                &reference.mono(),
+                sample_rate,
+            )
+            .map_err(|e| e.to_string())?;
 
-        println!(
-            "  mel {:5.2} dB (floor {:4.2})   mod {:5.2} dB (floor {:4.2})   {:.1} s",
-            measured.mel.mean,
-            floor.mel.mean,
-            measured.modulation.mean,
-            floor.modulation.mean,
-            started.elapsed().as_secs_f64()
-        );
-        rows.push(Row { phrase, measured, floor });
+            let line = format!(
+                "{:<18}  mel {:5.2} dB (floor {:4.2})   mod {:5.2} dB (floor {:4.2})   {:.1} s\n",
+                phrase.name,
+                measured.mel.mean,
+                floor.mel.mean,
+                measured.modulation.mean,
+                floor.modulation.mean,
+                started.elapsed().as_secs_f64()
+            );
+            Ok((Row { phrase, measured, floor }, line))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut rows: Vec<Row> = Vec::with_capacity(done.len());
+    for (row, line) in done {
+        print!("{line}");
+        rows.push(row);
     }
 
     // ---- Columns A and B: the sixteen cells, at three velocities -----------
@@ -189,15 +272,20 @@ fn render_engine(preset: &Preset, phrase: &Phrase) -> Audio {
 
 /// Every Column A/B cell, measured on the engine and on the recording layer a
 /// strike at the same velocity would trigger.
+/// Every `(key, velocity)` pair is one render and one recording, measured the
+/// same way and sharing nothing, so the grid runs across the cores; `flat_map`
+/// over an indexed parallel iterator keeps the cells in the order
+/// [`realism::motion_columns`] reads them.
 fn motion_cells(preset: &Preset, library: &SampleLibrary) -> Vec<MotionCell> {
     let sample_rate = f64::from(SAMPLE_RATE);
-    let mut cells = Vec::new();
-    for &(key, _) in &MOTION_KEYS {
-        let params = preset.string_params(key);
-        let partial_hz: Vec<f64> = (1..=MOTION_PARTIALS)
-            .map(|k| f64::from(params.partial_freq(k as usize)))
-            .collect();
-        for &velocity in &MOTION_VELOCITIES {
+    MOTION_KEYS
+        .par_iter()
+        .flat_map_iter(|&(key, _)| MOTION_VELOCITIES.iter().map(move |&v| (key, v)))
+        .flat_map(|(key, velocity)| {
+            let params = preset.string_params(key);
+            let partial_hz: Vec<f64> = (1..=MOTION_PARTIALS)
+                .map(|k| f64::from(params.partial_freq(k as usize)))
+                .collect();
             let engine = measure_render(preset, key, velocity, &partial_hz);
             let reference = library
                 .layers(key)
@@ -215,18 +303,17 @@ fn motion_cells(preset: &Preset, library: &SampleLibrary) -> Vec<MotionCell> {
                     Some(realism::measure_partials(&cut, &partial_hz))
                 })
                 .unwrap_or_else(|| vec![None; partial_hz.len()]);
-            for k in 1..=MOTION_PARTIALS {
-                cells.push(MotionCell {
+            (1..=MOTION_PARTIALS)
+                .map(|k| MotionCell {
                     key,
                     k,
                     velocity,
                     engine: engine[k as usize - 1],
                     reference: reference[k as usize - 1],
-                });
-            }
-        }
-    }
-    cells
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Seconds of note the motion columns are measured over: past the analysis

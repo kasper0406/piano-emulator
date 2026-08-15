@@ -47,6 +47,14 @@ piano-emulator = { path = "../engine" }
 # stack: an encoder and nothing else. A dev-dependency because the library
 # measures and the examples draw.
 png = "0.17"
+# The batch drivers and the self-calibration gate render tens of independent
+# notes per run; each render builds its own engine and shares nothing, so the
+# loops over them are data-parallel by construction. A *dev*-dependency for the
+# same reason `png` is: the library measures one signal at a time and stays
+# single-threaded, and only the tools that run it in bulk pay for a thread pool.
+# Every parallel loop here collects into an ordered container, so the output is
+# the same bytes at any thread count (`DECISIONS.md` 284).
+rayon = "1.12"
 
 # One-shot forensic/audit drivers: gated so `cargo test`/`cargo build` do not
 # compile them on every iteration (they are ~1-2k lines each). Run with

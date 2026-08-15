@@ -53,12 +53,18 @@
 //!     -- data/salamander renders/compass presets/salamander-c5.toml
 //! ```
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rayon::prelude::*;
 
 use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::types::Event;
+use piano_tuner::cache;
 use piano_tuner::motion::Motion;
+use piano_tuner::sampler::SAMPLER_VERSION;
 use piano_tuner::series::{amp_db, Series, PARTIALS, WINDOW_S as SPECTRUM_WINDOW};
 use piano_tuner::{audio, realism, Audio, Sampler, SampleLibrary, SamplerEvent, TimedEvent, SAMPLE_RATE};
 
@@ -115,6 +121,48 @@ const FLAG_Z: f64 = 4.0;
 const FIRST_KEY: u8 = 21;
 const LAST_KEY: u8 = 108;
 
+/// How many decoded recordings one worker's sampler holds before it lets them
+/// go.
+///
+/// This replaces a `clear_cache()` every twelfth key with the bound that was
+/// actually meant: the scan touches every key once, so nothing is ever reused
+/// and the cache is pure high-water mark. A few dozen recordings is a few
+/// hundred megabytes; eight is the working set of one key with room for its
+/// release group.
+const MAX_CACHED_BUFFERS: usize = 8;
+
+thread_local! {
+    /// One reference player per worker thread.
+    ///
+    /// The scan is data-parallel because a render depends on nothing but its own
+    /// events: [`Sampler::render`] seeds its round-robin draw from
+    /// [`SamplerConfig::seed`](piano_tuner::SamplerConfig) at the top of every
+    /// call, and the decoded-buffer cache is a speed device that no output
+    /// depends on. So a key rendered on its own player is the same bytes as the
+    /// same key rendered eighty-eighth on a shared one, which is the property
+    /// that lets this loop run on as many threads as there are cores and still
+    /// write the same `COMPASS.md`.
+    static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
+}
+
+fn with_sampler<T>(
+    sfz: &Path,
+    body: impl FnOnce(&mut Sampler) -> Result<T, piano_tuner::Error>,
+) -> Result<T, piano_tuner::Error> {
+    SAMPLER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(Sampler::new(sfz)?);
+        }
+        let sampler = slot.as_mut().expect("a player was just built");
+        let out = body(sampler);
+        if sampler.cached_buffers() > MAX_CACHED_BUFFERS {
+            sampler.clear_cache();
+        }
+        out
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let data = PathBuf::from(args.next().unwrap_or_else(|| "data/salamander".into()));
@@ -137,50 +185,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&out)?;
 
     let preset = Preset::load(&preset_path)?;
-    let mut sampler = Sampler::new(&sfz)?;
     let library = SampleLibrary::from_sfz(&sfz)?;
     let sampled: Vec<u8> = library.keys().collect();
+
+    // The reference side of the scan, keyed by everything it is a function of.
+    // The engine side is deliberately *not* cached: it is the thing under test
+    // and it is cheap, so it is re-rendered on every run.
+    let reference_cache = cache::reference_dir(&data);
+    let mut reference_key = cache::Fingerprint::new();
+    reference_key
+        .str("compass-scan/reference")
+        .u64(u64::from(SAMPLER_VERSION))
+        .file(&sfz)?
+        .u64(u64::from(SAMPLE_RATE))
+        .u64(u64::from(VELOCITY))
+        .f64(RENDER_S);
 
     println!(
         "compass scan: vel {VELOCITY}, {} keys, engine on {}",
         LAST_KEY - FIRST_KEY + 1,
         preset_path.display()
     );
+    println!("  reference cache: {}", reference_cache.display());
 
-    let mut scans: Vec<Scan> = Vec::new();
-    for key in FIRST_KEY..=LAST_KEY {
-        let params = preset.string_params(key);
-        let partial_hz: Vec<f64> = (1..=PARTIALS)
-            .map(|k| f64::from(params.partial_freq(k)))
-            .collect();
-        let engine_audio = render_engine(&preset, key);
-        let reference_audio = render_reference(&mut sampler, key)?;
-        if key % 12 == 0 {
-            sampler.clear_cache();
+    // One key is one independent measurement: two renders that share no state,
+    // and a fixed set of numbers taken off them. Rayon runs them across the
+    // cores and `collect` puts them back in key order, so `COMPASS.md` is the
+    // same file at any thread count.
+    let done = AtomicUsize::new(0);
+    let keys: Vec<u8> = (FIRST_KEY..=LAST_KEY).collect();
+    let measured: Vec<(Scan, Option<String>)> = keys
+        .par_iter()
+        .map(|&key| -> Result<(Scan, Option<String>), piano_tuner::Error> {
+            let params = preset.string_params(key);
+            let partial_hz: Vec<f64> = (1..=PARTIALS)
+                .map(|k| f64::from(params.partial_freq(k)))
+                .collect();
+            let engine_audio = render_engine(&preset, key);
+            let mut key_print = reference_key;
+            key_print.u64(u64::from(key));
+            let path = reference_cache.join(format!("compass-key{key:03}-{}.wav", key_print.hex()));
+            let reference_audio =
+                cache::audio(&path, || with_sampler(&sfz, |s| render_reference(s, key)))?;
+            let (reference, reference_spectrum) =
+                Metrics::measure(&reference_audio.mono(), &partial_hz, None);
+            let (engine, _) = Metrics::measure(
+                &engine_audio.mono(),
+                &partial_hz,
+                Some(&reference_spectrum),
+            );
+            let detail_text = detail
+                .contains(&key)
+                .then(|| detail_report(key, &partial_hz, &engine_audio, &reference_audio, &out))
+                .transpose()?;
+            let count = done.fetch_add(1, Ordering::Relaxed) + 1;
+            print!("\r  {count} keys   ");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+            Ok((
+                Scan {
+                    key,
+                    f0: partial_hz[0],
+                    unison: usize::from(preset.notes.unison[usize::from(key - FIRST_KEY)]),
+                    sampled: sampled.contains(&key),
+                    engine,
+                    reference,
+                },
+                detail_text,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    println!("\r  {} keys rendered      ", measured.len());
+
+    // The detail tables are printed here rather than where they were measured,
+    // so that they come out in key order however the work was scheduled.
+    let mut scans: Vec<Scan> = Vec::with_capacity(measured.len());
+    for (scan, detail_text) in measured {
+        if let Some(text) = detail_text {
+            print!("{text}");
         }
-        let (reference, reference_spectrum) =
-            Metrics::measure(&reference_audio.mono(), &partial_hz, None);
-        let (engine, _) = Metrics::measure(
-            &engine_audio.mono(),
-            &partial_hz,
-            Some(&reference_spectrum),
-        );
-        if detail.contains(&key) {
-            print_detail(key, &partial_hz, &engine_audio, &reference_audio, &out)?;
-        }
-        scans.push(Scan {
-            key,
-            f0: partial_hz[0],
-            unison: usize::from(preset.notes.unison[usize::from(key - FIRST_KEY)]),
-            sampled: sampled.contains(&key),
-            engine,
-            reference,
-        });
-        print!("\r  key {key}   ");
-        use std::io::Write;
-        std::io::stdout().flush().ok();
+        scans.push(scan);
     }
-    println!("\r  {} keys rendered      ", scans.len());
 
     let engine_z = score(&scans, |s| s.engine);
     let reference_z = score(&scans, |s| s.reference);
@@ -518,13 +603,22 @@ fn mad_sigma(residual: &[f64]) -> f64 {
 // Reporting
 // ---------------------------------------------------------------------------
 
-fn print_detail(
+/// One key's per-partial table, as text rather than as a print.
+///
+/// It is built rather than printed because the scan is parallel: the tables are
+/// emitted in key order by the caller, which is what keeps a run's console
+/// output — and not only its files — the same whatever order the work finished
+/// in. The two WAVs it writes are named by key, so writing them here is
+/// order-free.
+fn detail_report(
     key: u8,
     partial_hz: &[f64],
     engine: &Audio,
     reference: &Audio,
     out: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<String, piano_tuner::Error> {
+    use std::fmt::Write as _;
+    let mut s = String::new();
     let sr = f64::from(SAMPLE_RATE);
     let lo = (SPECTRUM_WINDOW.0 * sr) as usize;
     let hi = (SPECTRUM_WINDOW.1 * sr) as usize;
@@ -537,8 +631,9 @@ fn print_detail(
     let r_sig: Vec<f64> = r_mono.iter().map(|&v| f64::from(v)).collect();
     let e_mot = realism::measure_partials(&e_sig, partial_hz);
     let r_mot = realism::measure_partials(&r_sig, partial_hz);
-    println!("\n  key {key} ({}):", note_name(key));
-    println!(
+    let _ = writeln!(s, "\n  key {key} ({}):", note_name(key));
+    let _ = writeln!(
+        s,
         "    {:>2} {:>8}  {:>7} {:>7} {:>7} {:>4} | {:>6} {:>6} | {:>6} {:>6} | {:>7} {:>7}",
         "k", "hz", "eng dB", "ref dB", "diff", "seen", "eBeat", "rBeat", "eRate", "rRate", "eTail",
         "rTail"
@@ -547,7 +642,8 @@ fn print_detail(
         let f = |m: &Option<Motion>, g: fn(&Motion) -> f64| {
             m.as_ref().map(g).map_or("  --  ".to_string(), |v| format!("{v:6.2}"))
         };
-        println!(
+        let _ = writeln!(
+            s,
             "    {:>2} {:>8.1}  {:>7.1} {:>7.1} {:>+7.1} {:>4} | {} {} | {} {} | {:>7} {:>7}",
             k + 1,
             partial_hz[k],
@@ -573,11 +669,11 @@ fn print_detail(
     let name = note_name(key);
     write_normalised(&dir.join(format!("key{key}_{name}_engine.wav")), engine)?;
     write_normalised(&dir.join(format!("key{key}_{name}_reference.wav")), reference)?;
-    Ok(())
+    Ok(s)
 }
 
 /// Writes a solo note at a level a listener can compare: peak to -3 dBFS.
-fn write_normalised(path: &Path, audio: &Audio) -> Result<(), Box<dyn std::error::Error>> {
+fn write_normalised(path: &Path, audio: &Audio) -> Result<(), piano_tuner::Error> {
     let peak = audio
         .channels
         .iter()

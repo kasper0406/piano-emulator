@@ -112,10 +112,19 @@ pub fn analyze_note(
 
 /// The estimators alone, on trajectories that have already been tracked.
 ///
-/// This is the half of [`analyze_note`] that costs milliseconds. Splitting it
-/// out is what makes a cached tracking pass useful: a survey of a whole sample
-/// library transforms every recording once, writes the trajectories to disk,
-/// and re-runs the fits against them as often as the estimators change.
+/// Splitting this out is what makes a cached tracking pass useful: a survey of a
+/// whole sample library transforms every recording once, writes the trajectories
+/// to disk, and re-runs the fits against them as often as the estimators change.
+///
+/// **This half is the expensive one, and this comment used to say the
+/// opposite** ("the half of `analyze_note` that costs milliseconds"). Measured
+/// on A1 held for 26 s, the note the self-calibration gate leans on hardest:
+/// rendering it costs 0.32 s, [`track_refined`] 0.20 s, and the fits here
+/// **2.5-3.7 s** — `fit_decays` alone over eighty partials of a twenty-six
+/// second record. The claim was presumably true when the decay fit read a
+/// handful of partials of a short note; it is not true of the note this crate
+/// actually runs, and a cache built on it buys a tenth of what it looks like it
+/// should (`DECISIONS.md` 284).
 pub fn analyze_trajectories(
     trajectories: NoteTrajectories,
     config: &NoteConfig,
