@@ -969,3 +969,416 @@ mod tests {
         assert!(report.strike.centroid_hz <= report.strike.bandwidth_hz);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The balance: how much of an attack is the mechanism and how much is the string
+// ---------------------------------------------------------------------------
+//
+// Everything above fits `[noise.strike]` from the *recordings'* onset residual
+// and then corrects the level on the engine's own render (`strike_offset`,
+// `DECISIONS.md` 210-213). What that machinery never closes on is the thing a
+// listener actually hears, which is a **ratio**: how loud the hammer is against
+// the note it belongs to. The level it writes is referenced to the note's peak,
+// and the note's peak is not where the tone the burst competes with lives —
+// so a change anywhere else in the engine that moves the *attack's* tonal
+// content moves this ratio without moving anything the fit reads.
+//
+// What follows measures that ratio, per note, against a recording of the same
+// note, and inverts it exactly.
+
+/// The statistic: [`crate::realism::attack_tonality_db`] of the first
+/// [`crate::realism::ATTACK_WINDOW_S`] from a note's own onset — the arithmetic
+/// over the geometric mean of its power spectrum, in dB.
+///
+/// A line spectrum reads large and positive, a continuum reads zero, so it *is*
+/// a noise-to-tone ratio; it is the same number `REALISM.md`'s `attack` column
+/// is a mean of, and it needs no level match, no partial subtraction and no
+/// model of the note.
+pub fn noise_to_tone_db(signal: &[f32], onset_s: f64, sample_rate: f64) -> f64 {
+    let len = (crate::realism::ATTACK_WINDOW_S * sample_rate).round() as usize;
+    let start = (onset_s * sample_rate).round().max(0.0) as usize;
+    let end = start + len;
+    if end > signal.len() || len < 64 {
+        return f64::NAN;
+    }
+    crate::realism::attack_tonality_db(&signal[start..end], sample_rate)
+}
+
+/// How far either way a level is searched when the balance is inverted, dB.
+///
+/// Wide enough that the answer is never the bracket: the measured corrections
+/// are a few decibels to a few tens, and a note whose recording is outside
+/// ±40 dB of what this event can produce is a note the event cannot reach at
+/// all, which is a finding ([`BalanceVerdict`]) rather than a number.
+pub const BALANCE_REACH_DB: f64 = 40.0;
+
+/// Why one note's balance did or did not invert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BalanceVerdict {
+    /// A level of this event puts the engine on the recording.
+    Closed,
+    /// The engine is **already noisier than the piano with the event silenced**.
+    /// Adding a continuum only lowers tonality further, so no level reaches the
+    /// recording and the excess is not this event's.
+    Floor,
+    /// Even [`BALANCE_REACH_DB`] more of it is not enough: the recording's
+    /// attack is noisier than this event can make the engine.
+    Ceiling,
+}
+
+/// One note's noise-to-tone reading, engine against the recording of the same
+/// key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BalanceReading {
+    pub key: u8,
+    pub midi_velocity: u8,
+    /// The recording's attack tonality, dB.
+    pub reference_db: f64,
+    /// The engine's, as the preset ships.
+    pub engine_db: f64,
+    /// The engine's with the event silenced — the tonal attack alone.
+    pub tone_db: f64,
+    /// The offset on the event's level, in dB, that puts `engine_db` on
+    /// `reference_db`.
+    pub offset_db: Option<f64>,
+    pub verdict: BalanceVerdict,
+}
+
+impl BalanceReading {
+    /// Drive the reading was taken at, `v / 127`.
+    pub fn drive(&self) -> f64 {
+        f64::from(self.midi_velocity) / 127.0
+    }
+}
+
+/// The engine's render with an additive event moved by `db`.
+///
+/// `tone` is a render with the event silenced and `burst` is the sample-wise
+/// difference between that and a render with it at its tabulated level, so
+/// `burst` **is** the event through the whole chain — the board's response, the
+/// master gain and the burst's own filters included. Every other level of it is
+/// then arithmetic, and no further render is needed. This is the property that
+/// makes the inversion below exact rather than a search over presets:
+/// `engine::voice::Voice::process` adds the noise bus to the string's output
+/// and nothing after it is level-dependent at these amplitudes.
+pub fn mix(tone: &[f32], burst: &[f32], db: f64) -> Vec<f32> {
+    let gain = 10f64.powf(db / 20.0) as f32;
+    tone.iter()
+        .zip(burst)
+        .map(|(&a, &b)| a + gain * b)
+        .collect()
+}
+
+/// The offset on the event's level that puts the engine's attack tonality on
+/// `target`, bisected over [`BALANCE_REACH_DB`].
+///
+/// Monotone by construction: mixing a continuum into a line spectrum can only
+/// lower the arithmetic-over-geometric ratio, so tonality falls as the event
+/// rises, and the crossing is unique.
+pub fn balance_offset(
+    tone: &[f32],
+    burst: &[f32],
+    onset_s: f64,
+    sample_rate: f64,
+    target: f64,
+) -> Result<f64, BalanceVerdict> {
+    let at = |db: f64| noise_to_tone_db(&mix(tone, burst, db), onset_s, sample_rate);
+    let (mut lo, mut hi) = (-BALANCE_REACH_DB, BALANCE_REACH_DB);
+    let (quiet, loud) = (at(lo), at(hi));
+    if !target.is_finite() || !quiet.is_finite() || !loud.is_finite() {
+        return Err(BalanceVerdict::Floor);
+    }
+    if target > quiet {
+        return Err(BalanceVerdict::Floor);
+    }
+    if target < loud {
+        return Err(BalanceVerdict::Ceiling);
+    }
+    // 24 halvings of 80 dB is under a ten-thousandth of a decibel.
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        if at(mid) > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(0.5 * (lo + hi))
+}
+
+/// One note measured and inverted.
+#[allow(clippy::too_many_arguments)]
+pub fn balance_reading(
+    key: u8,
+    midi_velocity: u8,
+    reference: &[f32],
+    reference_onset_s: f64,
+    tone: &[f32],
+    burst: &[f32],
+    engine_onset_s: f64,
+    sample_rate: f64,
+) -> BalanceReading {
+    let reference_db = noise_to_tone_db(reference, reference_onset_s, sample_rate);
+    let tone_db = noise_to_tone_db(tone, engine_onset_s, sample_rate);
+    let engine_db = noise_to_tone_db(
+        &mix(tone, burst, 0.0),
+        engine_onset_s,
+        sample_rate,
+    );
+    let (offset_db, verdict) =
+        match balance_offset(tone, burst, engine_onset_s, sample_rate, reference_db) {
+            Ok(db) => (Some(db), BalanceVerdict::Closed),
+            Err(v) => (None, v),
+        };
+    BalanceReading {
+        key,
+        midi_velocity,
+        reference_db,
+        engine_db,
+        tone_db,
+        offset_db,
+        verdict,
+    }
+}
+
+/// The correction the whole population asks for: a level at the nominal drive
+/// and a slope in drive, which are exactly `[noise.strike]`'s two level fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BalanceFit {
+    /// dB to add to every `level_db` anchor.
+    pub level_db: f64,
+    /// dB to add to `velocity_db` — the slope of the correction in drive, which
+    /// adds to the slope the event already has.
+    pub velocity_db: f64,
+    /// Notes that inverted, and notes that did not.
+    pub closed: usize,
+    pub floor: usize,
+    pub ceiling: usize,
+    /// Robust scatter of the readings about the fitted line, dB.
+    pub scatter_db: f64,
+}
+
+/// Fits [`BalanceFit`] from the readings of a whole population.
+///
+/// **Theil-Sen, not least squares.** Two reasons, and both are properties of
+/// this material rather than preferences. The readings are censored — a note
+/// whose verdict is [`BalanceVerdict::Floor`] or [`BalanceVerdict::Ceiling`]
+/// contributes no number at all, and censoring is not symmetric in drive — so
+/// an estimator that a handful of extreme points can pull is the wrong one; and
+/// the per-key scatter of this quantity is tens of decibels, because how much
+/// hammer noise one recorded key has is a property of that key's own recording.
+/// The median of the pairwise slopes is unmoved by either.
+///
+/// `min_notes` is the fewest readings a fit may be made from.
+pub fn fit_balance(readings: &[BalanceReading], min_notes: usize) -> Option<BalanceFit> {
+    let nominal = f64::from(NOMINAL_STRIKE_VELOCITY) / 127.0;
+    let points: Vec<(f64, f64)> = readings
+        .iter()
+        .filter_map(|r| r.offset_db.map(|db| (r.drive() - nominal, db)))
+        .filter(|&(_, db)| db.is_finite())
+        .collect();
+    if points.len() < min_notes.max(2) {
+        return None;
+    }
+    let (velocity_db, level_db) = crate::estimate::melody::theil_sen(&points);
+    let mut residuals: Vec<f64> = points
+        .iter()
+        .map(|&(x, y)| (y - (level_db + velocity_db * x)).abs())
+        .collect();
+    residuals.sort_by(f64::total_cmp);
+    let scatter_db = 1.4826 * residuals[residuals.len() / 2];
+    Some(BalanceFit {
+        level_db,
+        velocity_db,
+        closed: points.len(),
+        floor: readings
+            .iter()
+            .filter(|r| r.verdict == BalanceVerdict::Floor)
+            .count(),
+        ceiling: readings
+            .iter()
+            .filter(|r| r.verdict == BalanceVerdict::Ceiling)
+            .count(),
+        scatter_db,
+    })
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+
+    const SR: f64 = 48_000.0;
+
+    /// A line spectrum: eight harmonics of C4, unit amplitude.
+    fn tone(len: usize) -> Vec<f32> {
+        (0..len)
+            .map(|n| {
+                let t = n as f64 / SR;
+                (1..=8)
+                    .map(|k| (std::f64::consts::TAU * 261.6 * f64::from(k) * t).sin())
+                    .sum::<f64>() as f32
+                    * 0.1
+            })
+            .collect()
+    }
+
+    /// A continuum: a deterministic white sequence, at unit scale.
+    fn burst(len: usize) -> Vec<f32> {
+        let mut state = 0x9e37_79b9u32;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) as f32 / 8_388_608.0 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_mix_scales_the_event_and_leaves_the_tone_alone() {
+        let (t, b) = (tone(1024), burst(1024));
+        let at_zero = mix(&t, &b, 0.0);
+        for ((&m, &a), &c) in at_zero.iter().zip(&t).zip(&b) {
+            assert!((m - (a + c)).abs() < 1e-6);
+        }
+        // Six decibels is a factor of two on an amplitude.
+        let louder = mix(&t, &b, 20.0 * 2f64.log10());
+        for ((&m, &a), &c) in louder.iter().zip(&t).zip(&b) {
+            assert!((m - (a + 2.0 * c)).abs() < 1e-5, "{m} vs {}", a + 2.0 * c);
+        }
+        // And forty decibels down is the tone to five figures.
+        let quiet = mix(&t, &b, -100.0);
+        for (&m, &a) in quiet.iter().zip(&t) {
+            assert!((m - a).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn adding_a_continuum_to_a_line_spectrum_only_lowers_the_tonality() {
+        let len = (0.030 * SR) as usize + 16;
+        let (t, b) = (tone(len), burst(len));
+        let mut last = f64::INFINITY;
+        for db in [-60.0, -50.0, -40.0, -30.0, -20.0, -10.0, 0.0] {
+            let now = noise_to_tone_db(&mix(&t, &b, db), 0.0, SR);
+            assert!(
+                now < last,
+                "tonality rose from {last:.2} to {now:.2} at {db} dB of event"
+            );
+            last = now;
+        }
+    }
+
+    #[test]
+    fn the_balance_recovers_the_level_a_note_was_built_with() {
+        let len = (0.030 * SR) as usize + 16;
+        let (t, b) = (tone(len), burst(len));
+        // Three notes, each built with a known amount of the event in it. The
+        // inversion sees only the two components and the finished tonality.
+        for planted in [-30.0, -18.0, -6.0] {
+            let target = noise_to_tone_db(&mix(&t, &b, planted), 0.0, SR);
+            let found = balance_offset(&t, &b, 0.0, SR, target).expect("a reachable level");
+            assert!(
+                (found - planted).abs() < 0.05,
+                "planted {planted:.2} dB, recovered {found:.2} dB"
+            );
+        }
+    }
+
+    /// The property that makes the stage re-entrant: an engine already on the
+    /// recording asks for nothing. Run the tool over its own output and the
+    /// correction is zero, so a preset cannot ratchet.
+    #[test]
+    fn the_balance_is_a_fixed_point() {
+        let len = (0.030 * SR) as usize + 16;
+        let (t, b) = (tone(len), burst(len));
+        let engine = mix(&t, &b, 0.0);
+        let target = noise_to_tone_db(&engine, 0.0, SR);
+        let again = balance_offset(&t, &b, 0.0, SR, target).expect("its own level is reachable");
+        assert!(again.abs() < 1e-3, "a second pass asked for {again:+.4} dB");
+
+        // And one pass lands where it aimed: move the event by the offset the
+        // inversion returns and the tonality is the target, not near it.
+        let wrong = mix(&t, &b, 9.0);
+        let want = noise_to_tone_db(&wrong, 0.0, SR);
+        let step = balance_offset(&t, &b, 0.0, SR, want).expect("reachable");
+        let landed = noise_to_tone_db(&mix(&t, &b, step), 0.0, SR);
+        assert!((landed - want).abs() < 0.01, "{landed:.3} against {want:.3}");
+    }
+
+    #[test]
+    fn a_recording_this_event_cannot_reach_is_refused_from_either_side() {
+        let len = (0.030 * SR) as usize + 16;
+        let (t, b) = (tone(len), burst(len));
+        // More tonal than the tone alone: no amount of continuum gets there,
+        // and the excess is not this event's.
+        let bare = noise_to_tone_db(&t, 0.0, SR);
+        assert_eq!(
+            balance_offset(&t, &b, 0.0, SR, bare + 6.0),
+            Err(BalanceVerdict::Floor)
+        );
+        // Noisier than the loudest legal event makes it.
+        let loudest = noise_to_tone_db(&mix(&t, &b, BALANCE_REACH_DB), 0.0, SR);
+        assert_eq!(
+            balance_offset(&t, &b, 0.0, SR, loudest - 6.0),
+            Err(BalanceVerdict::Ceiling)
+        );
+    }
+
+    fn reading(key: u8, vel: u8, offset: Option<f64>) -> BalanceReading {
+        BalanceReading {
+            key,
+            midi_velocity: vel,
+            reference_db: 30.0,
+            engine_db: 25.0,
+            tone_db: 35.0,
+            offset_db: offset,
+            verdict: if offset.is_some() {
+                BalanceVerdict::Closed
+            } else {
+                BalanceVerdict::Floor
+            },
+        }
+    }
+
+    #[test]
+    fn the_correction_is_the_level_at_the_nominal_drive_and_the_slope_through_it() {
+        let nominal = f64::from(NOMINAL_STRIKE_VELOCITY) / 127.0;
+        // A population on an exact line: −8 dB at the nominal drive, rising
+        // 20 dB per unit of drive.
+        let readings: Vec<BalanceReading> = [21u8, 45, 60, 84, 108]
+            .into_iter()
+            .flat_map(|key| {
+                [24u8, 48, 72, 88, 110].into_iter().map(move |vel| {
+                    let drive = f64::from(vel) / 127.0 - nominal;
+                    reading(key, vel, Some(-8.0 + 20.0 * drive))
+                })
+            })
+            .collect();
+        let fit = fit_balance(&readings, 10).expect("enough readings");
+        assert!((fit.level_db + 8.0).abs() < 1e-6, "{fit:?}");
+        assert!((fit.velocity_db - 20.0).abs() < 1e-6, "{fit:?}");
+        assert_eq!(fit.closed, 25);
+        assert!(fit.scatter_db < 1e-9);
+
+        // Theil-Sen, so a fifth of the population thrown far off the line moves
+        // neither number: this material's per-key scatter is tens of decibels
+        // and least squares would follow it.
+        let mut bent = readings.clone();
+        for r in bent.iter_mut().filter(|r| r.key == 21) {
+            r.offset_db = Some(r.offset_db.unwrap() + 40.0);
+        }
+        let bent = fit_balance(&bent, 10).expect("enough readings");
+        assert!((bent.level_db + 8.0).abs() < 1e-6, "{bent:?}");
+        assert!((bent.velocity_db - 20.0).abs() < 1e-6, "{bent:?}");
+
+        // Readings that did not invert are counted and not fitted.
+        let refused: Vec<BalanceReading> = readings
+            .iter()
+            .map(|r| reading(r.key, r.midi_velocity, None))
+            .collect();
+        assert!(fit_balance(&refused, 10).is_none());
+        let mut half = readings.clone();
+        half.extend(refused);
+        let half = fit_balance(&half, 10).expect("enough readings");
+        assert_eq!((half.closed, half.floor), (25, 25));
+    }
+}

@@ -7,8 +7,8 @@
 //!   estimates out as a preset file.
 //! - **The preset factory**, in the order the stages run: `survey` is stage 1
 //!   — everything an isolated recorded note can identify, over a whole sample
-//!   library at once — and `fit`, `sympathetic` and `tail` are stage 2, which
-//!   is render-and-measure.
+//!   library at once — and `fit`, `sympathetic`, `tail` and `noise` are
+//!   stage 2, which is render-and-measure.
 //! - **The standing boards and audits**: `bench`, `compass`, `melody` and
 //!   `chain` each write a document into `renders/` that a milestone is read
 //!   off; `score`, `brilliance` and `residuals` print; `ab` renders.
@@ -64,6 +64,10 @@ the preset factory, in the order the stages run:
   tail [data/salamander] [preset.toml] [--key <n>] [--passes <n>] [--out <f>]
         stage 2, the upper partials' decay: notes.partial_sigma_scale and
         notes.synthesized_decay
+  noise [data/salamander] [preset.toml] [--key <n>] [--out <f>]
+        stage 2, the mechanism's balance: [noise.strike]'s level and
+        velocity law, inverted on the engine's own attack against the
+        recordings' at the recorded keys
 
 the standing boards, each writing its own document:
   bench [data] [renders/realism] [preset.toml]     -> REALISM.md
@@ -141,6 +145,7 @@ fn run(args: Vec<String>) -> Exit {
         Some("bench") => tools::bench::run(rest()),
         Some("compass") => tools::compass::run(rest()),
         Some("melody") => tools::melody::run(rest()),
+        Some("noise") => tools::noise::run(rest()),
         Some("chain") => tools::chain::run(rest()),
         Some("score") => tools::score::run(rest()),
         Some("brilliance") => tools::brilliance::run(rest()),

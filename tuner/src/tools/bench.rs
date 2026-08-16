@@ -37,14 +37,17 @@ use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::types::Event;
 use piano_tuner::audio::Audio;
 use piano_tuner::realism::{
-    self, MelDiff, MotionCell, MotionColumns, Phrase, RealismMetrics, ReleaseDelta, VelocityLayers,
+    self, MelDiff, MotionCell, MotionColumns, Phrase, RealismMetrics, RecordedKeys, ReleaseDelta,
+    VelocityLayers,
     A1_GATE, A2_GATE, B1_GATE_DB, B2_GATE, MEL_BANDS, MEL_FLOOR_DB, MEL_F_MAX, MEL_F_MIN,
     MOTION_KEYS, MOTION_PARTIALS, MOTION_REFERENCE_VELOCITY, MOTION_VELOCITIES, MULTI_RES_WINDOWS,
     PHRASE_SET_VERSION,
 };
 use piano_tuner::cache;
 use piano_tuner::{audio, detect_onset};
-use piano_tuner::sampler::{engine_events, Sampler, TimedEvent, SAMPLER_VERSION};
+use piano_tuner::sampler::{
+    engine_events, Sampler, SamplerConfig, SamplerEvent, TimedEvent, SAMPLER_VERSION,
+};
 use piano_tuner::{SampleLibrary, SAMPLE_RATE};
 
 /// The preset the engine is voiced from. The measured one: the whole point is
@@ -98,8 +101,19 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&out)?;
 
     let preset = Preset::load(&preset_path)?;
-    let layers = VelocityLayers::from_library(&SampleLibrary::from_sfz(&sfz)?)?;
+    let library = SampleLibrary::from_sfz(&sfz)?;
+    let layers = VelocityLayers::from_library(&library)?;
+    let recorded = RecordedKeys::from_library(&library)?;
     let sample_rate = f64::from(SAMPLE_RATE);
+
+    // The same recordings, with every key the library did **not** sample played
+    // from its other neighbour's take instead of its nearest one. Both are
+    // legitimate reconstructions of a note nobody recorded, so the distance
+    // between them is how much of "the reference" at those keys is the resampler
+    // (`DECISIONS.md` 329).
+    let rerouted = Sampler::new(&sfz)?
+        .instrument()
+        .rerouted(FIRST_KEY..=LAST_KEY, recorded.routing());
 
     // The reference and its noise-floor partner are a function of the sampler,
     // the SFZ and the phrase set, none of which move when the engine does — so
@@ -150,11 +164,27 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let reference_raw = cached("reference", &phrase.events).map_err(say)?;
             // The noise-floor partner: the same music out of the layer next door.
             let alt_raw = cached("alt-layer", &layers.shift(&phrase.events)).map_err(say)?;
+            // The transposition partner: the same music, the same recordings,
+            // the other route onto every key nobody recorded.
+            let rerouted_raw = {
+                let mut key = reference_key;
+                key.str("rerouted").str(phrase.name).f64(phrase.duration_s);
+                let path = reference_cache
+                    .join(format!("realism-{}-rerouted-{}.wav", phrase.name, key.hex()));
+                cache::audio(&path, || {
+                    let mut player =
+                        Sampler::from_instrument(rerouted.clone(), SamplerConfig::default());
+                    player.render(&phrase.events, phrase.duration_s)
+                })
+                .map_err(say)?
+            };
 
             let (engine, reference) =
                 realism::level_match(&engine_raw, &reference_raw).map_err(say)?;
             let (reference_b, alt) =
                 realism::level_match(&reference_raw, &alt_raw).map_err(say)?;
+            let (reference_c, rerouted_matched) =
+                realism::level_match(&reference_raw, &rerouted_raw).map_err(say)?;
 
             engine
                 .write_wav(out.join(format!("{}_engine.wav", phrase.name)))
@@ -171,6 +201,15 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let floor =
                 realism::compare(&alt.mono(), &reference_b.mono(), sample_rate, &ons, &offs)
                     .map_err(say)?;
+            let transposition = realism::compare(
+                &rerouted_matched.mono(),
+                &reference_c.mono(),
+                sample_rate,
+                &ons,
+                &offs,
+            )
+            .map_err(say)?;
+            let (struck, transposed_notes) = phrase_keys(&phrase, &recorded);
 
             draw_page(
                 &out.join(format!("{}_mel.png", phrase.name)),
@@ -182,15 +221,29 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| e.to_string())?;
 
             let line = format!(
-                "{:<18}  mel {:5.2} dB (floor {:4.2})   mod {:5.2} dB (floor {:4.2})   {:.1} s\n",
+                "{:<18}  mel {:5.2} dB (floor {:4.2}, transposition {:4.2})   mod {:5.2} dB \
+(floor {:4.2})   {}/{} notes transposed   {:.1} s\n",
                 phrase.name,
                 measured.mel.mean,
                 floor.mel.mean,
+                transposition.mel.mean,
                 measured.modulation.mean,
                 floor.modulation.mean,
+                transposed_notes,
+                struck,
                 started.elapsed().as_secs_f64()
             );
-            Ok((Row { phrase, measured, floor }, line))
+            Ok((
+                Row {
+                    phrase,
+                    measured,
+                    floor,
+                    transposition,
+                    struck,
+                    transposed_notes,
+                },
+                line,
+            ))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -225,6 +278,33 @@ struct Row {
     phrase: Phrase,
     measured: RealismMetrics,
     floor: RealismMetrics,
+    /// The reference against **itself, transposed the other way**: the same
+    /// recordings reaching every unrecorded key from its second-nearest take
+    /// instead of its nearest. `DECISIONS.md` 329.
+    transposition: RealismMetrics,
+    /// How many of the phrase's strikes there are, and how many of them land on
+    /// a key the library never recorded.
+    struck: usize,
+    transposed_notes: usize,
+}
+
+/// The lowest and highest MIDI key of an 88-key piano.
+const FIRST_KEY: u8 = 21;
+const LAST_KEY: u8 = 108;
+
+/// How many notes a phrase strikes, and how many of those are keys the library
+/// plays by transposing a neighbour's recording.
+fn phrase_keys(phrase: &Phrase, recorded: &RecordedKeys) -> (usize, usize) {
+    let keys: Vec<u8> = phrase
+        .events
+        .iter()
+        .filter_map(|e| match e.event {
+            SamplerEvent::NoteOn { key, vel } if vel > 0 => Some(key),
+            _ => None,
+        })
+        .collect();
+    let transposed = keys.iter().filter(|&&k| !recorded.is_recorded(k)).count();
+    (keys.len(), transposed)
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +421,18 @@ between the reference and *itself played out of the neighbouring velocity layer*
 recordings of the same piano playing the same music. A distance at or below its floor is not \
 evidence of anything; the gap between the two numbers is the whole content of this file.\n"
     );
+    let _ = writeln!(
+        s,
+        "**Every note stays in these renders and every note is in the mel score.** \
+`DECISIONS.md` 328 takes transposed reference notes out of the *per-note* boards — \
+`COMPASS.md`'s `match` column and the melody gate's bars — because a note the library never \
+recorded cannot be a measurement of the piano at that key. A phrase distance is a different \
+statistic: it is a whole performance against a whole performance, and dropping two notes in \
+three from a piece of music would not make it more honest, it would make it a different \
+piece. So the policy shows up here as a **number in the floor commentary instead of a hole \
+in the table** — see *What the transposition costs*, below, which measures it rather than \
+asserting it.\n"
+    );
 
     // ---- the scoreboard ----
     let _ = writeln!(s, "## Scoreboard\n");
@@ -395,7 +487,11 @@ evidence of anything; the gap between the two numbers is the whole content of th
 {MEL_F_MIN:.0} Hz–{:.0} kHz, {MEL_FLOOR_DB:.0} dB range, mean |ΔdB|) — the number \
 `TUNING.md` stage 2 minimises. `modulation` is the distance between the band envelopes' \
 modulation spectra over 0.5–50 Hz. `attack` is the mean absolute difference in spectral \
-tonality of the first 30 ms of every detected onset. `r` is the Pearson correlation of the \
+tonality of the first 30 ms of every detected onset, each side windowed on **its own** \
+strike (`DECISIONS.md` 338: the onsets are detected on the reference, and the sampler plays \
+every recording from the file's own start, so an engine read at the reference's onset is \
+read a median of 19 ms and a mean of 27 ms into its own attack). `r` is the Pearson \
+correlation of the \
 energy envelopes of bass (20–250 Hz), mid (250 Hz–2 kHz) and treble (2–16 kHz). `release` \
 is the mean absolute level difference over the 0.5 s after every note-off nothing \
 interrupts, with the number of such windows in brackets.\n",
@@ -424,8 +520,9 @@ envelope correlates best is nevertheless not zero: {:+.1} ms on average, {:+.1} 
 extreme (`{}`), measured to an envelope frame of {:.1} ms — and the sign is the same \
 everywhere, the engine's energy arriving **earlier**. Since the strikes coincide, that is \
 envelope *shape*: some of it the attack, the rest the decay. The attack part is measurable \
-on its own — the mean time from onset to the loudest part of the note is **{:.1} ms in the \
-engine against {:.1} ms in the recordings** — and it accounts for only a few of those \
+on its own — the mean time from each side's own strike to the loudest part of the note is \
+**{:.1} ms in the engine against {:.1} ms in the recordings** — and it accounts for only a \
+few of those \
 milliseconds, so most of the lead is the engine's energy leaving sooner rather than arriving \
 sooner. That is the same story the `release` column tells, and it is a model difference \
 rather than a bug.\n",
@@ -571,6 +668,7 @@ differs in its partials.\n"
     // ---- the reading ----
     let _ = writeln!(s, "\n## Reading\n");
     s.push_str(&reading(rows));
+    s.push_str(&transposition_reading(rows));
 
     // ---- phrases ----
     let _ = writeln!(s, "\n## The phrases\n");
@@ -656,6 +754,114 @@ fn signed_at(diff: &MelDiff, centre_hz: f64) -> f64 {
         .position(|&c| (c - centre_hz).abs() < 1e-6)
         .map(|i| diff.signed_per_band[i])
         .unwrap_or(0.0)
+}
+
+/// What the reference's own transposition is worth, measured.
+///
+/// `DECISIONS.md` 329. Two keys in three on this library are played by
+/// resampling a neighbour's take, and there is always a *second* neighbour that
+/// could have been resampled instead — D4 is the D#4 take a semitone down, or
+/// equally the C4 take two semitones up. Both are legitimate reconstructions of
+/// a note nobody recorded. Rendering the whole phrase set both ways and
+/// measuring the two against each other puts a number on how much of "the
+/// reference" at those keys is the resampler rather than the piano, and it is a
+/// number rather than an argument.
+///
+/// It is an **estimate of the ambiguity, not a bound on the error**: both routes
+/// stretch, one by more than the other, so the disagreement between them is of
+/// the same order as either one's own distance from the note that was never
+/// recorded, but it is not that distance. Quoted as what it is.
+fn transposition_reading(rows: &[Row]) -> String {
+    let mut s = String::new();
+    let mean = |f: fn(&Row) -> f64| rows.iter().map(f).sum::<f64>() / rows.len() as f64;
+    let struck: usize = rows.iter().map(|r| r.struck).sum();
+    let transposed: usize = rows.iter().map(|r| r.transposed_notes).sum();
+    let _ = writeln!(s, "\n## What the transposition costs\n");
+    let _ = writeln!(
+        s,
+        "Of the **{struck} strikes** in the phrase set, **{transposed}** ({:.0} %) land on a \
+key the library never recorded and are played by resampling a neighbour's take. Each of those \
+keys has a second take within reach that could have been resampled instead. The column below \
+is the whole phrase set rendered **both ways through the same recordings** and measured \
+against itself: same player, same event list, same level match, only the choice of which take \
+to stretch is different.\n",
+        100.0 * transposed as f64 / struck.max(1) as f64
+    );
+    let _ = writeln!(
+        s,
+        "| phrase | notes | transposed | mel: engine-vs-reference | velocity-layer floor | \
+**transposition** | modulation: transposition |"
+    );
+    let _ = writeln!(s, "|:--|--:|--:|--:|--:|--:|--:|");
+    for r in rows {
+        let _ = writeln!(
+            s,
+            "| `{}` | {} | {} | {:.2} | {:.2} | **{:.2}** | {:.2} |",
+            r.phrase.name,
+            r.struck,
+            r.transposed_notes,
+            r.measured.mel.mean,
+            r.floor.mel.mean,
+            r.transposition.mel.mean,
+            r.transposition.modulation.mean,
+        );
+    }
+    let _ = writeln!(
+        s,
+        "| **mean** | {struck} | {transposed} | {:.2} | {:.2} | **{:.2}** | {:.2} |\n",
+        mean(|r| r.measured.mel.mean),
+        mean(|r| r.floor.mel.mean),
+        mean(|r| r.transposition.mel.mean),
+        mean(|r| r.transposition.modulation.mean),
+    );
+    let transposition = mean(|r| r.transposition.mel.mean);
+    let floor = mean(|r| r.floor.mel.mean);
+    let measured = mean(|r| r.measured.mel.mean);
+    let _ = writeln!(
+        s,
+        "**{transposition:.2} dB of mel is the reference disagreeing with itself about notes \
+nobody played.** Against a velocity-layer floor of {floor:.2} dB and an engine distance of \
+{measured:.2} dB, that is {:.0} % of the number this scoreboard is minimised on and {:.1}x the \
+floor the table quotes beside every cell. It is not subtracted from anything and it is not a \
+correction: it is the size of the thing the per-note boards refuse to score against, stated \
+where a reader of the phrase board can see it.\n",
+        100.0 * transposition / measured.max(1e-9),
+        transposition / floor.max(1e-9),
+    );
+    let _ = writeln!(
+        s,
+        "The two ends of the range say the same thing twice. `{}` — {} of its {} strikes \
+transposed — reads {:.2} dB; `{}`, at {} of {}, reads {:.2}.\n",
+        rows.iter()
+            .max_by(|a, b| transposed_share(a).total_cmp(&transposed_share(b)))
+            .map_or("-", |r| r.phrase.name),
+        rows.iter()
+            .max_by(|a, b| transposed_share(a).total_cmp(&transposed_share(b)))
+            .map_or(0, |r| r.transposed_notes),
+        rows.iter()
+            .max_by(|a, b| transposed_share(a).total_cmp(&transposed_share(b)))
+            .map_or(0, |r| r.struck),
+        rows.iter()
+            .max_by(|a, b| transposed_share(a).total_cmp(&transposed_share(b)))
+            .map_or(0.0, |r| r.transposition.mel.mean),
+        rows.iter()
+            .min_by(|a, b| transposed_share(a).total_cmp(&transposed_share(b)))
+            .map_or("-", |r| r.phrase.name),
+        rows.iter()
+            .min_by(|a, b| transposed_share(a).total_cmp(&transposed_share(b)))
+            .map_or(0, |r| r.transposed_notes),
+        rows.iter()
+            .min_by(|a, b| transposed_share(a).total_cmp(&transposed_share(b)))
+            .map_or(0, |r| r.struck),
+        rows.iter()
+            .min_by(|a, b| transposed_share(a).total_cmp(&transposed_share(b)))
+            .map_or(0.0, |r| r.transposition.mel.mean),
+    );
+    s
+}
+
+fn transposed_share(row: &Row) -> f64 {
+    row.transposed_notes as f64 / row.struck.max(1) as f64
 }
 
 /// The prose the scoreboard exists to support: where the biggest distances are,

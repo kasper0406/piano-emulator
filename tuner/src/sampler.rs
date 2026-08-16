@@ -292,6 +292,28 @@ impl Region {
     fn transpose_cents(&self, key: u8) -> i32 {
         (i32::from(key) - self.keycenter) * self.keytrack
     }
+
+    /// The pitch this region is a recording of, where it is a recording of one.
+    ///
+    /// `None` for a region that is told not to transpose (`pitch_keytrack=0`) —
+    /// a damper landing or a pedal tray is a noise, not a note, and rerouting
+    /// it would be meaningless.
+    pub fn recorded_key(&self) -> Option<u8> {
+        if self.keytrack == 0 || self.cc64_gate().is_some() {
+            return None;
+        }
+        u8::try_from(self.keycenter).ok().filter(|k| (21..=108).contains(k))
+    }
+
+    /// The keys this region answers to.
+    pub fn key_range(&self) -> (i32, i32) {
+        (self.lokey, self.hikey)
+    }
+
+    fn matches_key(&self, key: u8) -> bool {
+        let key = i32::from(key);
+        key >= self.lokey && key <= self.hikey
+    }
 }
 
 pub fn db_to_amp(db: f64) -> f64 {
@@ -399,6 +421,50 @@ impl Instrument {
         &self.regions
     }
 
+    /// The same instrument with every pitched key played from a **different
+    /// recording**: `route(key)` names the take each key is to be transposed
+    /// from, and a key the route has no answer for is left exactly as the file
+    /// maps it.
+    ///
+    /// This exists to put a number on the cost of transposition
+    /// (`DECISIONS.md` 329). A library that samples every minor third plays two
+    /// keys in three from a neighbour's recording, and there is always a second
+    /// neighbour that could have been used instead. Both reconstructions are
+    /// equally legitimate; the distance between them is how much of the
+    /// reference at those keys is the resampler rather than the piano, and it
+    /// cannot be argued, only measured.
+    ///
+    /// Unpitched regions — the damper landing, the pedal tray, anything with
+    /// `pitch_keytrack=0` or a CC 64 gate — are carried over untouched: they are
+    /// recorded per key and there is nothing to reroute.
+    pub fn rerouted(&self, keys: std::ops::RangeInclusive<u8>, route: impl Fn(u8) -> Option<u8>) -> Instrument {
+        let mut regions: Vec<Region> = self
+            .regions
+            .iter()
+            .filter(|r| r.recorded_key().is_none())
+            .cloned()
+            .collect();
+        for key in keys {
+            let Some(take) = route(key) else {
+                // No route: keep whatever the file already says for this key.
+                regions.extend(self.regions.iter().filter(|r| {
+                    r.recorded_key().is_some() && r.matches_key(key)
+                }).cloned());
+                continue;
+            };
+            for region in self.regions.iter().filter(|r| r.recorded_key() == Some(take)) {
+                let mut moved = region.clone();
+                moved.lokey = i32::from(key);
+                moved.hikey = i32::from(key);
+                regions.push(moved);
+            }
+        }
+        Instrument {
+            regions,
+            ignored: self.ignored.clone(),
+        }
+    }
+
     /// Opcodes present in the file that this player does not implement, and
     /// how often each appeared. The benchmark's error bar: what the reference
     /// silently does not do.
@@ -465,6 +531,17 @@ impl Sampler {
             config,
             cache: HashMap::new(),
         })
+    }
+
+    /// A player for an instrument that was built rather than read — the one
+    /// caller is [`Instrument::rerouted`], which needs to play a definition no
+    /// file contains.
+    pub fn from_instrument(instrument: Instrument, config: SamplerConfig) -> Self {
+        Sampler {
+            instrument,
+            config,
+            cache: HashMap::new(),
+        }
     }
 
     pub fn instrument(&self) -> &Instrument {
@@ -1195,6 +1272,67 @@ mod tests {
         // playing it at the wrong time.
         assert_eq!(instrument.ignored_opcodes()["trigger"], 1);
         assert_eq!(instrument.regions().len(), 2);
+    }
+
+    /// A library that samples every minor third, mapped over its neighbours the
+    /// way an SFZ does it, rerouted onto the *other* neighbour's take.
+    #[test]
+    fn rerouting_plays_every_unrecorded_key_from_the_other_take() {
+        let mut sfz = String::from("<group>\n");
+        for centre in [57u8, 60, 63, 66] {
+            sfz.push_str(&format!(
+                "<region> sample=note{centre}.wav lokey={} hikey={} pitch_keycenter={centre}\n",
+                centre - 1,
+                centre + 1
+            ));
+        }
+        // Damper landings: per key, unpitched, and none of this touches them.
+        sfz.push_str("<group> trigger=release pitch_keytrack=0\n");
+        for centre in [57u8, 60, 63, 66] {
+            sfz.push_str(&format!(
+                "<region> sample=rel{centre}.wav lokey={centre} hikey={centre}\n"
+            ));
+        }
+        let instrument = Instrument::parse(&sfz, Path::new(".")).unwrap();
+        let recorded = [57u8, 60, 63, 66];
+        // Second-nearest take, or the key's own where it has one.
+        let route = |key: u8| -> Option<u8> {
+            if recorded.contains(&key) {
+                return Some(key);
+            }
+            let nearest = *recorded.iter().min_by_key(|&&k| k.abs_diff(key))?;
+            recorded
+                .iter()
+                .copied()
+                .filter(|&k| k != nearest)
+                .min_by_key(|&k| k.abs_diff(key))
+        };
+        let moved = instrument.rerouted(58..=65, route);
+
+        let take_for = |inst: &Instrument, key: u8| -> Option<u8> {
+            inst.regions()
+                .iter()
+                .find(|r| r.recorded_key().is_some() && r.matches_key(key))
+                .and_then(Region::recorded_key)
+        };
+        // Before: the nearest take. After: the other one.
+        for (key, before, after) in [(58u8, 57u8, 60u8), (59, 60, 57), (61, 60, 63), (62, 63, 60)] {
+            assert_eq!(take_for(&instrument, key), Some(before), "key {key} before");
+            assert_eq!(take_for(&moved, key), Some(after), "key {key} after");
+        }
+        // A recorded key keeps its own recording either way.
+        for key in [60u8, 63] {
+            assert_eq!(take_for(&moved, key), Some(key), "key {key} was rerouted");
+        }
+        // And the unpitched release regions are carried over untouched.
+        let unpitched = |inst: &Instrument| {
+            inst.regions()
+                .iter()
+                .filter(|r| r.recorded_key().is_none())
+                .count()
+        };
+        assert_eq!(unpitched(&moved), unpitched(&instrument));
+        assert_eq!(unpitched(&instrument), 4);
     }
 
     #[test]

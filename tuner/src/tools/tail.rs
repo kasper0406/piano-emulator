@@ -78,9 +78,10 @@ use piano_emulator::types::Event;
 use piano_tuner::cache;
 use piano_tuner::estimate::tail::{
     engine_band_fall, extend_row, fit_tail_to, levels_at_instants, measurable_db,
-    bank_owns_band, partial_band_fall, partial_envelopes, reach, reach_to, BandFall,
-    DecayModel, DecayPoint,
-    DrawnDecay, PartialBandFall, PartialTail, SideFall, TailCorrection, FLOOR_FROM_S, HOP_S,
+    bank_owns_band, low_mean, low_row, partial_band_fall, partial_envelopes, reach, reach_to,
+    BandFall, DecayModel, DecayPoint,
+    DrawnDecay, LowDecay, PartialBandFall, PartialTail, SideFall, TailCorrection, FLOOR_FROM_S,
+    HOP_S, LOW_BAND,
 };
 use piano_tuner::estimate::brilliance::{band_decay, band_decay_gap, BandDecay, HF1, HF2};
 use piano_tuner::realism::VelocityLayers;
@@ -641,7 +642,70 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .map(Vec::is_empty)
         .collect();
     let mut drawn_row = vec![false; stage_owns.len()];
+
+    // The band the correction curve holds at one, and the seam that left
+    // (`DECISIONS.md` 334-335). Under 2 kHz a row is `estimate::shaping`'s
+    // work and `TailCorrection::at` deliberately writes nothing, so the 30
+    // sampled keys carry a measured sub-2 kHz tilt and the other 58 carry
+    // exactly 1.000 — a fitted/unfitted step in one band, and the largest thing
+    // the melody gate's tail `hf` column can see, because that column is a
+    // *share* whose denominator is the fundamental. `LowDecay` makes it a
+    // compass quantity like the two bands above it: the line through the keys
+    // that measured it times their own interpolated departures from it.
+    //
+    // Written **once**, before the passes and not inside them. Everything else
+    // here is a correction measured on the render and iterated to its own fixed
+    // point; this is a statement about the piano read off the recordings, and
+    // multiplying it in again every pass would compound a number that has
+    // nothing to converge against.
+    let low = LowDecay::fit(
+        &keys
+            .iter()
+            .copied()
+            .filter(|k| sampled.contains(k) && !stage_owns[usize::from(k - FIRST_KEY)])
+            .filter_map(|key| {
+                let params = preset.string_params(key);
+                let partial_hz: Vec<f64> = (1..=params.partial_count())
+                    .map(|j| f64::from(params.partial_freq(j)))
+                    .collect();
+                let (mean, _) = low_mean(
+                    &preset.notes.partial_sigma_scale[usize::from(key - FIRST_KEY)],
+                    &partial_hz,
+                )?;
+                Some((key, mean))
+            })
+            .collect::<Vec<_>>(),
+    );
+    println!(
+        "\nthe band under {:.0} Hz, which only a sampled key ever had:\n  \
+         exp({:+.4}{:+.5}·key) x{:.2} (r {:+.3}, n {}) — {:.3} at A0, {:.3} at C4, {:.3} at A4, {:.3} at C5",
+        LOW_BAND.1,
+        low.line.intercept,
+        low.line.slope,
+        low.line.sigma.exp(),
+        low.line.correlation,
+        low.line.points,
+        low.at(21),
+        low.at(60),
+        low.at(69),
+        low.at(72),
+    );
     if passes > 0 {
+        for &key in &keys {
+            let i = usize::from(key - FIRST_KEY);
+            if !stage_owns[i] {
+                continue;
+            }
+            let params = preset.string_params(key);
+            let partial_hz: Vec<f64> = (1..=params.partial_count())
+                .map(|j| f64::from(params.partial_freq(j)))
+                .collect();
+            let seeded = low_row(&preset.notes.partial_sigma_scale[i], &partial_hz, low.at(key));
+            if seeded != preset.notes.partial_sigma_scale[i] {
+                preset.notes.partial_sigma_scale[i] = seeded;
+                drawn_row[i] = true;
+            }
+        }
         preset.validate()?;
         rows = measure(&preset, &keys)?;
     }

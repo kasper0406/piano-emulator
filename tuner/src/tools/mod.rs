@@ -2,7 +2,7 @@
 //!
 //! Everything here is a **subcommand**: an operational tool that is run again
 //! whenever the instrument moves — the preset factory (`fit`, `sympathetic`,
-//! `tail`, alongside `survey`, which is old enough to still live in
+//! `tail`, `noise`, alongside `survey`, which is old enough to still live in
 //! `main.rs`), the standing boards that write a document into `renders/`
 //! (`bench`, `compass`, `melody`, `chain`), and the audits that print
 //! (`score`, `brilliance`, `residuals`) or render (`ab`).
@@ -24,6 +24,7 @@ pub mod chain;
 pub mod compass;
 pub mod fit;
 pub mod melody;
+pub mod noise;
 pub mod residuals;
 pub mod score;
 pub mod sympathetic;

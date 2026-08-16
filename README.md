@@ -59,6 +59,7 @@ survey                     stage 1, over a whole sample library
 fit --stage <name>         stage 2, the per-note fits (see below)
 sympathetic                stage 2: duplex, halo coupling, stereo spread
 tail                       stage 2: the upper partials' decay
+noise                      stage 2: the mechanism's balance against the tone
 bench / compass / melody / chain
                            the standing boards, each writing its own document
                            into renders/
@@ -66,7 +67,7 @@ score / brilliance / residuals / ab
                            the audits: print, print, print, render
 ```
 
-**Two of those gates are red, on purpose and by name.**
+**One of those gates is red, on purpose and by name.**
 
 `a_known_duplex_comes_back_from_the_engines_own_render_of_it` fails and has
 since the unison became a coupled eigenproblem. It is not a tolerance and it is
@@ -74,18 +75,44 @@ not the estimator — with the modal culling switched off the injected segment
 comes back at −0.05 cents having rung 1.38 s of the 1.4 s it was given — it is
 the duplex bullet below (`DECISIONS.md` 260).
 
-`no_note_of_the_line_wobbles_unlike_the_rest` fails because one note of a melody
-does not belong. `tuner/tests/melody.rs` renders the Ode to Joy melody line
-solo through the engine and through the recordings of the same piano and asks
-whether any note stands further off the line's own register trend than the
-piano's own worst note stands off its. F4 stands **1.28 dB** off in beating
-where the recordings' worst note stands 0.21 dB off theirs, and clearing the
-`notes.false_beat` splits that key was *drawn* takes it to 0.56: split depth is
-the one thing `DECISIONS.md` 284 drew without closing it on the render, and
-until it is closed the gate says so (`DECISIONS.md` 296-298).
-
-Both are left failing rather than skipped because that is the only honest way to
+It is left failing rather than skipped because that is the only honest way to
 carry a defect nobody has fixed.
+
+`the_hammer_is_no_louder_against_the_note_than_the_pianos_is` is the newest
+column of that gate and it is **green** after being written red. A listener
+found the engine's hammer noise dominant where the piano's is barely audible;
+measured as attack tonality — the arithmetic over the geometric mean of the
+first 30 ms of a note, which is a noise-to-tone ratio — the engine came back
+**7.1 dB noisier than the recordings** over 150 recorded-key × velocity notes,
+while the same engine with `[noise.strike]` silenced came back 7.3 dB *more*
+tonal: the event was not filling a 7 dB gap, it was overshooting one by 14.4.
+`piano-tuner noise` inverts that exactly — two renders per note, one with the
+event silenced, so their difference **is** the burst through the whole chain and
+every other level of it is arithmetic — and the answer is a velocity law as much
+as a level: 17 dB too loud at pianissimo and 3 dB too loud at fortissimo. Level
+−7.29 dB and `velocity_db` 24.4 → 43.9 takes the balance to −0.77 dB, and the
+melody column from **−3.90 against a bar of 2.05** to **−1.60**
+(`DECISIONS.md` 338-342). One thing found on the way is worth its own line:
+`REALISM.md`'s `attack` column detects its onsets on the *reference*, and a
+sampler plays each recording from the file's own start, so the engine was being
+read a median of **19 ms** past its own attack — every attack number written
+before item 338 is quoted through that window and is not comparable with one
+written after it.
+
+`no_note_of_the_lines_tail_is_brighter_than_the_rest`, red since it was written,
+is **green**. `tuner/tests/melody.rs` renders the Ode to Joy melody line solo
+through the engine and through the recordings of the same piano and asks whether
+any note stands further off the line's own register trend than the recorded keys
+of that register stand off theirs. In the **late** window, 0.5-2.0 s of each
+note, C4 stood **5.43 dB off in 2-6 kHz share against a bar of 5.32** — the one
+pitch of the line whose `partial_sigma_scale` row was fitted, against four
+neighbours whose rows were drawn. The seam turned out to be the band **under
+2 kHz**, which `TailCorrection::at` holds at exactly one: `estimate::shaping`
+writes it at the 30 recorded keys and nothing ever wrote it at the other 58, so
+C4's own cells held its fundamental 4.2 dB higher at 0.5 s than the law alone
+would and a *share* metric read that as darkness. `tail::LowDecay` makes that
+band a compass quantity like the two above it and the column reads **3.76**,
+with C4's own departure at **1.88** (`DECISIONS.md` 334-337).
 
 The default (dev) profile is built with `opt-level = 3` — the DSP is unusable unoptimized — so plain `cargo run`/`cargo test` are real-time capable while keeping fast incremental builds. `--release` additionally enables thin LTO and disables debug assertions; it is the profile performance is measured on, and the performance acceptance test only runs there. The binary opens the default output device and drops you into a REPL:
 
@@ -174,6 +201,8 @@ cargo run --release -p piano-tuner -- fit \
 cargo run --release -p piano-tuner -- tail \
     data/salamander presets/salamander-c5.toml \
     --passes 8 --out presets/salamander-c5.toml
+cargo run --release -p piano-tuner -- noise \
+    data/salamander presets/salamander-c5.toml --out /tmp/balanced.toml
 cargo run --release -p piano-tuner -- ab      # A/B renders into renders/
 cargo run --release -p forensics --bin verify_milestone_b -- [old-preset.toml]
 ```
@@ -184,6 +213,26 @@ with the same code the recordings are measured with — the spectrum census, the
 halo isolated by subtraction, render health, neutrality, cost, and what the
 between-partial statistic is actually made of. Given the preset as it stood
 before a change it prints both columns.
+
+`noise` is last on purpose and writes to a scratch file rather than in place:
+it measures the hammer's loudness **against the note**, so it has to run on a
+finished instrument, and its correction is inverted on the engine's own render
+rather than predicted — which makes it re-entrant, and a second pass over its own
+output asks for −0.00 dB. Splice its `[noise.strike]` into the preset and run it
+again to see that (`DECISIONS.md` 340).
+
+Being last has a price, and it is written down rather than left to be
+rediscovered: `tail` fits its decay correction **on the engine's own render**,
+and `noise` then changes that render. Both stages are idempotent on their own —
+re-running `tail` against the hammer it was fitted to reproduces the preset with
+zero rows differing — but re-running it against the *refitted* hammer moves all
+37 drawn `partial_sigma_scale` rows (median cell ×1.004, max ×1.20). So the
+shipped preset is one `tail` application short of that stage's fixed point. The
+difference is inside every gate's own noise — `mel` 5.10 either way, `attack`
+4.39 against 4.42, the compass flagging the same eleven keys, all seven melody
+columns passing both ways — so it is reported and not chased; closing the loop
+means giving the two stages a shared objective, which is the global optimiser
+`TUNING.md` still lists as future work (`DECISIONS.md` 345).
 
 `fit` is stage 2's *motion* half: the within-string false beat (`notes.false_beat`) and the
 strike vector's velocity law (`[voicing.strike_direction]`) inverted from the recordings' own beat
@@ -238,19 +287,44 @@ Where a history document and `DECISIONS.md` disagree, the log wins.
 - `docs/history/FUNDAMENTALS.md` — **history.** The physics review that convicted the free-running unison and derived the coupled one (2026-08-14); acted on in `DECISIONS.md` 223-261 and 296-302. It reviews a string model the engine no longer has.
 - `renders/realism/REALISM.md` — the standing realism scoreboard: six fixed phrases rendered from one event list through both the engine and the Salamander recordings, with `TUNING.md`'s stage-2 losses measured over each pair *and* the same measurement between two recordings of the same piano, which is the noise floor that makes the first number readable. It also carries **Columns A and B** (`docs/history/FUNDAMENTALS.md` §II.3): four per-cell measurements of how a single partial *moves* — instantaneous-frequency mismatch and placement, beat-depth error and velocity coherence — over sixteen key × partial cells at three velocities, each with a gate, because every other column on the board is a functional of energy and the artefact those were built to catch is not. All four gates pass on the measured preset (`DECISIONS.md` 253); `cargo run --release -p piano-tuner -- score` is the same four numbers with every cell printed, in seven seconds, for iterating a fit against them. Written by `cargo run --release -p piano-tuner -- bench` (needs `data/fetch_salamander.sh`); the metrics themselves live in `tuner/src/realism.rs` so the scoreboard and the loss an optimizer minimises are one piece of code.
 - **The melody gate** is the listener's own test, made permanent
-  (`DECISIONS.md` 296-298): `cargo test -p piano-tuner --test melody` plays the
-  Ode to Joy melody line alone — the soprano of the `excerpt` phrase, the same
-  notes from the same `realism::ODE_MELODY` — through the engine and through the
-  recordings, measures each note's roughness, beating and 2-6 kHz share, and
-  asserts that no note stands further off the line's own register trend than the
-  recordings' worst note stands off theirs. It exists because every other
+  (`DECISIONS.md` 296-298, 330-331): `cargo test -p piano-tuner --test melody`
+  plays the Ode to Joy melody line alone — the soprano of the `excerpt` phrase,
+  the same notes from the same `realism::ODE_MELODY` — through the engine and
+  through the recordings, measures each note's roughness, beating and 2-6 kHz
+  share in **two windows** (0.03-0.40 s of the note, and 0.5-2.0 s of it), and
+  asserts that no note stands further off the line's own register trend than a
+  real instrument's notes do in that register. A fourth column, `strike`, reads
+  the one span the other three deliberately exclude — the first 30 ms, where the
+  hammer is — and is gated on a different question: not *does a note stand out*
+  but *is the mechanism as loud against the note as the piano's is*, which is a
+  comparison with a recording and is therefore scored on the recorded keys of
+  the register and never on the transposed ones (`DECISIONS.md` 341). It exists because every other
   standing number here is either a *compass* statistic (88 keys struck alone) or
   a mean over a phrase, and neither of those is a tune with one note wrong in it.
+  The late window exists because the first regression it failed to catch was a
+  *decay* one, and a window that closes at 0.40 s cannot see a decay; it is read
+  off the line's own pitches played slowly and legato, because at the melody's
+  tempo the late window of a note contains three later strikes and two of them
+  are that note's own harmonics.
   `cargo run --release -p piano-tuner -- melody`
   is the same measurement printed in full, with flags that undo one table at a
   time so a failure can be attributed to the table that causes it; it writes
-  `renders/melody/MELODY.md` and the two rendered lines beside it, because the
+  `renders/melody/MELODY.md` and the rendered lines beside it, because the
   complaint this gate exists for was made by listening to them.
+- **Only recorded reference notes are scored** (`DECISIONS.md` 328-329). The
+  Salamander library records 30 of 88 keys, one every minor third, and plays the
+  other 58 by resampling the nearest take. Those transposed notes stay in every
+  render — they are what a player of this library hears — and they carry no
+  *per-note* score: `COMPASS.md`'s `match` column and the melody gate's bars use
+  recorded keys only, and everything else is marked `transposed — unscored`
+  rather than dropped. On the Ode line that means **only C4 is a recording**;
+  D4/E4 are both the D#4 take and F4/G4 are both the F#4 take. The phrase board
+  is untouched — a mel distance is a whole performance against a whole
+  performance — so the policy appears there as a measured number instead:
+  rendering the phrase set through the *second*-nearest take for every
+  unrecorded key and scoring it against the first puts **2.67 dB of mel**, 53 %
+  of the engine's own distance, on how much of "the reference" at those keys is
+  the resampler.
 - **Brilliance** has no standing report, because the audit that measured it (`DECISIONS.md` 292-295) moved nothing: `cargo run --release -p piano-tuner -- brilliance` prints, per key and per phrase, how much 2-6 kHz and 6-12 kHz energy the engine carries against the recording of the same note at 0.1 s and at 1 s, each against the reference's own velocity-layer spread. It exists because `COMPASS.md`'s `centroid` is a mean *partial index* and the ear's brightness is absolute. It refused the top octave's decay (the recording's late energy there is its room, 20-30 dB over the note's own partial), acquitted the master shelf on its measured leverage, and convicted the partial envelope above the fitted rows — an error in partial *number* rather than in frequency, and one whose fix is a decay re-fit rather than a filter. The measurements are in `tuner/src/estimate/brilliance.rs`.
 - `presets/default.toml` — the hand-tuned v1 instrument, written out in full.
 - `presets/salamander-c5.toml` — the same instrument with everything stage 1 could measure off a real Yamaha C5 written into it. Its `notes.partial_gains` and `notes.false_beat` tables now cover the whole compass: 28 keys measured against their own recordings and 50 **drawn** from those keys' distributions, named in `notes.synthesized_texture` (`DECISIONS.md` 284-291, 300). Both halves of a drawn key are closed on the **render** — the row against the recordings' own roughness of that register, the splits against their own beat depth — which is what a fitted key's row and a fitted key's splits are each closed against too.

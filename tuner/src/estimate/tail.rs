@@ -996,6 +996,36 @@ pub fn extend_row(row: &[f32], partial_hz: &[f64], correction: &TailCorrection) 
     out
 }
 
+/// The same row with its sub-[`LOW_BAND`]`.1` cells multiplied by `factor`.
+///
+/// The band [`extend_row`] never touches, written once per run rather than per
+/// pass: [`LowDecay`] is a statement about the *piano* read off the keys the
+/// library sampled, not a correction measured on this render, so iterating it
+/// would compound a number that has no fixed point to converge to. The passes
+/// that follow close the two high bands on a render that already has it, which
+/// is the same order a sampled key's own row was built in — `shaping` first and
+/// the correction on top.
+pub fn low_row(row: &[f32], partial_hz: &[f64], factor: f64) -> Vec<f32> {
+    let low = partial_hz.iter().take_while(|&&hz| hz < LOW_BAND.1).count();
+    if low < MIN_LOW_CELLS || !(factor.is_finite() && factor > 0.0) {
+        return row.to_vec();
+    }
+    let mut out: Vec<f32> = (1..=low.max(row.len()))
+        .map(|k| {
+            let was = f64::from(row.get(k - 1).copied().unwrap_or(1.0));
+            let scaled = if k <= low { was * factor } else { was };
+            scaled.clamp(
+                f64::from(crate::preset::MIN_PARTIAL_SIGMA_SCALE),
+                f64::from(crate::preset::MAX_PARTIAL_SIGMA_SCALE),
+            ) as f32
+        })
+        .collect();
+    while out.last() == Some(&1.0) {
+        out.pop();
+    }
+    out
+}
+
 /// A band's geometric centre, where [`TailCorrection::at`]'s line is pinned.
 pub fn band_centre((lo, hi): (f64, f64)) -> f64 {
     (lo * hi).sqrt()
@@ -1249,6 +1279,133 @@ impl DecayModel {
             })
             .collect();
         line.at(key) * interpolate(&residual, f64::from(key)).exp()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The band below the correction curve, which only a sampled key ever had
+// ---------------------------------------------------------------------------
+
+/// The band [`TailCorrection::at`] holds at one: everything under [`HF1`].
+///
+/// Not a band this module ever *measures* — it is where `estimate::shaping`'s
+/// per-partial cells live, and the correction curve deliberately stops there
+/// (`DECISIONS.md` 304, and [`TailCorrection::at`]'s own doc). It is named
+/// because the seam of `DECISIONS.md` 334 is exactly its edge.
+pub const LOW_BAND: (f64, f64) = (0.0, HF1.0);
+
+/// How many cells a key must have under [`LOW_BAND`]`.1` before its
+/// [`low_mean`] is a **band** statistic rather than one partial's own
+/// idiosyncrasy — and, on the other side, before [`LowDecay`] will write one.
+///
+/// [`MIN_BAND_CELLS`]'s own number and its own reason, and it is not a
+/// formality: on the shipped preset the sampled keys carry 67 cells here at A0
+/// and **one** from C6 up, and those single-cell keys read 0.42, 1.00 and 0.67
+/// — a factor of two either way, which is the per-partial scatter
+/// (`DECISIONS.md` 285's 4.5 dB roughness) and not a register trend. Fitting
+/// the line through them and then writing the result onto the top octave
+/// lengthened the fundamental of six keys above E6 by a factor of 1.6-1.8 and
+/// took the compass from **9 flags to 13** — four new ones on `jitter`, which
+/// is what a unison whose partners are held up against each other for longer
+/// does. Refused as a population point and refused as a target, both for the
+/// same reason: three partials is where this stops being one partial.
+pub const MIN_LOW_CELLS: usize = MIN_BAND_CELLS;
+
+/// The geometric mean of a `notes.partial_sigma_scale` row's cells under
+/// [`LOW_BAND`]`.1`, and how many there were.
+///
+/// This is the one number a sampled key's row says about its own fundamental
+/// region, and it is read off the *preset* rather than off a render because
+/// that is where the quantity lives: `estimate::shaping` measured it from the
+/// recording's own per-partial T60s and nothing since has touched it.
+pub fn low_mean(row: &[f32], partial_hz: &[f64]) -> Option<(f64, usize)> {
+    let cells: Vec<f64> = row
+        .iter()
+        .zip(partial_hz)
+        .filter(|(_, &hz)| hz < LOW_BAND.1)
+        .map(|(&v, _)| f64::from(v))
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .collect();
+    if cells.len() < MIN_LOW_CELLS {
+        return None;
+    }
+    let n = cells.len();
+    Some((
+        (cells.iter().map(|v| v.ln()).sum::<f64>() / n as f64).exp(),
+        n,
+    ))
+}
+
+/// What the sub-[`HF1`] half of a `partial_sigma_scale` row is at a key nobody
+/// recorded.
+///
+/// **The band the draw never covered, and the seam it left.** `DECISIONS.md`
+/// 320 made the two high bands a compass quantity — the line through the
+/// sampled keys times their own interpolated departures from it — and left this
+/// one alone, because [`TailCorrection::at`] returns exactly 1.0 at and below
+/// [`HF1`]'s bottom edge and there was therefore nothing for a *correction* to
+/// draw. But the row under 2 kHz is not empty at a sampled key: `shaping`
+/// writes it, and on the shipped preset **every one of the 24 sampled keys that
+/// has cells there has a geometric mean below one** (1.00 at A0, 0.90 at A3,
+/// 0.75 at C4, 0.59 at A4, 0.39 at C5) while **all 37 drawn keys read exactly
+/// 1.000**, because nothing ever wrote them. That is a fitted/unfitted step in
+/// one band, and it is the largest thing the melody gate's tail `hf` column can
+/// see: the column is a *share*, its denominator is the fundamental, and C4's
+/// own cells hold its fundamental 4.2 dB higher at 0.5 s than the law alone
+/// would where D4's and E4's do not (`DECISIONS.md` 334).
+///
+/// **Drawn as a line and not as a scatter**, which is item 320(d)'s argument
+/// one band lower and its evidence is the same: over the sampled keys the
+/// residual about `exp(a + b·key)` has a lag-1 autocorrelation across the
+/// compass of **+0.05**, so the departure of one key is not evidence about the
+/// next one and interpolating it is all that may be done with it; drawing its
+/// ×1.24 scatter instead would land a *random* factor from what the sampled key
+/// next door measured, which is the seam and not the cure.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LowDecay {
+    /// `exp(a + b·key)` through the sampled keys' own [`low_mean`].
+    pub line: LogLine,
+    /// Those keys and their means, ascending: what the residual is interpolated
+    /// between.
+    pub points: Vec<(u8, f64)>,
+}
+
+impl LowDecay {
+    pub fn fit(points: &[(u8, f64)]) -> LowDecay {
+        let mut sorted = points.to_vec();
+        sorted.sort_by_key(|p| p.0);
+        LowDecay {
+            line: LogLine::fit(
+                &sorted
+                    .iter()
+                    .map(|&(k, v)| (f64::from(k), v))
+                    .collect::<Vec<_>>(),
+            ),
+            points: sorted,
+        }
+    }
+
+    /// The factor a key's sub-[`HF1`] cells are multiplied by: the line times
+    /// the sampled keys' interpolated departure from it, exactly
+    /// [`DecayModel::at`]. One where nothing was fitted at all.
+    pub fn at(&self, key: u8) -> f64 {
+        if self.points.is_empty() {
+            return 1.0;
+        }
+        let residual: Vec<(f64, f64)> = self
+            .points
+            .iter()
+            .filter_map(|&(k, v)| {
+                let line = self.line.at(k);
+                (v > 0.0 && line > 0.0).then(|| (f64::from(k), v.ln() - line.ln()))
+            })
+            .collect();
+        let at = self.line.at(key) * interpolate(&residual, f64::from(key)).exp();
+        if at.is_finite() && at > 0.0 {
+            at
+        } else {
+            1.0
+        }
     }
 }
 
@@ -1820,6 +1977,120 @@ mod tests {
             fit_tail_to(&env, HOP_S, 60.0).is_none(),
             "a 26 dB beat pattern was fitted as a decay: {:?}",
             fit_tail_to(&env, HOP_S, 60.0)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The band under the correction curve (`DECISIONS.md` 334-335)
+    // -----------------------------------------------------------------------
+
+    /// A harmonic series at `f0`, which is what the low band is counted over.
+    fn series(f0: f64, n: usize) -> Vec<f64> {
+        (1..=n).map(|k| f0 * k as f64).collect()
+    }
+
+    #[test]
+    fn the_low_band_is_the_geometric_mean_of_the_cells_under_two_kilohertz() {
+        // C4: seven partials under 2 kHz out of a row of ten.
+        let hz = series(261.6, 12);
+        let row: Vec<f32> = vec![0.5, 0.5, 0.5, 0.5, 2.0, 2.0, 2.0, 4.0, 4.0, 4.0];
+        let (mean, cells) = low_mean(&row, &hz).expect("seven cells is a band");
+        assert_eq!(cells, 7, "2 kHz is between partial 7 and partial 8 of C4");
+        // Four halves and three doubles: ln mean = (4·ln0.5 + 3·ln2)/7.
+        let want = ((4.0 * 0.5f64.ln() + 3.0 * 2.0f64.ln()) / 7.0).exp();
+        assert!(
+            (mean - want).abs() < 1e-9,
+            "the mean is not the geometric one: {mean} against {want}"
+        );
+        // The cells above 2 kHz are not in it, whatever they are.
+        let mut louder = row.clone();
+        for cell in louder.iter_mut().skip(7) {
+            *cell = 0.25;
+        }
+        assert_eq!(low_mean(&louder, &hz), low_mean(&row, &hz));
+    }
+
+    #[test]
+    fn a_key_with_fewer_than_three_partials_under_two_kilohertz_has_no_low_band() {
+        // F#5: 741 Hz, so partials 1 and 2 are under 2 kHz and partial 3 is not.
+        let hz = series(741.0, 8);
+        assert_eq!(hz.iter().filter(|&&f| f < LOW_BAND.1).count(), 2);
+        assert_eq!(
+            low_mean(&[0.5, 0.5, 0.5, 0.5], &hz),
+            None,
+            "two cells were taken as a band statistic"
+        );
+        // And nothing is written there either, which is the other half of the
+        // rule: two cells of one key are one partial's idiosyncrasy.
+        let row = vec![0.9f32, 0.9, 0.9, 0.9];
+        assert_eq!(low_row(&row, &hz, 0.4), row);
+    }
+
+    #[test]
+    fn the_low_line_is_exact_where_a_key_measured_it_and_interpolates_between() {
+        // Three sampled keys a minor third apart, and a key between two of them.
+        let low = LowDecay::fit(&[(57, 0.9), (60, 0.75), (63, 0.83)]);
+        for &(key, want) in &[(57u8, 0.9), (60, 0.75), (63, 0.83)] {
+            assert!(
+                (low.at(key) / want - 1.0).abs() < 1e-6,
+                "the model is not exact at a key that measured it: {} against {want}",
+                low.at(key)
+            );
+        }
+        // Between two sampled keys it is the line times the two departures
+        // interpolated, which is bracketed by them in `ln`.
+        let between = low.at(61);
+        assert!(
+            between > 0.75 && between < 0.83,
+            "a key between 0.75 and 0.83 drew {between}"
+        );
+    }
+
+    #[test]
+    fn the_low_line_tapers_to_itself_past_the_last_key_that_measured_it() {
+        let low = LowDecay::fit(&[(57, 0.9), (60, 0.75), (63, 0.5)]);
+        // At the last point the departure is carried whole; a full taper past
+        // it, the model is the line alone.
+        let far = 63 + RESIDUAL_TAPER_KEYS as u8;
+        assert!(
+            (low.at(far) / low.line.at(far) - 1.0).abs() < 1e-6,
+            "an octave past the last measurement the departure is still being carried"
+        );
+        // An empty model asks for nothing rather than for zero.
+        assert_eq!(LowDecay::fit(&[]).at(60), 1.0);
+    }
+
+    #[test]
+    fn a_drawn_low_row_scales_under_the_edge_and_leaves_everything_above_it() {
+        let hz = series(261.6, 12);
+        let row: Vec<f32> = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.5, 2.5, 2.5];
+        let out = low_row(&row, &hz, 0.75);
+        assert_eq!(out.len(), row.len());
+        for (k, cell) in out.iter().enumerate() {
+            let want = if hz[k] < LOW_BAND.1 { 0.75 } else { f64::from(row[k]) };
+            assert!(
+                (f64::from(*cell) - want).abs() < 1e-6,
+                "partial {} at {:.0} Hz reads {cell} and not {want}",
+                k + 1,
+                hz[k]
+            );
+        }
+        // It is a multiplier and not a replacement: a key that already carries
+        // cells there keeps their shape.
+        let carried: Vec<f32> = vec![0.5, 2.0, 0.5, 2.0, 0.5, 2.0, 0.5];
+        let out = low_row(&carried, &hz, 0.5);
+        for (k, cell) in out.iter().enumerate() {
+            assert!(
+                (f64::from(*cell) - f64::from(carried[k]) * 0.5).abs() < 1e-6,
+                "cell {} was replaced rather than scaled",
+                k + 1
+            );
+        }
+        // And it obeys the schema's rails rather than the arithmetic.
+        let out = low_row(&[0.3; 7], &hz, 0.1);
+        assert!(
+            out.iter().all(|&c| c >= crate::preset::MIN_PARTIAL_SIGMA_SCALE),
+            "a drawn low row went under the schema's floor: {out:?}"
         );
     }
 }

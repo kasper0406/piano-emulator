@@ -47,6 +47,9 @@ the one-line summaries below are only an index.
 | `top_octave` | Where the top octave's notes end and what ends them (`DECISIONS.md` 275-276). |
 | `analysis_render` | The 65-WAV audio-quality corpus behind `DECISIONS.md` 46's independent audit — T60 holds, velocity ladders, a compass sweep, pedal and halo phrases, headroom chords. |
 | `drift_line` | The line `estimate::directivity` inverts `voicing.polarization_pan_spread` through, measured on the engine as it stands. |
+| `tail_seam` | Where a note's 0.5-2.0 s brightness comes from, partial by partial, engine against the recording of the same key — the instrument behind `DECISIONS.md` 334-336. |
+| `line_noise` | Which of the engine's two mechanism events the melody render's noise is, both measured whole by silencing them one at a time, and the sampler's own lead-in at the recorded keys — `DECISIONS.md` 338-339. |
+| `preset_variant` | Writes a copy of a preset with one thing changed, so that a standing board can be run on the variant without a hand-edited file. The only entry here that is a *helper* rather than a measurement, and it is here because the experiments in `DECISIONS.md` 338-341 are only reproducible with it. |
 
 Most of them write into `renders/` or into `target/`, both gitignored, and
 several need the Salamander library — `data/fetch_salamander.sh` first, 707 MiB

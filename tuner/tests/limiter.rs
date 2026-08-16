@@ -77,11 +77,17 @@ fn master_limiter(l: &[f32], r: &[f32]) -> (usize, f32) {
 ///
 /// Measured on both shipped presets, all six benchmark phrases: **not one
 /// sample** of the twelve renders is over the threshold, and the least
-/// headroom any of them leaves is 1.60 dB (`arpeggio_dynamics` on the measured
-/// preset, whose fortissimo arpeggio is the loudest gesture in the set). The
+/// headroom any of them leaves is **6.92 dB** (`arpeggio_dynamics` on the
+/// measured preset, whose fortissimo arpeggio is the loudest gesture in the
+/// set; `presets/default.toml`'s worst is the same phrase at 15.23 dB). The
 /// gate is a decibel of headroom rather than zero samples alone, so that a
 /// change which merely *grazes* the limiter fails here instead of passing and
 /// then failing on the next louder phrase somebody writes.
+///
+/// The 1.60 dB this comment carried until `DECISIONS.md` 343 was measured
+/// before the master-gain recalibration of item 277 took the whole instrument
+/// 5.19 dB down; it was a stale number under a live gate, which is the one
+/// thing a doc comment beside an assertion must not be.
 #[test]
 fn no_benchmark_phrase_reaches_the_master_safety_limiter() {
     for path in PRESETS {
@@ -111,11 +117,12 @@ fn no_benchmark_phrase_reaches_the_master_safety_limiter() {
 /// This is the clause of `DECISIONS.md` 42 that is a statement about *one
 /// note*: the limiter is for chords. Every fourth key at three velocities, the
 /// loudest of them the loudest a MIDI file can carry. Over the keys this gate
-/// samples the loudest is A7 at velocity 127 on both presets, **-9.86 dBFS on
-/// `presets/default.toml` and -11.39 on `presets/salamander-c5.toml`** in the
-/// channel it is panned into, 8.86 and 10.39 dB under the threshold. Over all
-/// 88 keys (`forensics/src/bin/output_gain.rs`, which is not on the every-fourth
-/// grid) it is C8 at -9.42 and C5 at -7.58, 8.42 and 6.58 dB under.
+/// samples the loudest is **A7 at velocity 127 on `presets/default.toml`,
+/// -9.86 dBFS, and F6 on `presets/salamander-c5.toml`, -9.20** in the channel
+/// it is panned into — 8.86 and 8.20 dB under the threshold. Over all 88 keys
+/// (`forensics/src/bin/output_gain.rs`, which is not on the every-fourth grid)
+/// it is C8 at -9.42 and A#7 at -7.52, 8.42 and 6.52 dB under, and that second
+/// pair is unmoved by `DECISIONS.md` 334-341.
 ///
 /// **`presets/salamander-c5.toml` used to be deliberately excluded, and both
 /// halves of the reason are now gone.** Under the same engine three keys of the
@@ -124,9 +131,10 @@ fn no_benchmark_phrase_reaches_the_master_safety_limiter() {
 /// dBFS), which item 265 attributed to `notes.partial_gains` rather than to the
 /// construction. The disciplined refit (`DECISIONS.md` 273-274) took the level
 /// out of those rows, and the master-gain recalibration (277) moved the whole
-/// instrument 5.19 dB down from a threshold it was driving past; the loudest
-/// key of the fitted preset is no longer in the treble at all. Both presets are
-/// in the gate now, which is where a claim about "the instrument" belongs.
+/// instrument 5.19 dB down from a threshold it was driving past; the fitted
+/// preset's loudest key is still a treble one (A#7) but it now sits 6.5 dB
+/// under the threshold instead of on it. Both presets are in the gate now,
+/// which is where a claim about "the instrument" belongs.
 #[test]
 fn a_single_note_never_reaches_the_master_safety_limiter() {
     for path in ["presets/default.toml", "presets/salamander-c5.toml"] {
@@ -217,8 +225,13 @@ fn readable_note_offs(phrase: &Phrase) -> Vec<f64> {
 /// worst +35.79, with 43.8 % of note-offs over +6** — the felt's threshold dove
 /// through the whole 40 dB of `FELT_CLEARANCE` inside the damper's 10 ms
 /// arrival while the string lost two of them, so `soft_limit` ran 20 to 41 dB
-/// past its knee and hard-clipped the note. It now pools at **mean −1.17, p90
-/// +3.51, worst +13.59, 5.5 % over +6**.
+/// past its knee and hard-clipped the note. It now pools at **mean −1.27, p90
+/// +3.70, worst +11.13, 6.8 % over +6** (`DECISIONS.md` 343; before the hammer
+/// refit of item 340 it was −1.56 / +3.14 / +11.14 / 4.1 %, and the whole of
+/// that move is `[noise.strike]` coming down out of the *reference* half of
+/// this ratio — the tail refit of items 334-336 moves it by nothing at all).
+/// `presets/default.toml` is not in this gate and would not pass it: the
+/// hand-tuned dampers pool at **+19.11 / +36.00 / +66.86, 89.0 % over +6**.
 ///
 /// The two gates are the two halves of that: a damper may not add energy up
 /// there *on average*, and it may not do so on more than a tenth of the notes.

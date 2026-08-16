@@ -192,7 +192,8 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     let preset = Preset::load(&preset_path)?;
     let library = SampleLibrary::from_sfz(&sfz)?;
-    let sampled: Vec<u8> = library.keys().collect();
+    let recorded_keys = realism::RecordedKeys::from_library(&library)?;
+    let sampled: Vec<u8> = recorded_keys.keys().to_vec();
 
     // The reference side of the scan, keyed by everything it is a function of.
     // The engine side is deliberately *not* cached: it is the thing under test
@@ -235,11 +236,22 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 cache::audio(&path, || with_sampler(&sfz, |s| render_reference(s, key)))?;
             let (reference, reference_spectrum) =
                 Metrics::measure(&reference_audio.mono(), &partial_hz, None);
-            let (engine, _) = Metrics::measure(
+            // `match` is the one metric of the seven that scores the engine
+            // against *the recording of this key*, and two keys in three have
+            // no recording of their own: what the player answers with there is
+            // a neighbour's take, resampled. Rendering it is right — it is what
+            // a listener hears — but scoring against it measures the resampler,
+            // so the column is left empty and the key is marked
+            // `transposed — unscored` (`DECISIONS.md` 328).
+            let recorded = sampled.contains(&key);
+            let (mut engine, _) = Metrics::measure(
                 &engine_audio.mono(),
                 &partial_hz,
-                Some(&reference_spectrum),
+                recorded.then_some(&reference_spectrum),
             );
+            if !recorded {
+                engine.match_db = f64::NAN;
+            }
             let detail_text = detail
                 .contains(&key)
                 .then(|| detail_report(key, &partial_hz, &engine_audio, &reference_audio, &out))
@@ -253,7 +265,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     key,
                     f0: partial_hz[0],
                     unison: usize::from(preset.notes.unison[usize::from(key - FIRST_KEY)]),
-                    sampled: sampled.contains(&key),
+                    sampled: recorded,
                     engine,
                     reference,
                 },
@@ -526,6 +538,16 @@ fn flagged(scans: &[Scan], zs: &[Zs]) -> Vec<Flag> {
     out
 }
 
+/// Metrics whose population is the keys the library actually **recorded**.
+///
+/// `match` is the only one of the seven that compares the engine against the
+/// recording of the same note, so it is the only one the transposition policy
+/// of `DECISIONS.md` 328 touches. Its neighbourhood is drawn from recorded keys
+/// too: a residual against eight neighbours of which six carry no score is not
+/// a residual, and a `match` column scored against a transposed take was
+/// measuring the resampler on both sides of the subtraction.
+const RECORDED_ONLY: [&str; 1] = ["match"];
+
 /// The indices of the [`NEIGHBOURS`] nearest keys strung the same way as `i`,
 /// nearest first, excluding `i` itself.
 ///
@@ -534,9 +556,13 @@ fn flagged(scans: &[Scan], zs: &[Zs]) -> Vec<Flag> {
 /// kind*. Every metric here steps at the 1→2 and 2→3 string boundaries because
 /// the number of strings is what a unison beat is made of, and a scan that
 /// ignored that would spend its flags convicting four keys of being a boundary.
-fn same_kind_neighbours(scans: &[Scan], i: usize) -> Vec<usize> {
+///
+/// `recorded_only` narrows the candidates to keys the library recorded, which
+/// is what a [`RECORDED_ONLY`] metric's population is.
+fn same_kind_neighbours_of(scans: &[Scan], i: usize, recorded_only: bool) -> Vec<usize> {
     let mut candidates: Vec<usize> = (0..scans.len())
         .filter(|&j| j != i && scans[j].unison == scans[i].unison)
+        .filter(|&j| !recorded_only || scans[j].sampled)
         .collect();
     candidates.sort_by_key(|&j| (scans[j].key as i32 - scans[i].key as i32).abs());
     candidates.truncate(NEIGHBOURS);
@@ -546,25 +572,32 @@ fn same_kind_neighbours(scans: &[Scan], i: usize) -> Vec<usize> {
 /// The residual of one metric at one key: its value less the median of its
 /// same-kind neighbours. `None` where the metric was not measured, at the key
 /// or at its neighbours.
-fn residual_at(scans: &[Scan], column: &[f64], i: usize) -> Option<f64> {
+fn residual_at(scans: &[Scan], column: &[f64], i: usize, recorded_only: bool) -> Option<f64> {
     if !column[i].is_finite() {
         return None;
     }
-    let neighbours: Vec<f64> = same_kind_neighbours(scans, i)
+    let neighbours: Vec<f64> = same_kind_neighbours_of(scans, i, recorded_only)
         .into_iter()
         .map(|j| column[j])
         .filter(|v| v.is_finite())
         .collect();
-    (neighbours.len() >= NEIGHBOURS / 2).then(|| column[i] - median(&neighbours))
+    // The recorded population is a third as dense as the compass, and at the
+    // ends of it a key can have only three same-`N` takes in the whole library.
+    // Requiring four of eight there would silence the metric exactly where the
+    // library is thinnest, which is a different defect from the one the rule is
+    // for; three is still a median.
+    let minimum = if recorded_only { 3 } else { NEIGHBOURS / 2 };
+    (neighbours.len() >= minimum).then(|| column[i] - median(&neighbours))
 }
 
 fn score(scans: &[Scan], pick: impl Fn(&Scan) -> Metrics) -> Vec<Zs> {
     let series: Vec<[f64; METRIC_NAMES.len()]> = scans.iter().map(|s| pick(s).values()).collect();
     let mut out = vec![Zs::default(); scans.len()];
     for m in 0..METRIC_NAMES.len() {
+        let recorded_only = RECORDED_ONLY.contains(&METRIC_NAMES[m]);
         let column: Vec<f64> = series.iter().map(|v| v[m]).collect();
         let residual: Vec<Option<f64>> = (0..column.len())
-            .map(|i| residual_at(scans, &column, i))
+            .map(|i| residual_at(scans, &column, i, recorded_only))
             .collect();
         // The scale is taken over the residuals that exist. A key the metric
         // could not be measured at contributes nothing rather than a zero: a
@@ -748,7 +781,17 @@ A jagged harmonic series is therefore a *table* defect by construction, and the 
 at the table that carries it. Since `DECISIONS.md` 284 that table covers most of the compass in \
 two ways: 28 keys carry rows measured against their own recordings, and 49 carry rows **drawn** \
 from those keys' distributions. The `sampled` column says which a key is, because the two are \
-meant to be indistinguishable here and that is the claim this report exists to check.\n\n"
+meant to be indistinguishable here and that is the claim this report exists to check.\n\n\
+## Which reference notes are scored\n\n\
+`DECISIONS.md` 328. The library records one key every minor third and plays the other two in \
+three by **transposing** the nearest take. A transposed reference note is listening material - \
+it is exactly what a player of this library hears - but it is not a measurement of the piano at \
+that key: its inharmonicity, its unison beat, its decay and its brightness are the neighbour's, \
+resampled. Six of the seven metrics here are scored against a key's own *neighbours* and are \
+unaffected. The seventh, `match`, is the distance from **the recording of the same note**, and \
+that is only a fact where the recording exists. So `match` is measured, and its neighbourhood \
+taken, on recorded keys alone; every other key is rendered, listened to, and marked \
+`transposed - unscored`.\n\n"
     ));
 
     // ---- the ranked outlier list ----
@@ -770,11 +813,15 @@ shows up in both columns and is not a defect of the model.\n\n"
             .iter()
             .map(|sc| sc.engine.values()[metric_index(f.metric)])
             .collect();
-        let neighbours: Vec<f64> = same_kind_neighbours(scans, i)
-            .into_iter()
-            .map(|j| column[j])
-            .filter(|v| v.is_finite())
-            .collect();
+        let neighbours: Vec<f64> = same_kind_neighbours_of(
+            scans,
+            i,
+            RECORDED_ONLY.contains(&f.metric),
+        )
+        .into_iter()
+        .map(|j| column[j])
+        .filter(|v| v.is_finite())
+        .collect();
         s.push_str(&format!(
             "| {} | {} | {} | {} | `{}` | **{:+.1}** | {:.2} | {:.2} | {:+.1} |\n",
             scans[i].key,
@@ -806,12 +853,17 @@ shows up in both columns and is not a defect of the model.\n\n"
     // ---- the full table ----
     s.push_str("## Every key\n\n");
     s.push_str(
-        "`e` is the engine, `r` the recording. The `z` column is the worst of the six.\n\n",
+        "`e` is the engine, `r` the recording. The `z` column is the worst of the six. \
+`source` is where the reference at that key comes from: `recorded` when the library has a take \
+of that note, `transposed` when it does not and the player is resampling a neighbour's take. \
+A transposed key's `match` cell reads **`transposed — unscored`**: the note is still rendered \
+and it is still what a listener hears, but there is no recording of *that* key to be a \
+distance from.\n\n",
     );
     s.push_str(
-        "| key | note | f0 | N | level e/r | centroid e/r | irregular e/r | match | beat e/r | jitter e/r | decay e/r | worst z |\n",
+        "| key | note | f0 | N | source | level e/r | centroid e/r | irregular e/r | match | beat e/r | jitter e/r | decay e/r | worst z |\n",
     );
-    s.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+    s.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for (i, sc) in scans.iter().enumerate() {
         let (name, z) = engine_z[i].worst();
         let pair = |a: f64, b: f64, places: usize| -> String {
@@ -825,15 +877,22 @@ shows up in both columns and is not a defect of the model.\n\n"
             format!("{}/{}", one(a), one(b))
         };
         s.push_str(&format!(
-            "| {} | {} | {:.1} | {} | {} | {} | {} | {:.1} | {} | {} | {} | {} {:.1} |\n",
+            "| {} | {} | {:.1} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} {:.1} |\n",
             sc.key,
             note_name(sc.key),
             sc.f0,
             sc.unison,
+            if sc.sampled { "recorded" } else { "transposed" },
             pair(sc.engine.level_db, sc.reference.level_db, 1),
             pair(sc.engine.centroid_st, sc.reference.centroid_st, 1),
             pair(sc.engine.irregular_db, sc.reference.irregular_db, 1),
-            sc.engine.match_db,
+            match (sc.sampled, sc.engine.match_db.is_finite()) {
+                (_, true) => format!("{:.1}", sc.engine.match_db),
+                // A recorded key whose two spectra share no partial the series
+                // could read: the recording exists, the distance does not.
+                (true, false) => "-".to_string(),
+                (false, false) => "*transposed — unscored*".to_string(),
+            },
             pair(sc.engine.beat_db, sc.reference.beat_db, 1),
             pair(sc.engine.jitter_cents, sc.reference.jitter_cents, 2),
             pair(sc.engine.decay_db_s, sc.reference.decay_db_s, 1),

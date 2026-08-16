@@ -181,6 +181,32 @@ pub const ATTACK_WINDOW_S: f64 = 0.030;
 /// leaves behind takes rather longer to reach its loudest.
 pub const ATTACK_RISE_WINDOW_S: f64 = 0.060;
 
+/// How far **back** from a detected onset each signal's own strike is looked
+/// for before its attack window is placed, in seconds.
+///
+/// `DECISIONS.md` 338. The onsets this metric reads are detected on the
+/// *reference*, and the reference is a sampler: it plays each recording from
+/// the file's own start, so what reaches the ear is late by however much silence
+/// there was between the engineer's trigger and the hammer. Measured over the
+/// 30 recorded keys at five velocities, that lead-in is **+19 ms at the median,
+/// +27 ms on average and +112 ms at the worst key** — so an engine read at the
+/// reference's onset is read a fifth of the way through its own attack and, at
+/// the tail of that distribution, entirely past it.
+///
+/// `estimate::melody` has always windowed each side on its own strike for
+/// exactly this reason (`ONSET_SEARCH_S`, and its own note: "a gate whose two
+/// sides are windowed by different rules is not comparing them"). This is the
+/// same device on the phrase board. 120 ms covers the whole measured
+/// distribution; the search is additionally clamped so that it can never reach
+/// back past the midpoint to the previous onset, which is what keeps a fast
+/// phrase from finding the note before.
+pub const ATTACK_SEARCH_BACK_S: f64 = 0.120;
+
+/// How far **forward** the same search looks. Small: a detected onset is
+/// already at or after the strike, so the forward half only absorbs the flux
+/// detector's own frame quantisation.
+pub const ATTACK_SEARCH_FORWARD_S: f64 = 0.010;
+
 /// Length of the release tail the energy delta reads, in seconds.
 pub const RELEASE_WINDOW_S: f64 = 0.5;
 
@@ -875,6 +901,49 @@ fn refine_onset(signal: &[f32], sample_rate: f64, frame_start: usize) -> f64 {
     (start + best * step) as f64 / sample_rate
 }
 
+/// Where a signal's own strike is, near `near_s`: the largest rise in a 1 ms
+/// RMS envelope over `[near_s - back_s, near_s + forward_s]`.
+///
+/// A rise rather than a level, because a note is struck into the tail of the
+/// one before it and any threshold on level would fire on that tail; a piano
+/// strike is the one thing in the window that goes up. The rise is taken over
+/// three milliseconds because one is inside the hammer's own contact time and a
+/// single block is noise.
+///
+/// This is the primitive both per-note windows in this repository are placed
+/// with — [`attack_tonality_delta`] here and `estimate::melody::note_onset`,
+/// which delegates to it — so that the two boards cannot drift apart on the one
+/// question of *where a note starts*.
+pub fn strike_near(
+    signal: &[f32],
+    sample_rate: f64,
+    near_s: f64,
+    back_s: f64,
+    forward_s: f64,
+) -> f64 {
+    let block = ((sample_rate * 0.001) as usize).max(1);
+    let from = ((((near_s - back_s) * sample_rate) as isize).max(0)) as usize;
+    let to = ((((near_s + forward_s) * sample_rate) as usize) + block).min(signal.len());
+    if from + 4 * block >= to {
+        return near_s;
+    }
+    let envelope: Vec<f64> = signal[from..to]
+        .chunks(block)
+        .map(|c| {
+            (c.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / c.len() as f64).sqrt()
+        })
+        .collect();
+    let step = 3usize;
+    let mut best = (0usize, f64::MIN);
+    for i in 0..envelope.len().saturating_sub(step) {
+        let rise = envelope[i + step] - envelope[i];
+        if rise > best.1 {
+            best = (i, rise);
+        }
+    }
+    from as f64 / sample_rate + best.0 as f64 * block as f64 / sample_rate
+}
+
 /// Spectral flatness of a block, as a *tonality* in dB: the arithmetic mean of
 /// the power spectrum over its geometric mean, so a sinusoid is a large
 /// positive number and white noise is 0.
@@ -1000,19 +1069,30 @@ pub fn attack_tonality_delta(
     let mut engine_levels = Vec::new();
     let mut reference_levels = Vec::new();
     let mut rises = Vec::new();
-    for &t in onsets {
-        let start = (t * sample_rate).round().max(0.0) as usize;
-        let end = start + len;
-        if end > engine.len() || end > reference.len() {
+    for (i, &t) in onsets.iter().enumerate() {
+        // Each side is windowed on **its own** strike, not on the onset the
+        // detector found in the reference (`DECISIONS.md` 338). The search
+        // reaches back at most to the midpoint of the gap to the previous
+        // onset, so a fast phrase cannot find the note before.
+        let back = match i.checked_sub(1).and_then(|j| onsets.get(j)) {
+            Some(&previous) => ATTACK_SEARCH_BACK_S.min(0.5 * (t - previous).max(0.0)),
+            None => ATTACK_SEARCH_BACK_S,
+        };
+        let et = strike_near(engine, sample_rate, t, back, ATTACK_SEARCH_FORWARD_S);
+        let rt = strike_near(reference, sample_rate, t, back, ATTACK_SEARCH_FORWARD_S);
+        let window = |signal: &[f32], at: f64| -> Option<f64> {
+            let start = (at * sample_rate).round().max(0.0) as usize;
+            let end = start + len;
+            (end <= signal.len()).then(|| attack_tonality_db(&signal[start..end], sample_rate))
+        };
+        let (Some(ea), Some(rb)) = (window(engine, et), window(reference, rt)) else {
             continue;
-        }
-        let ea = attack_tonality_db(&engine[start..end], sample_rate);
-        let rb = attack_tonality_db(&reference[start..end], sample_rate);
+        };
         engine_levels.push(ea);
         reference_levels.push(rb);
         if let (Some(x), Some(y)) = (
-            attack_rise_s(engine, sample_rate, t),
-            attack_rise_s(reference, sample_rate, t),
+            attack_rise_s(engine, sample_rate, et),
+            attack_rise_s(reference, sample_rate, rt),
         ) {
             rises.push((x, y));
         }
@@ -1430,6 +1510,155 @@ pub fn compare(
         release: release_tail_delta(engine, reference, sample_rate, note_offs, note_ons),
         lag_s: envelope_lag_s(engine, reference, sample_rate, 0.05)?,
     })
+}
+
+// ---------------------------------------------------------------------------
+// The evaluation policy: which reference notes are the piano
+// ---------------------------------------------------------------------------
+
+/// Which keys the library actually **recorded**, and where every other key's
+/// reference sound really comes from.
+///
+/// `DECISIONS.md` 328 makes this permanent and it is the one rule every scored
+/// per-note comparison in this repository now obeys. A sampled piano records a
+/// subset of the compass — Salamander takes one note every minor third, 30 of
+/// 88 — and plays the other 58 keys by **transposing** the nearest take. That
+/// transposed note is a perfectly good thing to listen to and it is what the
+/// scoreboard's phrases are played on. It is not a measurement of the piano at
+/// that key: its inharmonicity, its unison beat rate, its decay and its
+/// brightness are all the *neighbour's*, shifted. Scoring the engine's D4
+/// against a resampled D#4 measures the resampler.
+///
+/// So: **transposed reference notes stay in every render and carry no per-note
+/// score.** Reports mark them `transposed — unscored` rather than dropping them,
+/// because a reader has to be able to see that the note was played and why its
+/// column is empty.
+///
+/// Two questions this answers, both of which a scoring surface needs:
+///
+/// * [`RecordedKeys::is_recorded`] — may this key carry a per-note score at all?
+/// * [`RecordedKeys::take_for`] / [`RecordedKeys::alternate_take`] — which
+///   recording is a transposed key actually made of, and which other recording
+///   could have made it instead. The second is what
+///   [`RecordedKeys::routing`] builds: a *second* legitimate reconstruction of
+///   the same music, so that the cost of transposition can be measured rather
+///   than asserted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedKeys {
+    keys: Vec<u8>,
+}
+
+impl RecordedKeys {
+    /// The keys the library has an attack recording of, ascending.
+    pub fn from_library(library: &SampleLibrary) -> Result<Self> {
+        let mut keys: Vec<u8> = library.keys().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        if keys.len() < 2 {
+            return Err(Error::Config(
+                "the library records fewer than two keys, so nothing can be scored against it"
+                    .into(),
+            ));
+        }
+        Ok(RecordedKeys { keys })
+    }
+
+    /// For tests and for libraries built by hand.
+    pub fn from_keys(keys: &[u8]) -> Self {
+        let mut keys = keys.to_vec();
+        keys.sort_unstable();
+        keys.dedup();
+        RecordedKeys { keys }
+    }
+
+    pub fn keys(&self) -> &[u8] {
+        &self.keys
+    }
+
+    /// Whether this key is a take of its own — the only kind of note a scored
+    /// per-note comparison may use.
+    pub fn is_recorded(&self, key: u8) -> bool {
+        self.keys.binary_search(&key).is_ok()
+    }
+
+    /// The recorded key whose take a player transposes onto `key`: the nearest
+    /// one, which is what an SFZ that maps each recording over its immediate
+    /// neighbours does. A recorded key is its own take.
+    pub fn take_for(&self, key: u8) -> Option<u8> {
+        self.keys
+            .iter()
+            .copied()
+            .min_by_key(|&k| (k.abs_diff(key), k))
+    }
+
+    /// The *other* recording that could have been transposed onto `key`: the
+    /// second-nearest take. `None` for a recorded key, which needs no
+    /// transposition, and `None` where the library has only one take in reach.
+    ///
+    /// This is the substitution `bench` measures the transposition cost with.
+    /// Both routes are equally defensible reconstructions of a note nobody
+    /// recorded, so how far apart they land is how much of "the reference" at
+    /// that key is the resampler rather than the piano.
+    pub fn alternate_take(&self, key: u8) -> Option<u8> {
+        if self.is_recorded(key) {
+            return None;
+        }
+        let first = self.take_for(key)?;
+        self.keys
+            .iter()
+            .copied()
+            .filter(|&k| k != first)
+            .min_by_key(|&k| (k.abs_diff(key), k))
+    }
+
+    /// The take every key should be played from when each transposed key is
+    /// moved onto its [`alternate_take`](RecordedKeys::alternate_take):
+    /// recorded keys keep their own recording, and everything else swaps route.
+    ///
+    /// The rendering of this map is `Instrument::rerouted`.
+    pub fn routing(&self) -> impl Fn(u8) -> Option<u8> + '_ {
+        move |key| {
+            if self.is_recorded(key) {
+                Some(key)
+            } else {
+                self.alternate_take(key).or_else(|| self.take_for(key))
+            }
+        }
+    }
+
+    /// `recorded` or `transposed from D#4 (-1)` — what a report prints in a
+    /// provenance column.
+    pub fn provenance(&self, key: u8) -> String {
+        if self.is_recorded(key) {
+            return "recorded".to_string();
+        }
+        match self.take_for(key) {
+            Some(take) => format!(
+                "transposed from {} ({:+})",
+                note_name(take),
+                i32::from(key) - i32::from(take)
+            ),
+            None => "unmapped".to_string(),
+        }
+    }
+
+    /// The recorded keys inside `[lo, hi]`, which is the population a per-note
+    /// bar in that register is measured off.
+    pub fn in_range(&self, lo: u8, hi: u8) -> Vec<u8> {
+        self.keys
+            .iter()
+            .copied()
+            .filter(|&k| k >= lo && k <= hi)
+            .collect()
+    }
+}
+
+/// `C4` for 60. The same spelling every report in this crate uses.
+pub fn note_name(key: u8) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    format!("{}{}", NAMES[usize::from(key) % 12], i32::from(key) / 12 - 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -2280,6 +2509,57 @@ mod tests {
         }
     }
 
+    /// `DECISIONS.md` 338: each side of the comparison is windowed on **its
+    /// own** strike, so a player that leads the other by a couple of dozen
+    /// milliseconds is still compared attack against attack.
+    #[test]
+    fn each_side_of_the_attack_is_windowed_on_its_own_strike() {
+        // One note, twice: the same tone with the same noisy attack, but the
+        // second one begins 25 ms later — the sampler's own lead-in, which is
+        // +19 ms at the median over Salamander's recorded keys.
+        let n = (0.6 * SR) as usize;
+        let note = |delay_s: f64| -> Vec<f32> {
+            let start = (delay_s * SR) as usize;
+            let mut out = vec![0.0f32; n];
+            let mut state = 0x1234_5678_9abc_def0u64;
+            for i in 0..(n - start) {
+                let t = i as f64 / SR;
+                let mut x = 0.3 * (2.0 * PI * 440.0 * t).sin() * (-3.0 * t).exp();
+                if t < 0.02 {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let r = ((state >> 33) as f64 / f64::from(u32::MAX >> 1)) - 1.0;
+                    x += 0.3 * r * (1.0 - t / 0.02);
+                }
+                out[start + i] = x as f32;
+            }
+            out
+        };
+        let early = note(0.05);
+        let late = note(0.075);
+        // The onset the detector finds in the *late* signal, which is what the
+        // board hands both sides.
+        let onsets = detect_onsets(&late, SR).unwrap();
+        assert_eq!(onsets.len(), 1, "{onsets:?}");
+        let d = attack_tonality_delta(&early, &late, SR, &onsets);
+        assert_eq!(d.onsets, 1);
+        assert!(
+            d.mean_abs_db < 1.0,
+            "two identical attacks 25 ms apart read {:.2} dB apart",
+            d.mean_abs_db
+        );
+        // And the search is what does it: measured at the onset itself, the
+        // early signal is read 25 ms into its own decay and comes back far more
+        // tonal, because the noise it began with is over.
+        let len = (ATTACK_WINDOW_S * SR) as usize;
+        let at = (onsets[0] * SR) as usize;
+        let naive = attack_tonality_db(&early[at..at + len], SR)
+            - attack_tonality_db(&late[at..at + len], SR);
+        assert!(
+            naive > 3.0,
+            "the mis-placed window was supposed to be the defect, and it reads {naive:.2} dB"
+        );
+    }
+
     #[test]
     fn the_attack_delta_reads_how_tonal_the_attack_is() {
         let n = (0.5 * SR) as usize;
@@ -2458,6 +2738,78 @@ mod tests {
         assert_eq!(layers.alternate(0), 0);
         // The top layer has to borrow from below.
         assert!(layers.alternate(125) < 121);
+    }
+
+    // ---- the evaluation policy -------------------------------------------
+
+    /// The Salamander mapping: one take every minor third, A0 to C8.
+    fn minor_thirds() -> RecordedKeys {
+        RecordedKeys::from_keys(&(21u8..=108).step_by(3).collect::<Vec<u8>>())
+    }
+
+    #[test]
+    fn a_key_is_either_a_recording_or_the_nearest_one_transposed() {
+        let keys = minor_thirds();
+        assert_eq!(keys.keys().len(), 30);
+        for key in 21u8..=108 {
+            let take = keys.take_for(key).expect("every key is reachable");
+            assert!(keys.is_recorded(take), "{take} is not a take");
+            assert!(
+                key.abs_diff(take) <= 1,
+                "key {key} plays {take}, {} semitones away",
+                key.abs_diff(take)
+            );
+            assert_eq!(keys.is_recorded(key), take == key);
+        }
+        // Named the way a report names it.
+        assert_eq!(keys.provenance(60), "recorded");
+        assert_eq!(keys.provenance(62), "transposed from D#4 (-1)");
+        assert_eq!(keys.provenance(64), "transposed from D#4 (+1)");
+    }
+
+    #[test]
+    fn the_second_route_onto_a_transposed_key_is_the_other_neighbour() {
+        let keys = minor_thirds();
+        // D4 is D#4 down a semitone, or C4 up two.
+        assert_eq!(keys.take_for(62), Some(63));
+        assert_eq!(keys.alternate_take(62), Some(60));
+        // E4 is D#4 up, or F#4 down two.
+        assert_eq!(keys.take_for(64), Some(63));
+        assert_eq!(keys.alternate_take(64), Some(66));
+        // A recorded key needs no route and is offered none.
+        assert_eq!(keys.alternate_take(60), None);
+        // The routing map: recorded keys keep themselves, everything else swaps.
+        let route = keys.routing();
+        for key in 21u8..=108 {
+            let to = route(key).expect("every key routes somewhere");
+            assert!(keys.is_recorded(to));
+            if keys.is_recorded(key) {
+                assert_eq!(to, key, "{key} is a take and must stay on it");
+            } else {
+                assert_ne!(
+                    to,
+                    keys.take_for(key).unwrap(),
+                    "{key} was not rerouted at all"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_register_a_bar_is_measured_in_is_the_recorded_keys_of_that_register() {
+        let keys = minor_thirds();
+        assert_eq!(keys.in_range(51, 76), vec![51, 54, 57, 60, 63, 66, 69, 72, 75]);
+        assert!(keys.in_range(61, 62).is_empty());
+    }
+
+    #[test]
+    fn a_library_of_one_key_cannot_be_scored_against() {
+        let one = RecordedKeys::from_keys(&[60]);
+        assert!(one.is_recorded(60));
+        assert_eq!(one.take_for(21), Some(60));
+        assert_eq!(one.alternate_take(21), None);
+        // With nothing else in reach, the routing leaves the key where it was.
+        assert_eq!(one.routing()(21), Some(60));
     }
 
     #[test]
