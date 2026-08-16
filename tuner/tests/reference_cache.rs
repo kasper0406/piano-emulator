@@ -2,7 +2,7 @@
 //! answer as a miss. These are the tests that say so.
 //!
 //! Two things are cached (`piano_tuner::cache`, `DECISIONS.md` 284): the
-//! *reference* renders `examples/realism_bench.rs` and `examples/compass_scan.rs`
+//! *reference* renders the `bench` and `compass` subcommands
 //! score the engine against, as 32-bit float WAV; and the self-calibration
 //! gate's corpus of tracked notes, as the compact encoding
 //! `NoteTrajectories` implements. Both claim to be **bit-identical** across the
@@ -24,7 +24,7 @@ fn repo() -> PathBuf {
 /// The Salamander library, if this working tree has it. It is 707 MiB and
 /// gitignored, so a checkout that has not run `data/fetch_salamander.sh` skips
 /// the render half of this file rather than failing it — exactly as the
-/// examples that need it do.
+/// subcommands that need it do.
 fn sfz() -> Option<PathBuf> {
     let path = repo()
         .join("data/salamander")
@@ -104,7 +104,7 @@ fn a_cached_reference_render_is_the_render_it_replaced() {
 /// This is the regression for `DECISIONS.md` 284's determinism finding: the
 /// order sounding keys were released in used to be a `HashMap`'s, so a pedal-up
 /// summed a chord's release voices in an order that was reseeded per process and
-/// two runs of `realism_bench` wrote reference audio an ulp apart. Nothing in
+/// two runs of `bench` wrote reference audio an ulp apart. Nothing in
 /// `REALISM.md` moved, which is exactly why it went unnoticed.
 #[test]
 fn the_pedal_releases_a_chord_in_the_same_order_every_time() {

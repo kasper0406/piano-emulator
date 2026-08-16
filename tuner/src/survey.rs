@@ -46,7 +46,7 @@ use crate::estimate::hammer::{
 };
 use crate::estimate::inharmonic::InharmonicConfig;
 use crate::estimate::noise::{EventMetrics, MechanismMeasurements};
-use crate::estimate::spread::{note_spread_over, NoteSpread, SigmaSpread, SpreadConfig};
+use crate::estimate::spread::{note_spread_over, NoteSpread, SpreadConfig};
 use crate::estimate::strike::StrikeFit;
 use crate::library::{MechanismKind, Sample, SampleLibrary};
 use crate::numeric::weighted_least_squares;
@@ -439,7 +439,7 @@ impl NoteSurvey {
             // note's trajectories do not carry — the comb floor needs the
             // deepest partial of the whole layer set, the damper needs the
             // release recordings — and are written through
-            // `PresetBuilder::note` by `examples/fit_partials`.
+            // `PresetBuilder::note` by `piano-tuner fit --stage partials`.
             comb_floor: None,
             damper_sigma: None,
             sigma0: curve.map(|c| c.sigma0),
@@ -584,12 +584,6 @@ impl Survey {
             .collect();
         spreads.sort_by_key(|note| note.key);
         spreads
-    }
-
-    /// The instrument's per-string decay spread: [`Survey::spreads`] pooled by
-    /// group size.
-    pub fn sigma_spread(&self, base: &Preset, config: &SpreadConfig) -> SigmaSpread {
-        SigmaSpread::pooled(&self.spreads(base, config), config)
     }
 
     /// Fits the felt and the layer speeds for one note.

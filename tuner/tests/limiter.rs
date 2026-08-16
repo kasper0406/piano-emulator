@@ -20,16 +20,16 @@
 //!
 //! Neither gate needs the Salamander corpus. Both carry the number the corpus
 //! gave, which is what makes them honest rather than arbitrary, and
-//! `examples/limiter_probe.rs` is the harness that re-derives it.
+//! `forensics/src/bin/limiter_probe.rs` is the harness that re-derives it.
 
 use std::path::Path;
 
 use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::soundboard::LIMIT_THRESHOLD;
-use piano_emulator::types::{Event, PedalEvent, FIRST_UNDAMPED_KEY, HIGHEST_KEY, LOWEST_KEY};
+use piano_emulator::types::{Event, FIRST_UNDAMPED_KEY, HIGHEST_KEY, LOWEST_KEY};
 use piano_tuner::realism::{self, Phrase};
-use piano_tuner::sampler::{SamplerEvent, TimedEvent};
+use piano_tuner::sampler::{engine_events, SamplerEvent};
 
 /// The two shipped voicings. A budget that only holds on the preset it was
 /// measured on is not a budget.
@@ -44,28 +44,11 @@ fn db(x: f32) -> f64 {
     20.0 * f64::from(x).max(1e-30).log10()
 }
 
-fn to_engine_events(events: &[TimedEvent]) -> Vec<RenderEvent> {
-    events
-        .iter()
-        .map(|e| {
-            let event = match e.event {
-                SamplerEvent::NoteOn { key, vel } => Event::NoteOn { key, vel },
-                SamplerEvent::NoteOff { key, vel } => Event::NoteOff { key, vel },
-                SamplerEvent::KeyDown { key } => Event::KeyDown { key },
-                SamplerEvent::Sustain(v) => Event::Pedal(PedalEvent::Sustain(v)),
-                SamplerEvent::Sostenuto(v) => Event::Pedal(PedalEvent::Sostenuto(v)),
-                SamplerEvent::UnaCorda(v) => Event::Pedal(PedalEvent::UnaCorda(v)),
-                SamplerEvent::AllOff => Event::AllOff,
-            };
-            RenderEvent::new(e.time_s as f32, event)
-        })
-        .collect()
-}
 
 fn render(preset: &Preset, phrase: &Phrase) -> (Vec<f32>, Vec<f32>) {
     render_to_buffer(
         preset,
-        &to_engine_events(&phrase.events),
+        &engine_events::to_render_events(&phrase.events),
         phrase.duration_s as f32,
     )
 }
@@ -131,7 +114,7 @@ fn no_benchmark_phrase_reaches_the_master_safety_limiter() {
 /// samples the loudest is A7 at velocity 127 on both presets, **-9.86 dBFS on
 /// `presets/default.toml` and -11.39 on `presets/salamander-c5.toml`** in the
 /// channel it is panned into, 8.86 and 10.39 dB under the threshold. Over all
-/// 88 keys (`tuner/examples/output_gain.rs`, which is not on the every-fourth
+/// 88 keys (`forensics/src/bin/output_gain.rs`, which is not on the every-fourth
 /// grid) it is C8 at -9.42 and C5 at -7.58, 8.42 and 6.58 dB under.
 ///
 /// **`presets/salamander-c5.toml` used to be deliberately excluded, and both

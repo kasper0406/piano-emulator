@@ -159,7 +159,7 @@ fn struck_notes_sound_at_the_right_pitch() {
 }
 
 /// Level of one partial in one window, in dB: the Hann-windowed DFT at that
-/// frequency. This is `TUNING_REPORT.md` §5's per-partial reading — the metric
+/// frequency. This is `docs/history/TUNING_REPORT.md` §5's per-partial reading — the metric
 /// that measured 1.2–6.2 dB of left-minus-right drift between 0.3 s and 2 s on
 /// the recordings against 0.02–0.14 dB on the engine's renders.
 fn partial_level_db(signal: &[f32], f: f32, from_s: f32, to_s: f32) -> f32 {

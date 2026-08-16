@@ -12,7 +12,7 @@
 //! twice over, and the two convictions point opposite ways:
 //!
 //! * **Between the nulls the comb is too smooth.** The recording's per-partial
-//!   deviation from a smooth envelope is 5–10 dB (`TUNING_REPORT.md` §3) against
+//!   deviation from a smooth envelope is 5–10 dB (`docs/history/TUNING_REPORT.md` §3) against
 //!   the engine's 2–5, and the roughness is *not* shared between notes at the
 //!   same frequency, so it cannot be a bridge curve — it has to be per note, per
 //!   partial. That is [`partial_gains`].
@@ -96,7 +96,7 @@ pub const MAX_ROW_CELLS: usize = 48;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShapingConfig {
     /// Degree of the polynomial in `ln k` standing in for the smooth spectral
-    /// envelope — the same reference `TUNING_REPORT.md` §3 measured its
+    /// envelope — the same reference `docs/history/TUNING_REPORT.md` §3 measured its
     /// roughness against and the same one `estimate::strike` fits under its
     /// comb.
     pub envelope_degree: usize,
@@ -124,7 +124,7 @@ pub struct ShapingConfig {
     pub floor_bisections: usize,
     /// Largest fit residual a partial's envelope may have and still contribute a
     /// decay correction, in dB. The two-exponential law describes a real
-    /// partial to about 4 dB whatever produced it (`TUNING_REPORT.md` §2); a
+    /// partial to about 4 dB whatever produced it (`docs/history/TUNING_REPORT.md` §2); a
     /// partial fitted worse than that has not measured its own rate.
     pub max_decay_residual_db: f64,
     /// Fewest partials a layer must have measured on **both** sides before it
@@ -163,7 +163,7 @@ pub struct ShapingConfig {
     pub min_rail_cells: usize,
     /// Partials the step statistic [`temper`] bisects against is taken over.
     ///
-    /// Twelve, which is `compass_scan`'s own `PARTIALS`: the acceptance
+    /// Twelve, which is `compass`'s own `PARTIALS`: the acceptance
     /// criterion for this regularisation is that report's `irregular` column, so
     /// the statistic fitted against is the statistic scored against. Taken over
     /// all 48 instead, a bass key's target is set by the scatter of its own
@@ -643,7 +643,7 @@ pub fn envelope_tilt(
 ///
 /// * **Re-entrant.** The probe the engine is rendered from must have the key's
 ///   own row *cleared*, and then the ratio is absolute: running the fit on its
-///   own output returns the same table. This is what `fit_partials`'s header
+///   own output returns the same table. This is what `fit --stage partials`'s header
 ///   warns is not true of the roughness fit, and it is true here by
 ///   construction rather than by discipline.
 /// * **Layer-robust.** Each layer is rendered at its own velocity, so the
@@ -1148,7 +1148,7 @@ fn whittaker(y: &[f64], precision: &[f64], gaps: &[f64], lambda: f64) -> Vec<f64
 /// * **The whole bank.** Padding the row out to the key's every partial with the
 ///   removed level makes the row exactly loudness-neutral with no step anywhere.
 ///   Measured, it costs more than the step does: the padding writes the level
-///   over partials nothing measured, and `compass_scan`'s `centroid` — a
+///   over partials nothing measured, and `compass`'s `centroid` — a
 ///   power-weighted mean partial index — reads it as a colour change. D#4 went
 ///   `centroid` z **+7.4 → +9.9** and A1, E3 and F#1 gained flags they did not
 ///   have, against a `match` improvement of 1-2 dB at the three keys with the
@@ -1443,7 +1443,7 @@ impl DecaySplit {
 /// the two-exponential fit's fast component.
 ///
 /// `DecayFit::fast.sigma` is the right quantity for the `sigma(f)` *line*
-/// (`survey::prompt_decay_curve` uses it, and `TUNING_REPORT.md` §1 says why:
+/// (`survey::prompt_decay_curve` uses it, and `docs/history/TUNING_REPORT.md` §1 says why:
 /// the last twenty decibels of a T60 are extrapolation and the prompt rate is
 /// what the ear calls the decay). It is the wrong quantity for a *per-partial*
 /// correction, and the gate says so by how much: on the engine's own renders of
@@ -1462,7 +1462,7 @@ impl DecaySplit {
 /// has not been *seen* decay (the same test that keeps it out of the `sigma(f)`
 /// line), one fitted from fewer than [`DecayConfig::min_points`] measurements
 /// has not been fitted, and one whose envelope residual is worse than the ~4 dB
-/// the law manages on any material (`TUNING_REPORT.md` §2) has not measured its
+/// the law manages on any material (`docs/history/TUNING_REPORT.md` §2) has not measured its
 /// own rate. A partial that fails them is 1.0.
 ///
 /// The row is then divided by its own geometric mean, for the reason
@@ -1560,7 +1560,7 @@ pub fn partial_sigma_scale(
 /// The deepest partial of one spectrum below a smooth envelope through it, in dB
 /// (negative), and which partial it was.
 ///
-/// The reference is the same degree-2 polynomial in `ln k` `TUNING_REPORT.md` §3
+/// The reference is the same degree-2 polynomial in `ln k` `docs/history/TUNING_REPORT.md` §3
 /// measured its roughness against — a stiffer reference than the octave spline
 /// `ANALYSIS.md` also reports, which is why the depths it returns are the larger
 /// of the two.
@@ -1576,7 +1576,7 @@ pub fn deepest_partial(spectrum: &[(u32, f64)], config: &ShapingConfig) -> Optio
     (worst.1 > 0).then_some(worst)
 }
 
-/// RMS of the same residuals — `TUNING_REPORT.md` §3's number, in dB.
+/// RMS of the same residuals — `docs/history/TUNING_REPORT.md` §3's number, in dB.
 pub fn roughness_rms_db(spectrum: &[(u32, f64)], config: &ShapingConfig) -> Option<f64> {
     let (residuals, _) = envelope_residuals(spectrum, config)?;
     let n = residuals.len() as f64;

@@ -1,7 +1,7 @@
 //! The sympathetic halo: how much of what a piano radiates is *not* the string
 //! that was struck, and the two preset fields that decide it.
 //!
-//! `TUNING_REPORT.md` §4 is the measurement this module exists to close. One
+//! `docs/history/TUNING_REPORT.md` §4 is the measurement this module exists to close. One
 //! second after a fortissimo C7 the energy *between* the struck note's partials
 //! is 3.5 dB below the energy *in* them; the engine's render of the same note
 //! was 48 dB below. At C6 the recordings give −22 to −26 dB against the
@@ -24,7 +24,7 @@
 //! the admittance, the duplex segments and the dampers at once. `TUNING.md`
 //! says as much — the coupling is stage 2, and stage 2 is render-and-measure.
 //!
-//! So this module holds the two halves that a driver (`tuner/examples/fit_sympathetic.rs`)
+//! So this module holds the two halves that a driver (`tuner/src/tools/sympathetic.rs`)
 //! puts in a loop: the *measurements*, which are §4's and §5's own and are
 //! computed here so that the engine's renders and the recordings go through
 //! identical code, and the *step*, which turns a set of errors in dB into the
@@ -251,7 +251,7 @@ pub fn peaks_from_body_modes(preset: &Preset) -> Vec<BridgePeak> {
 
 /// Settings for the between-partial census.
 ///
-/// The defaults are `TUNING_REPORT.md` §4's own, so a number measured here is
+/// The defaults are `docs/history/TUNING_REPORT.md` §4's own, so a number measured here is
 /// comparable with the table there rather than merely similar to it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HaloConfig {
@@ -292,7 +292,7 @@ pub struct BetweenPartials {
     pub partials: usize,
 }
 
-/// `TUNING_REPORT.md` §4's between-partial measurement, on any signal that
+/// `docs/history/TUNING_REPORT.md` §4's between-partial measurement, on any signal that
 /// contains one struck note.
 ///
 /// The partials are the ones the tracker *found*, not the ones a model
@@ -350,7 +350,7 @@ pub fn between_partials(
 }
 
 /// What a release-resonance recording is worth, relative to a strike of the
-/// same key: `TUNING_REPORT.md` §5's `harm*` rows.
+/// same key: `docs/history/TUNING_REPORT.md` §5's `harm*` rows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResonanceLevel {
     /// Peak of the resonance relative to the strike's peak, dB, both at the
@@ -393,7 +393,7 @@ pub fn resonance_level(
 /// the frequency it lives at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HaloTarget {
-    /// What it is called in `TUNING_REPORT.md`.
+    /// What it is called in `docs/history/TUNING_REPORT.md`.
     pub name: &'static str,
     /// The key the measurement is of, which is what puts it on the backbone.
     pub key: u8,
@@ -407,7 +407,7 @@ pub struct HaloTarget {
     pub tolerance_db: f64,
 }
 
-/// `TUNING_REPORT.md` §4 and §5's targets, as the fit reads them.
+/// `docs/history/TUNING_REPORT.md` §4 and §5's targets, as the fit reads them.
 ///
 /// The C4 row is not a target but a *constraint*: §4's first reading is that
 /// the mid-range was already right, so the fit must be able to fail on it.

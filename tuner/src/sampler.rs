@@ -83,8 +83,8 @@ use crate::library::{note_number, tokens, Token};
 
 /// What this player *is*, for the benefit of anything that caches its output.
 ///
-/// The reference renders `examples/compass_scan.rs` and
-/// `examples/realism_bench.rs` measure the engine against are a pure function of
+/// The reference renders the `compass` and `bench` subcommands measure the
+/// engine against are a pure function of
 /// three things: the SFZ (and the recordings it names), the events asked for,
 /// and this module. The first two are hashed by content into every cache key
 /// ([`crate::cache`]); this constant stands for the third, because no cheap
@@ -404,14 +404,6 @@ impl Instrument {
     /// silently does not do.
     pub fn ignored_opcodes(&self) -> &BTreeMap<String, usize> {
         &self.ignored
-    }
-
-    /// Every distinct sample file the instrument maps.
-    pub fn sample_paths(&self) -> Vec<&Path> {
-        let mut paths: Vec<&Path> = self.regions.iter().map(|r| r.sample.as_path()).collect();
-        paths.sort_unstable();
-        paths.dedup();
-        paths
     }
 }
 
@@ -765,21 +757,6 @@ impl Sampler {
         self.cache.insert(entry, Arc::clone(&buffer));
         Ok(buffer)
     }
-
-    /// Decodes every recording the instrument maps, untransposed. Optional:
-    /// it only moves the decoding cost off the first render.
-    pub fn preload(&mut self) -> Result<usize> {
-        let paths: Vec<PathBuf> = self
-            .instrument
-            .sample_paths()
-            .into_iter()
-            .map(Path::to_path_buf)
-            .collect();
-        for path in &paths {
-            self.buffer(path, 0)?;
-        }
-        Ok(paths.len())
-    }
 }
 
 /// Velocity a silent press is remembered at, so that the key-off group it
@@ -810,7 +787,7 @@ impl Render {
     /// point addition is not associative. `HashMap`'s iteration order is seeded
     /// randomly per process, so two runs of the same phrase produced reference
     /// audio differing by an ulp wherever the pedal lifted a chord: measured on
-    /// `realism_bench`'s six phrases, `chords_pedal` and `excerpt` (the two that
+    /// `bench`'s six phrases, `chords_pedal` and `excerpt` (the two that
     /// pedal) came back with 60-90 thousand samples one ulp apart between runs,
     /// and the other four bit-identical. No metric in `REALISM.md` moved by so
     /// much as a printed digit — but a reference that is not reproducible cannot
@@ -1030,6 +1007,30 @@ pub mod engine_events {
                     Event::AllOff => SamplerEvent::AllOff,
                 };
                 TimedEvent::new(f64::from(e.time_s), event)
+            })
+            .collect()
+    }
+
+    /// The same performance, spelled for the engine. The exact inverse of
+    /// [`from_render_events`], and the direction every comparison uses: a
+    /// phrase is written in the sampler's event type because that is the one
+    /// the tuner owns, and both sides then render the same list of gestures.
+    /// Nothing is dropped or reinterpreted, which is the property that makes
+    /// the two renders comparable at all.
+    pub fn to_render_events(events: &[TimedEvent]) -> Vec<RenderEvent> {
+        events
+            .iter()
+            .map(|e| {
+                let event = match e.event {
+                    SamplerEvent::NoteOn { key, vel } => Event::NoteOn { key, vel },
+                    SamplerEvent::NoteOff { key, vel } => Event::NoteOff { key, vel },
+                    SamplerEvent::KeyDown { key } => Event::KeyDown { key },
+                    SamplerEvent::Sustain(v) => Event::Pedal(PedalEvent::Sustain(v)),
+                    SamplerEvent::Sostenuto(v) => Event::Pedal(PedalEvent::Sostenuto(v)),
+                    SamplerEvent::UnaCorda(v) => Event::Pedal(PedalEvent::UnaCorda(v)),
+                    SamplerEvent::AllOff => Event::AllOff,
+                };
+                RenderEvent::new(e.time_s as f32, event)
             })
             .collect()
     }
@@ -1649,6 +1650,41 @@ mod tests {
         let held = rms(&out.channels[0], 1.2, 1.9);
         assert!(held > 0.15, "the pedal did not hold the note: {held}");
         assert!(rms(&out.channels[0], 3.0, 3.9) < 0.01 * held);
+    }
+
+    /// The other direction, which is the one every comparison uses: a phrase
+    /// is written in the sampler's own event type and both instruments render
+    /// it. The translation has to be total and lossless or the two renders are
+    /// not of the same performance — which is the whole premise of
+    /// `REALISM.md`, `COMPASS.md` and the melody gate.
+    #[test]
+    fn a_phrase_round_trips_through_the_engines_event_list_unchanged() {
+        use piano_emulator::{Event, PedalEvent, RenderEvent};
+
+        let phrase = vec![
+            TimedEvent::new(0.0, SamplerEvent::Sustain(0.5)),
+            TimedEvent::new(0.25, SamplerEvent::NoteOn { key: 60, vel: 90 }),
+            TimedEvent::new(0.5, SamplerEvent::KeyDown { key: 62 }),
+            TimedEvent::new(1.0, SamplerEvent::NoteOff { key: 60, vel: 40 }),
+            TimedEvent::new(1.5, SamplerEvent::Sostenuto(true)),
+            TimedEvent::new(1.625, SamplerEvent::UnaCorda(true)),
+            TimedEvent::new(2.5, SamplerEvent::AllOff),
+        ];
+        let engine = engine_events::to_render_events(&phrase);
+        assert_eq!(engine.len(), phrase.len());
+        assert_eq!(
+            engine[1],
+            RenderEvent::new(0.25, Event::NoteOn { key: 60, vel: 90 })
+        );
+        // A continuous pedal survives as a continuous pedal: half-pedalling is
+        // the one thing a boolean translation would quietly destroy.
+        assert_eq!(engine[0].event, Event::Pedal(PedalEvent::Sustain(0.5)));
+        assert_eq!(engine[6].event, Event::AllOff);
+        // And back again, unchanged. Narrowing the time to `f32` is the one
+        // lossy step in the round trip, so every time above is chosen to be
+        // exact in binary — the equality is then about the *events*, which is
+        // what has to be lossless.
+        assert_eq!(engine_events::from_render_events(&engine), phrase);
     }
 
     #[test]

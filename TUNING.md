@@ -1,5 +1,33 @@
 # TUNING.md — automated parameter estimation plan
 
+> **Status (refreshed 2026-08-16). Live document; Phases A–E are done and
+> stage 2 is most of the way built, which is more than the execution plan at the
+> bottom describes.**
+>
+> **Implemented.** Phase A (preset extraction, stretch tuning, MIDI replay),
+> Phase B (the `tuner/` crate, its STFT partial tracker and every estimator),
+> Phase C (the self-calibration gate, `tuner/tests/calibration.rs`), Phase D
+> (`presets/salamander-c5.toml`, estimated from 480 Salamander recordings) and
+> Phase E (the residual report, now `docs/history/TUNING_REPORT.md`). Stage 1 is
+> the `survey` subcommand. What this document calls "stage 2 (MAESTRO replay
+> fitting)" was **not** built the way it is described below: rather than fitting
+> interaction parameters against a Disklavier performance corpus, stage 2 is
+> render-and-measure against the *same* Salamander library — `sympathetic`
+> (duplex segments, halo coupling, bridge admittance, per-key stereo spread),
+> `fit` (false beat, strike direction, detune, partial gains, drawn texture) and
+> `tail` (the upper partials' decay). MAESTRO has never been downloaded. Four
+> standing boards were added that this plan does not mention: `bench`
+> (`REALISM.md`, the fitness function), `compass`, `melody` and `chain`.
+>
+> **Planned and not built.** CMA-ES or any other global optimiser over the
+> preset: every stage above is a direct inversion or a closed-loop bisection,
+> and nothing yet minimises `REALISM.md`'s loss as an objective. Stage 2 over
+> MAESTRO, and with it everything that needs a *performance* rather than an
+> isolated note or a rendered phrase. `DECISIONS.md` 317 ranks what is left.
+>
+> **Superseded.** The "Engine prerequisites" list below is history — all three
+> landed. Where this file and `DECISIONS.md` disagree, the log wins.
+
 Goal: replace hand-tuned per-note tables with parameters estimated from recordings of real pianos, so the instrument converges toward a specific, real piano rather than a plausible one. Two stages: (1) direct per-note estimation from isolated-note recordings, (2) interaction-parameter fitting by replaying ground-truth performances and comparing against the recording. Stage 1 does most of the work because the modal model's parameters map almost one-to-one onto measurable quantities.
 
 ## Data sources

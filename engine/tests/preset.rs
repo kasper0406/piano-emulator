@@ -81,7 +81,7 @@ fn the_checked_in_default_is_character_for_character_what_the_engine_writes() {
 ///
 /// It moved to `61e29d4abaa316f9` when the unison stopped being `2N`
 /// free-running oscillators and became the `2N` coupled eigenmodes of one
-/// bridge (`FUNDAMENTALS.md` §5, `DECISIONS.md` 223-230). That is not a field
+/// bridge (`docs/history/FUNDAMENTALS.md` §5, `DECISIONS.md` 223-230). That is not a field
 /// with a neutral value; it is a different construction of the same instrument
 /// from the same numbers, and it *cannot* be bit-exact — the poles are the
 /// eigenvalues of a matrix where they used to be the diagonal of it. What was
@@ -151,6 +151,82 @@ fn the_sounding_path_is_what_it_was_before_the_mechanism() {
         "b77c69714fdb6f21",
         "the sounding path has moved since the master-gain calibration"
     );
+}
+
+/// The three inert fields are inert on the *render*, not merely on inspection.
+///
+/// `DECISIONS.md` 225 declared `voicing.unison_coupling`,
+/// `voicing.horizontal_offset_hz` and `voicing.unison_sigma_scale` parsed,
+/// validated and never read once the unison became a coupled eigenproblem, and
+/// nothing tested it — the claim was made by reading the construction. Both
+/// shipped presets have since had them stripped, which is only safe if the
+/// claim is true, so it is checked here the only way that settles it: put the
+/// values the two files used to carry back into the loaded preset and render.
+/// A single sample of difference is a field that is read after all, and the
+/// stripping of the files would have been a voicing change made silently.
+///
+/// The restored values are the historical ones: `presets/default.toml` carried
+/// `horizontal_offset_hz = [0.35, 0.52, 0.27]` and `unison_coupling = 0.02`,
+/// and `presets/salamander-c5.toml` carried those plus a fitted three-string
+/// `unison_sigma_scale` row of `[0.87782794, 1.0, 1.1221721]`
+/// (`DECISIONS.md` 105 fitted it, `docs/history/FUNDAMENTALS.md` §5 superseded it).
+#[test]
+fn the_inert_fields_do_not_reach_the_render_of_either_shipped_preset() {
+    let probe: Vec<RenderEvent> = [21u8, 45, 60, 64, 67, 84, 96]
+        .into_iter()
+        .enumerate()
+        .map(|(i, key)| {
+            RenderEvent::new(
+                0.3 * i as f32,
+                Event::NoteOn {
+                    key,
+                    vel: 48 + 10 * i as u8,
+                },
+            )
+        })
+        .collect();
+
+    for name in ["default.toml", "salamander-c5.toml"] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../presets")
+            .join(name);
+        let shipped = Preset::load(&path).unwrap_or_else(|e| panic!("{name} loads: {e}"));
+        assert!(
+            shipped.inert_fields().is_empty(),
+            "{name} still carries inert fields: {:?}",
+            shipped.inert_fields()
+        );
+
+        let mut legacy = shipped.clone();
+        legacy.voicing.horizontal_offset_hz = vec![0.35, 0.52, 0.27];
+        legacy.voicing.unison_coupling = 0.02;
+        legacy.voicing.unison_sigma_scale[2].scale = vec![0.87782794, 1.0, 1.1221721];
+        legacy
+            .validate()
+            .expect("the schema still accepts what the files used to carry");
+        assert_eq!(
+            legacy.inert_fields(),
+            [
+                "voicing.unison_coupling",
+                "voicing.horizontal_offset_hz",
+                "voicing.unison_sigma_scale"
+            ],
+            "{name}: the load-time warning does not name all three"
+        );
+
+        let (shipped_l, shipped_r) = render_to_buffer(&shipped, &probe, 5.0);
+        let (legacy_l, legacy_r) = render_to_buffer(&legacy, &probe, 5.0);
+        assert!(
+            shipped_l.iter().any(|v| v.abs() > 0.02),
+            "{name}: the probe made no sound"
+        );
+        assert_eq!(
+            fingerprint(&shipped_l, &shipped_r),
+            fingerprint(&legacy_l, &legacy_r),
+            "{name}: restoring the inert fields moved the render by {:e} RMS",
+            rms_difference(&shipped_l, &legacy_l)
+        );
+    }
 }
 
 /// FNV-1a over the samples' bits, left channel then right. Any difference at

@@ -73,7 +73,7 @@ pub enum MechanismKind {
     /// undamped duplex, recorded on their own — but it arrives the same way a
     /// mechanism recording does (a release region that is not a struck note),
     /// so it is indexed with them rather than being dropped on the floor. It
-    /// is what `TUNING_REPORT.md` §5's `harmLC3` = −31 dB and `harmLC5` =
+    /// is what `docs/history/TUNING_REPORT.md` §5's `harmLC3` = −31 dB and `harmLC5` =
     /// −39 dB were measured from, and what `estimate::duplex` and
     /// `estimate::halo` read.
     StringResonance,

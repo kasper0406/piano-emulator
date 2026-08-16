@@ -69,7 +69,7 @@ use crate::audio::Audio;
 use crate::estimate::brilliance::{band, FULL, HF1};
 use crate::realism::{self, Phrase};
 use crate::sampler::{SamplerEvent, TimedEvent};
-use crate::series::{Series, PARTIALS};
+use crate::series::Series;
 use crate::stft::{Stft, StftConfig};
 
 /// The window one note is measured over, seconds from its own onset.
@@ -235,7 +235,7 @@ impl NoteTexture {
 /// Measures every measurable note of the line off one rendered signal.
 ///
 /// `partial_hz` gives each note's partial frequencies — the same table for both
-/// signals, taken from the preset, exactly as `compass_scan` does it: the
+/// signals, taken from the preset, exactly as `compass` does it: the
 /// recording is measured at the frequencies the model says the note has, so a
 /// difference between the two columns is never a difference in where they
 /// looked.
@@ -650,20 +650,6 @@ fn median(v: &mut Vec<f64>) -> f64 {
     } else {
         0.5 * (v[n / 2 - 1] + v[n / 2])
     }
-}
-
-/// The partial frequencies one note is measured at, from a preset's own tables.
-///
-/// A free function taking the frequencies rather than the preset, so that the
-/// library keeps compiling without the engine on the link line
-/// (`Cargo.toml`'s note on `engine-events`).
-pub fn partials_of(f0_hz: f64, inharmonicity_b: f64) -> Vec<f64> {
-    (1..=PARTIALS)
-        .map(|k| {
-            let k = k as f64;
-            f0_hz * k * (1.0 + inharmonicity_b * k * k).sqrt()
-        })
-        .collect()
 }
 
 #[cfg(test)]

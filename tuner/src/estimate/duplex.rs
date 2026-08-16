@@ -42,7 +42,7 @@
 //! it as the segment's response at its own frequency *per unit of the bridge
 //! force driving it*, and a recording does not carry the bridge force. What it
 //! carries is a level relative to a strike of the same key, which is the same
-//! quantity the whole `harm*` table in `TUNING_REPORT.md` §5 is quoted in. The
+//! quantity the whole `harm*` table in `docs/history/TUNING_REPORT.md` §5 is quoted in. The
 //! path from a segment's `gain_db` to that ratio is linear — one gain in a
 //! chain of gains — so it is one constant, [`DUPLEX_LEVEL_OFFSET_DB`], measured
 //! on the engine and pinned by `tuner/tests/calibration.rs` rather than
@@ -131,7 +131,7 @@ pub struct DuplexConfig {
     /// the resonance bus already models, and the short undamped lengths beyond
     /// the bridge and the agraffe, which are what `notes.duplex` is. Öberg &
     /// Askenfelt's survey and `PHYSICS.md` §3 both put the second at
-    /// 1.5–8 kHz, and `TUNING_REPORT.md` §5's own centroids for `harmLC3` and
+    /// 1.5–8 kHz, and `docs/history/TUNING_REPORT.md` §5's own centroids for `harmLC3` and
     /// `harmLC5` (314 and 507 Hz) say the first dominates below ~1 kHz. A
     /// candidate below the floor is therefore the halo, not a segment, and
     /// writing it as one would model the same energy twice.
@@ -327,7 +327,7 @@ pub fn residual_modes_above(
 ///
 /// `reference` is the peak amplitude of a velocity-90 strike of the same key
 /// **on the same scale as `signal` was analysed on** — the level every `harm*`
-/// figure in `TUNING_REPORT.md` §5 is quoted against. A row is capped at
+/// figure in `docs/history/TUNING_REPORT.md` §5 is quoted against. A row is capped at
 /// `max_modes`, cut at `range_db` below its own strongest member, and every
 /// number is clamped into the schema's range rather than being allowed to make
 /// a preset the engine will refuse.
@@ -487,7 +487,7 @@ impl Chain {
 /// way as the segment it is compared with — an STFT peak against an STFT peak —
 /// because the alternative, a time-domain peak, is the sum of forty partials
 /// arriving in phase and its ratio to one sinusoid is a property of the note's
-/// spectrum rather than a unit conversion. `TUNING_REPORT.md` §5 quotes its
+/// spectrum rather than a unit conversion. `docs/history/TUNING_REPORT.md` §5 quotes its
 /// `harm*` levels against a time-domain peak; the difference between the two
 /// conventions is a constant of the note, and is why
 /// [`DUPLEX_LEVEL_OFFSET_DB`] is measured on the engine through this same

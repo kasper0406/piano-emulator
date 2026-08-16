@@ -1,7 +1,18 @@
 //! Per-string decay spread, from the drift of a beating composite partial.
 //!
+//! **Measured and printed, never written.** This module fitted
+//! `voicing.unison_sigma_scale`, which has been inert since the unison became a
+//! coupled eigenproblem (`DECISIONS.md` 225): the split it inverts is an
+//! *output* of that construction, which pushes a group's decay rates apart by a
+//! factor of 4.6 at C4's fundamental without being asked, so writing it in as
+//! well would count the same physics twice. `survey` stopped writing it in item
+//! 324 and still prints it, because what it measures is the recordings' own
+//! drift and that is a fact about the piano either way — and it is what
+//! `tuner/tests/calibration.rs` closes the construction against. Read the rest
+//! of this header as the derivation of a measurement, not of a preset field.
+//!
 //! The engine gives every string of a unison the same damping law. A real group
-//! does not, and `TUNING_REPORT.md` §6 found the signature: the *measured*
+//! does not, and `docs/history/TUNING_REPORT.md` §6 found the signature: the *measured*
 //! fundamental of some tenor notes moves as it decays — by up to 32 cents over
 //! its first 20 dB at F#3, against −2.0 to +0.7 cents on the engine's own
 //! renders, which structurally cannot do it. A single string cannot move its

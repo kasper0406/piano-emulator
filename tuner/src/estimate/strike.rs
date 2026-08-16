@@ -170,12 +170,6 @@ impl StrikeFit {
         poly_eval(&self.envelope, kf.ln()).exp() * self.comb_at(k)
     }
 
-    /// The smooth part alone: the excitation spectrum with the strike comb
-    /// divided out, which is what the hammer estimator wants to see.
-    pub fn envelope_at(&self, k: u32) -> f64 {
-        poly_eval(&self.envelope, f64::from(k).ln()).exp()
-    }
-
     /// The fitted comb at partial `k`, contact taper included: the factor the
     /// hammer estimator divides out of a measured amplitude to see the hammer's
     /// own force spectrum. The taper belongs on this side of the division — it

@@ -64,12 +64,6 @@ impl StftConfig {
         Ok(())
     }
 
-    /// Spacing of the transform's bins. Not the resolution — a Hann main lobe
-    /// is four bins wide before padding — but the grid the peak fit works on.
-    pub fn bin_spacing_hz(&self, sample_rate: f64) -> f64 {
-        sample_rate / self.fft_size as f64
-    }
-
     pub fn window_s(&self, sample_rate: f64) -> f64 {
         self.window as f64 / sample_rate
     }

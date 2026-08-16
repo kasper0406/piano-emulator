@@ -1,4 +1,12 @@
 target
 renders/
-data/
 .DS_Store
+
+# The datasets and the caches, which are large, derived and downloadable — but
+# not the fetch script that downloads them. `data/fetch_salamander.sh` is the
+# first line of `README.md`'s reproduction recipe and carries the URL, the size
+# and the sha256 of the 707 MiB archive: ignoring it made the recipe
+# unrunnable from a fresh checkout, which is the one thing an open-source
+# measurement pipeline has to be (`DECISIONS.md` 65, 324).
+/data/*
+!/data/fetch_salamander.sh

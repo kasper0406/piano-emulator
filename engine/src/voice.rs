@@ -334,7 +334,7 @@ impl Voice {
         // Both halves of the strike vector's direction, in one pass over the
         // key's modes: which strings the hammer reaches, and how hard it is
         // travelling. The second is the only way velocity enters the linear
-        // string model at all (`FUNDAMENTALS.md` §7.5 step 3), and a preset
+        // string model at all (`docs/history/FUNDAMENTALS.md` §7.5 step 3), and a preset
         // without a `[voicing.strike_direction]` ignores it.
         self.string.set_strike(pedals.una_corda(), vel);
         self.hammer.strike_midi(vel);
@@ -973,7 +973,7 @@ mod tests {
     /// without one is the compass the scalar describes. The measurement behind
     /// it: at the global ceiling the engine's drift is 0.24 dB at A0 and
     /// 8.67 dB at C5 against the recordings' 1.24 and 5.33
-    /// (`TUNING_REPORT.md` §5), so one number cannot fit both ends.
+    /// (`docs/history/TUNING_REPORT.md` §5), so one number cannot fit both ends.
     #[test]
     fn a_per_key_spread_overrides_the_global_one_key_by_key() {
         let mut preset = Preset::default();
@@ -1206,7 +1206,7 @@ mod tests {
         assert!(!v.duplex.is_idle(), "the segments were damped with the string");
         assert!(!v.is_idle(), "a voice with ringing segments called itself idle");
 
-        // The level, stated rather than merely ordered. `TUNING_REPORT.md` §5
+        // The level, stated rather than merely ordered. `docs/history/TUNING_REPORT.md` §5
         // measures the release resonances at -31 dB (C3) and -39 dB (C5)
         // relative to a strike of the same key, ringing 1-2 s. An aliquot at
         // the top of the schema's range measures -61 dB here, which is an RMS
@@ -1395,7 +1395,7 @@ mod tests {
     /// the difference between the two outputs *is* the burst. Its peak against
     /// the strike's own peak is the number the file states, which is the same
     /// convention the other four events are quoted in
-    /// (`TUNING_REPORT.md` §5, `calibrate.rs`).
+    /// (`docs/history/TUNING_REPORT.md` §5, `calibrate.rs`).
     #[test]
     fn a_note_on_sounds_the_hammers_noise_at_the_level_the_preset_asks_for() {
         const WANT_DB: f32 = -20.0;

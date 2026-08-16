@@ -23,7 +23,7 @@
 //! ```
 //!
 //! `C_k` is block diagonal — the off-diagonal of the 2x2 bridge admittance is
-//! second order, `FUNDAMENTALS.md` §2.5 — and each block is `c_p` times an
+//! second order, `docs/history/FUNDAMENTALS.md` §2.5 — and each block is `c_p` times an
 //! all-ones matrix, i.e. **rank one**. So the `2N x 2N` eigenproblem is two
 //! rank-one updates of a diagonal, its characteristic equation factorises into
 //! two degree-`N` complex polynomials ([`block_solve`]), and `D - cJ` is complex
@@ -50,7 +50,7 @@
 //!   coupled group radiates nothing and decays at `(1 - share) sigma_k`, the
 //!   loudest decays at `sigma_k`, so `1 - share` **is** the fitted
 //!   aftersound/prompt decay ratio, and `voicing.horizontal_decay_ratio` is the
-//!   field that was fitted to recordings. This resolves `FUNDAMENTALS.md`
+//!   field that was fitted to recordings. This resolves `docs/history/FUNDAMENTALS.md`
 //!   §2.6's contradiction with `voicing.bridge.radiated_share = 0.5` in favour
 //!   of the measurement, and on Woodhouse's side of it.
 //! * [`decay_scale`] solves, per partial, for the one factor on the loss budget
@@ -62,7 +62,7 @@
 //! # The two things the recording asks for that the eigenmodes alone cannot do
 //!
 //! The construction above is the physically right one and it does not reproduce
-//! the recording (`FUNDAMENTALS.md` §7.1). Two mechanisms sit on top of it, both
+//! the recording (`docs/history/FUNDAMENTALS.md` §7.1). Two mechanisms sit on top of it, both
 //! from §7.5's build order, and neither is a new solver:
 //!
 //! * **The within-string split** ([`FalseBeat`], `notes.false_beat`). Each
@@ -131,7 +131,7 @@ pub const MAX_SIGMA_SCALE: f32 = 2.0;
 /// the **full** ratio of the recording's partial to the engine's own prediction
 /// of it, not the roughness left over after a smooth envelope has been divided
 /// out. That is what widened the range. The roughness alone justified ±20 dB:
-/// `TUNING_REPORT.md` §3 puts the recordings' scatter around the fitted comb at
+/// `docs/history/TUNING_REPORT.md` §3 puts the recordings' scatter around the fitted comb at
 /// 5–10 dB RMS with worst partials 12–29 dB out, and
 /// `renders/timbre-ladder/ANALYSIS.md` §4a puts the deepest partial anywhere at
 /// 9.3–17.7 dB below a smooth envelope. The envelope error rides on top of that
@@ -202,7 +202,7 @@ pub struct StringParams {
     /// back 25–37 % *smaller* on the upper band (A0 0.75, C1 0.66, D#1 0.63)
     /// and 24–45 % *larger* on the short wound tenor strings (F#1 1.24, A1
     /// 1.40, C2 1.45) — up to 78 cents of misplaced partial against a single
-    /// coefficient (`TUNING_REPORT.md` §1). The sign flips across that break,
+    /// coefficient (`docs/history/TUNING_REPORT.md` §1). The sign flips across that break,
     /// so the correction has to be signed. Zero everywhere reduces the law to
     /// the two-parameter one exactly.
     pub inharmonicity_b4: f32,
@@ -300,7 +300,7 @@ impl StringParams {
 ///
 /// All three are *measurements* the smooth per-note laws cannot carry, and all
 /// three are deliberately velocity-independent: the excitation spectrum of a
-/// note is not shared with the note beside it (`TUNING_REPORT.md` §3 refutes a
+/// note is not shared with the note beside it (`docs/history/TUNING_REPORT.md` §3 refutes a
 /// global admittance curve by measurement), neither is the way its individual
 /// partials depart from the fitted decay law, and a wire's own geometry does not
 /// know how hard it is being struck. Velocity enters this model in exactly one
@@ -387,7 +387,7 @@ fn comb_magnitude(k: usize, strike_position: f32, floor: f32) -> f32 {
 /// statistic at each: the verdict is a claim about all four
 /// (`renders/jitter/EIGENMODE.md`, "Sensitivity to Im Y / Re Y").
 ///
-/// Deliberately a constant and not a preset field. `FUNDAMENTALS.md` §7.6
+/// Deliberately a constant and not a preset field. `docs/history/FUNDAMENTALS.md` §7.6
 /// suggested one; three fields are going inert in the same change, and nothing
 /// in the tuner can yet fit this one — there is no measurement that separates it
 /// from [`REACTIVE_ANISOTROPY`] until the strike vector gets a velocity
@@ -409,7 +409,7 @@ const REACTIVE_ANISOTROPY: f64 = 0.075;
 /// The bridge's resistive anisotropy `Re Y_h / Re Y_v`, from
 /// `voicing.horizontal_decay_ratio`.
 ///
-/// `FUNDAMENTALS.md` §5.4 says to re-read the field as this ratio directly —
+/// `docs/history/FUNDAMENTALS.md` §5.4 says to re-read the field as this ratio directly —
 /// "same number, now a property of the bridge instead of a decay law" — and that
 /// is a decibel too far, because the horizontal plane **still radiates**. Take
 /// one string, whose two polarizations are the whole of the eigenproblem:
@@ -449,7 +449,7 @@ fn resistive_anisotropy(voicing: &Voicing) -> f64 {
 /// The slowest mode of the coupled group radiates nothing and decays at
 /// `(1 - share) sigma_k`, the loudest decays at `sigma_k`, so `1 - share` *is*
 /// the fitted aftersound/prompt decay ratio — which is exactly what
-/// `voicing.horizontal_decay_ratio` was fitted to be. `FUNDAMENTALS.md` §2.6's
+/// `voicing.horizontal_decay_ratio` was fitted to be. `docs/history/FUNDAMENTALS.md` §2.6's
 /// contradiction with `voicing.bridge.radiated_share = 0.5` is resolved here, in
 /// favour of the field that was fitted to recordings; the shipped 0.5 would cap
 /// the aftersound at half the prompt rate and delete the double decay.
@@ -711,7 +711,7 @@ struct BlockMode {
 /// its left eigenvectors are its right ones transposed (not conjugated), so the
 /// row of `V^-1` the strike projection needs is `v_m / (v_m . v_m)`; using
 /// `v_m^H` would be the wrong basis for a non-normal matrix
-/// (`FUNDAMENTALS.md` §5.1).
+/// (`docs/history/FUNDAMENTALS.md` §5.1).
 fn block_solve(omegas: &[f64], sigma_int: f64, c: Cx, out: &mut [BlockMode]) -> usize {
     let n = omegas.len();
     debug_assert!(n <= MAX_UNISON);
@@ -1257,7 +1257,7 @@ fn decay_scale(
     // under item 221's click fix, and that is still enough to take two of
     // `tuner/tests/calibration.rs`'s round trips red — the estimators are
     // calibrated against this forward model, and re-deriving them is the
-    // milestone `FUNDAMENTALS.md` §7.7 describes and item 232 lists.
+    // milestone `docs/history/FUNDAMENTALS.md` §7.7 describes and item 232 lists.
     let (mut lo, mut hi) = (x - 0.9, x + 0.9);
     let mut steps = 11;
     if residual(lo) <= 0.0 || residual(hi) >= 0.0 {
@@ -1704,7 +1704,7 @@ impl PianoString {
     ///
     /// Velocity reaches a *linear* model in exactly one way — through the
     /// direction of the excitation vector, never through the poles
-    /// (`FUNDAMENTALS.md` §7.3, §7.5 step 3) — so this is the whole of the
+    /// (`docs/history/FUNDAMENTALS.md` §7.3, §7.5 step 3) — so this is the whole of the
     /// engine's velocity dependence inside a string, and it is a remix of modes
     /// that were solved once at preset load. Bounded, allocation-free work
     /// proportional to the key's mode count, on the same path
@@ -1807,7 +1807,7 @@ impl PianoString {
     ///
     /// It exists because the two blocks decay at very different rates, so
     /// giving them different stereo positions is what makes a note's image move
-    /// as it dies (`TUNING_REPORT.md` §5). Unlike the free-running construction
+    /// as it dies (`docs/history/TUNING_REPORT.md` §5). Unlike the free-running construction
     /// this is now exactly [`PianoString::process`] split in two — same
     /// excitation, same modes, same accumulation order — so the two paths agree
     /// to the bit.
@@ -2001,7 +2001,7 @@ mod tests {
         let base = preset().string_params(21); // A0, the note §1 measures worst
         // A wound bass string's series behaves as if `B` fell along it: fitted
         // to partials 14-26 it comes back 25-37 % below the fit to partials 1-8
-        // (`TUNING_REPORT.md` §1). `B + B4 k^2` is that falling coefficient.
+        // (`docs/history/TUNING_REPORT.md` §1). `B + B4 k^2` is that falling coefficient.
         // Only part of that shape fits under one k^4 term: A0 is built with the
         // full 80 partials, and a coefficient that takes more than ~7.5 % off
         // `B` by the twentieth partial has turned the top of that series over
@@ -2067,7 +2067,7 @@ mod tests {
     ///
     /// The free-running construction it replaces gave every string of a unison
     /// the same decay rate to the last bit, which is what made its beat run at
-    /// constant depth forever (`FUNDAMENTALS.md` §3.3). Weinreich's normal modes
+    /// constant depth forever (`docs/history/FUNDAMENTALS.md` §3.3). Weinreich's normal modes
     /// cannot: the symmetric mode drives the bridge hard, so it loses energy
     /// fastest *and* radiates most, and the antisymmetric ones are the
     /// aftersound.
@@ -2243,7 +2243,7 @@ mod tests {
     /// A within-string split beats on the partial it names, at the level it
     /// names, and nowhere else.
     ///
-    /// `FUNDAMENTALS.md` §7.4's finding, built: the recording's mid and low
+    /// `docs/history/FUNDAMENTALS.md` §7.4's finding, built: the recording's mid and low
     /// partials each carry a companion 4-7 dB down and 0.7-1.5 Hz away, at a
     /// spacing uncorrelated with the partial number, which is neither the unison
     /// (7-20x too narrow, and proportional to `k`) nor the bridge's polarization
@@ -2436,7 +2436,7 @@ mod tests {
 
     /// Velocity moves the *mixture* and not the modes.
     ///
-    /// `FUNDAMENTALS.md` §7.3's second refutation, answered. The eigenmodes are
+    /// `docs/history/FUNDAMENTALS.md` §7.3's second refutation, answered. The eigenmodes are
     /// velocity-invariant by eigenvalue and, with a velocity-independent strike
     /// vector, the mixture `V^-1 u` is velocity-invariant by linearity — which
     /// is why the engine's beat structure held to **0.006 cents and 0.054 dB**

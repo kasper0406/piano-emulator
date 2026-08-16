@@ -2,7 +2,7 @@
 //!
 //! A real piano answers a note-off and a pedal move with an audible thump. Ours
 //! did not: a release was a change of damping and nothing else, and a pedal
-//! press was silent. `TUNING_REPORT.md` §5 measured what is missing, on the
+//! press was silent. `docs/history/TUNING_REPORT.md` §5 measured what is missing, on the
 //! Salamander library's own mechanism recordings and at the level the SFZ plays
 //! them: a key-off at **−25 to −39 dB** relative to a velocity-90 strike of the
 //! same key, 165–285 ms long and centred at 143–261 Hz; a pedal-down at −36 dB
@@ -52,7 +52,7 @@ use crate::types::{db_to_amp, interp_anchors, key_position, SAMPLE_RATE};
 /// spectrum extends only to about 2 kHz (`PHYSICS.md` §5). Fixed rather than
 /// tabulated for the four events it describes — it is a property of the
 /// instrument's structure, not of the individual event, and every measured
-/// centroid in `TUNING_REPORT.md` §5 sits an octave or more below it.
+/// centroid in `docs/history/TUNING_REPORT.md` §5 sits an octave or more below it.
 ///
 /// The strike is not one of those four: a hammer meeting a string radiates
 /// directly rather than through the keybed, so `[noise.strike]` carries its own
@@ -70,13 +70,13 @@ const BAND_Q: f32 = 1.1;
 /// centroid well above `f`: the skirt above the peak covers far more hertz than
 /// the one below it. The factor is measured, not derived — see
 /// `noise::tests::the_burst_lands_near_the_centroid_the_preset_asks_for`, which
-/// checks the finished chain against the frequencies `TUNING_REPORT.md` §5
+/// checks the finished chain against the frequencies `docs/history/TUNING_REPORT.md` §5
 /// tabulates rather than against this constant.
 const CENTROID_WARP: f32 = 0.92;
 
 /// Envelope level at which a burst stops running, relative to its own start.
 ///
-/// `decay_s` is the time to −40 dB (which is how `TUNING_REPORT.md` §5 measured
+/// `decay_s` is the time to −40 dB (which is how `docs/history/TUNING_REPORT.md` §5 measured
 /// it), so this is another 50 dB below that: −90 dB of an event that is itself
 /// 25–42 dB below a strike is far under the master chain's noise floor.
 const BURST_FLOOR: f32 = 3.162e-5;
@@ -104,7 +104,7 @@ pub const NOMINAL_KEY_DRIVE: f32 = 64.0 / 127.0;
 pub const NOMINAL_PEDAL_DRIVE: f32 = 1.0;
 
 /// Drive at which the hammer's own noise plays at its tabulated level: MIDI
-/// velocity 90, the strike every mechanism level in `TUNING_REPORT.md` §5 — and
+/// velocity 90, the strike every mechanism level in `docs/history/TUNING_REPORT.md` §5 — and
 /// therefore every level in `[noise]` — is quoted against. So a `[noise.strike]`
 /// level of −20 dB means −20 dB under the note it is part of, at the velocity
 /// that note was measured at.
@@ -228,7 +228,7 @@ impl EventShape {
     /// Peak of a whole burst of this shape, triggered at amplitude 1.
     ///
     /// Setup-time only, and deterministic. The level a preset asks for is a
-    /// *peak* level — that is the column `TUNING_REPORT.md` §5 reports — and
+    /// *peak* level — that is the column `docs/history/TUNING_REPORT.md` §5 reports — and
     /// the peak of a filtered, enveloped noise burst is not something the
     /// coefficients give you in closed form. It matters that the envelope is in
     /// here and not just the filter: a band-pass at 120 Hz needs a couple of
@@ -320,7 +320,7 @@ impl EventModel {
     ///
     /// `strike_reference` is the board-input amplitude that renders at the same
     /// output peak as a velocity-90 strike of this key, which is the level
-    /// `TUNING_REPORT.md` §5's table calls 0 dB; `calibrate.rs` measures it per
+    /// `docs/history/TUNING_REPORT.md` §5's table calls 0 dB; `calibrate.rs` measures it per
     /// preset, per key and per event shape.
     pub fn new(
         spec: &EventNoise,
@@ -695,7 +695,7 @@ mod tests {
     }
 
     /// The spectral centroid the preset names is the one the burst plays at —
-    /// which is what makes `TUNING_REPORT.md` §5's 143–261 Hz column a
+    /// which is what makes `docs/history/TUNING_REPORT.md` §5's 143–261 Hz column a
     /// parameter rather than a decoration — and nothing survives above the
     /// action's own 2 kHz ceiling.
     #[test]
@@ -934,7 +934,7 @@ mod tests {
             "velocity span {span:.1} dB"
         );
         // ... and at the nominal drive the burst peaks at the tabulated level
-        // relative to a strike, which is the number `TUNING_REPORT.md` §5
+        // relative to a strike, which is the number `docs/history/TUNING_REPORT.md` §5
         // reports for C4: -35.4 dB. Averaged over seeds, because the peak of
         // one realization of a noise band scatters by a couple of dB and that
         // scatter is a feature: no two releases of a real key are identical.

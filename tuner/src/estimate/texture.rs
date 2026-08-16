@@ -30,7 +30,7 @@
 //!   read from another key's table. A row that came from the key three
 //!   semitones down would put the *same* comb on two keys, and the recording
 //!   says the roughness is not shared between notes at the same frequency
-//!   (`TUNING_REPORT.md` §3) — that measurement is what refused a global bridge
+//!   (`docs/history/TUNING_REPORT.md` §3) — that measurement is what refused a global bridge
 //!   curve, and it refuses interpolation here for the same reason.
 //! * **What is drawn is a statistic, conditioned on register and nothing
 //!   else.** Where a distribution turned out to have no register dependence
@@ -46,7 +46,7 @@
 //! `ln k`, which is the engine's own error in its smooth envelope
 //! (`DECISIONS.md` 231's 7.5 dB at C4, the octave-displaced attack), and a
 //! per-partial scatter about it. Only the roughness is drawn here. The tilt is
-//! a per-key **colour**, `compass_scan`'s `centroid` reads it directly, and
+//! a per-key **colour**, `compass`'s `centroid` reads it directly, and
 //! over the 28 fitted keys it is white across the compass: its value at `k = 1`
 //! has a lag-1 autocorrelation of **+0.45** between keys three semitones apart,
 //! at `k = 2` **+0.06** and at `k = 4` **−0.02**, and a degree-5 polynomial in
@@ -71,7 +71,7 @@
 //! `shaping::rail_cells` and the same implementation, [`own_rail`]), then
 //! pinned on **power** against the engine's own rendered spectrum
 //! ([`shaping::energy_offset`]), and then closed on the **render** by
-//! `fit_motion`'s own `close_on_the_render` — the same function, the same
+//! `fit`'s own `close_on_the_render` — the same function, the same
 //! roughness ceiling and the same level band the fitted keys pass through. A
 //! drawn row that renders rougher than the recordings of its register is
 //! trimmed exactly as a measured one is.
@@ -94,7 +94,7 @@
 //! So the drawn ask is now closed exactly as the drawn row is: against a
 //! **ceiling** ([`BeatCeiling`] — the recordings' own beat depth by register and
 //! partial, drawn per key with its own scatter), on the **render**, by
-//! `fit_motion`'s `close_splits_on_the_render`. A drawn split that renders
+//! `fit`'s `close_splits_on_the_render`. A drawn split that renders
 //! deeper than the piano's own partials of that register is bisected down until
 //! it does not; one that renders shallower is left alone, because the draw is a
 //! draw and not a target and forcing every drawn key up onto its ceiling would
@@ -1476,7 +1476,7 @@ mod tests {
     /// number that rises with the partial number the way the recordings' own
     /// depths do.
     ///
-    /// The parallel arrays are the contract `fit_motion`'s
+    /// The parallel arrays are the contract `fit`'s
     /// `close_splits_on_the_render` zips: a row without a ceiling would be
     /// closed against its neighbour's.
     #[test]

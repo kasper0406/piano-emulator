@@ -37,7 +37,7 @@ pub const FIRST_UNDAMPED_KEY: u8 = 91;
 /// together — arrives at the safety limiter's -1 dBFS threshold rather than past
 /// it. Everything else about the instrument's level is a *consequence* of that
 /// number and is reported rather than solved for. On `presets/default.toml`,
-/// through the finished chain (`tuner/examples/output_gain.rs`):
+/// through the finished chain (`forensics/src/bin/output_gain.rs`):
 ///
 /// | clause | mono sum | channel | limiter |
 /// |---|---|---|---|
@@ -104,7 +104,7 @@ const FLOOR_REFERENCE_GAIN: f32 = 9.0;
 /// (1.8e-11) survived because all of it was in one mode.
 ///
 /// **The -90 dBFS in the first line is nominal and the real number is measured**
-/// (`tuner/examples/top_octave.rs`): dividing by a master gain treats the chain
+/// (`forensics/src/bin/top_octave.rs`): dividing by a master gain treats the chain
 /// past the voice as unity, and the board and the microphone are not, so through
 /// the finished chain the floor lands at **-113.0 to -124.9 dBFS** over the 88
 /// keys — 23 dB under what is written above, and remarkably flat, which is the
@@ -162,7 +162,7 @@ pub const CULL_AMPLITUDE: f32 = 3.162e-5 / (FLOOR_REFERENCE_GAIN * 2.0 * MAX_UNI
 /// 0.400 against a 0.08 gate. That gate was passing by 0.001 because
 /// `estimate::directivity`'s line is itself stale — the engine's measured slope
 /// is 10.97 dB per unit spread against the constant's 8.3
-/// (`tuner/examples/drift_line.rs`) — and re-deriving it is that estimator's
+/// (`forensics/src/bin/drift_line.rs`) — and re-deriving it is that estimator's
 /// milestone, not this one's. Nothing is bought past `1.0e-7` and something is
 /// spent, so the floor stops there.
 ///

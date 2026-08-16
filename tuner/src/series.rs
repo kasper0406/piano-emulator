@@ -2,8 +2,8 @@
 //! level per partial, whether the partial is really there, and the three
 //! statistics the compass scores a key on.
 //!
-//! This lived inside `examples/compass_scan.rs` until `DECISIONS.md` 272, and
-//! moving it here is not tidying. The gains fit is now **bisected against
+//! This lived inside the compass driver (now `tools/compass.rs`) until
+//! `DECISIONS.md` 272, and moving it here is not tidying. The gains fit is now **bisected against
 //! `irregularity`** — the row is smoothed until the series the engine renders is
 //! no more jagged than the recording's — and the compass then scores the result
 //! on the same number. A fit whose objective is a re-implementation of its own

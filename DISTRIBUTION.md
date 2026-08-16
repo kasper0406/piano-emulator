@@ -1,6 +1,38 @@
 # DISTRIBUTION.md — from engine to plugin to product
 
-The engine is a self-contained Rust library with the properties a plugin host wants: `Engine::process(&mut l, &mut r)` accepts any request length and is bit-exact regardless of how the stream is cut up (decision 47), the audio path allocates nothing and locks nothing, events arrive through a pre-allocated SPSC queue, and every voicing number is data in a `Preset` (decision 50). Two things stand between that and a plugin: the sample rate is a compile-time constant (decision 17), and there is no host adapter. This document is the plan for both, and for selling the result.
+> **Status (refreshed 2026-08-16). Live as engineering, moot as commerce, and
+> nothing in it is built.**
+>
+> **Implemented: none of it.** M0 through M9 are all ahead. There is no `ffi`
+> crate, no boundary resampler, no AUv3, no standalone app and no signing
+> pipeline; the engine is still 48 kHz-only (`DECISIONS.md` 17) and the only way
+> to play it is `cargo run -p piano-emulator`. Everything below is a plan.
+>
+> **Moot: every commercial clause.** The project is **MIT-licensed and given
+> away free** (`LICENSE`, `README.md`'s licence section). There is no paid tier,
+> no licence key, no in-app purchase and no unlock state, which strikes out:
+> guideline 3.1.1/2.4.5(vi)'s licence-key and IAP rules and the App Group /
+> keychain "unlock state" they were to be shared through (§Distribution); the
+> 30 % / 15 % commission arithmetic and the Small Business Program (ibid.);
+> "IAP if paid" in **M7**; "UI worth charging for" in **M6**, which becomes UI
+> worth *having*; "a number in the marketing copy" and "the product's main
+> competitive exposure" under §Two risks; and "revisit only if a **paying** user
+> demonstrates…" under §What not to do yet, where the word to strike is *paying*.
+> They are left in the text rather than deleted because they remain an accurate
+> account of what the Mac App Store requires of anyone who does charge, and
+> because giving the instrument away is a decision that could be revisited.
+> The $99/yr Developer Program fee is **not** moot: notarization and the store
+> both need it whether or not anything is sold.
+>
+> **Unaffected and still the plan:** M0's sample-rate answer (boundary
+> resampling, option (b)), the format ordering (AUv3 first, CLAP/VST3 via
+> `clap-wrapper` last), the MIDI 2.0 verdict, the notarization mechanics, and
+> both risks under §Two risks read as engineering rather than as pricing. The
+> App Store is still worth targeting for a free plugin — it is where an AUv3
+> gets found — and 4.2.3(i)'s "must work on its own" requirement binds a free
+> app exactly as it binds a paid one.
+
+The engine is a self-contained Rust library with the properties a plugin host wants: `Engine::process(&mut l, &mut r)` accepts any request length and is bit-exact regardless of how the stream is cut up (decision 47), the audio path allocates nothing and locks nothing, events arrive through a pre-allocated SPSC queue, and every voicing number is data in a `Preset` (decision 50). Two things stand between that and a plugin: the sample rate is a compile-time constant (decision 17), and there is no host adapter. This document is the plan for both, and for shipping the result (it was written as a plan for *selling* it; see the status header).
 
 Scope and target: macOS on Apple silicon, Logic Pro first. That is not a limitation for long — macOS 27 is Apple-silicon-only and the last release with full Rosetta 2 ([TechRadar, WWDC 2026](https://www.techradar.com/computing/mac-os/macos-27-golden-gate-announced-at-wwdc-2026-heres-everything-you-need-to-know)), so an arm64-only product is where the market is going anyway.
 
@@ -106,8 +138,8 @@ Against that: essentially nothing sends it. Confirmed UMP sources are the Roland
 **Mac App Store.** AUv3 is the only legal plugin format there — guideline 2.4.5(ii) requires a single self-contained bundle with no installers and no writes to shared locations, which rules out `.component`, `.vst3` and `.clap`. Sandbox both the app and the appex, share unlock state and user presets through an App Group and a keychain access group. Three review realities worth planning around:
 
 - **4.2.3(i): "your app should work on its own without requiring installation of another app."** There is no plug-in carve-out, and container apps have been rejected under it repeatedly and released on appeal ([Loopy Pro forum thread with several developers' accounts](https://forum.loopypro.com/discussion/31760/audio-unit-container-app-usefulness)). Our standalone app must be a real instrument — plays from a MIDI keyboard, has an on-screen keyboard, presets, settings — and the metadata must never say "use this in your DAW."
-- **3.1.1 / 2.4.5(vi): no license keys, no launch-time license screen, no self-updater** in the MAS build. If the product is paid, it is paid through the store or unlocked by IAP; purchase UI must live in the container app, because guideline 4.4 forbids IAP inside an extension.
-- Commission is 30 %, or **15 % under the Small Business Program** if prior-year proceeds were ≤ $1M ([Apple](https://developer.apple.com/app-store/small-business-program/)). The $99/yr Developer Program covers both channels, and selling on the store *and* direct is allowed — the builds just differ.
+- ~~**3.1.1 / 2.4.5(vi): no license keys, no launch-time license screen, no self-updater** in the MAS build. If the product is paid, it is paid through the store or unlocked by IAP; purchase UI must live in the container app, because guideline 4.4 forbids IAP inside an extension.~~ **Moot** — nothing is sold (see the status header). The prohibitions themselves cost us nothing to satisfy: there is no key, no licence screen and no self-updater to remove.
+- ~~Commission is 30 %, or **15 % under the Small Business Program** if prior-year proceeds were ≤ $1M ([Apple](https://developer.apple.com/app-store/small-business-program/)).~~ **Moot** — proceeds are zero. The **$99/yr Developer Program is not moot**: it is what notarization and a store listing both require, free or not, and it covers both channels.
 
 **Direct distribution, as a complement not an alternative.** Developer ID signing, Hardened Runtime (`--options=runtime --timestamp`), notarization with `notarytool` (`altool` was decommissioned in November 2023), staple, ship a signed `.pkg` that installs AUv2/VST3/CLAP into `/Library/Audio/Plug-Ins/*` and the container app into `/Applications` ([Resolving common notarization issues](https://developer.apple.com/documentation/security/resolving-common-notarization-issues)). Sign inside-out, one component at a time; `codesign --deep` has been deprecated for signing since macOS 13 despite what most audio-plugin CI guides still say. Note that **entitlements are per-process: a plugin inherits the host's**, so `disable-library-validation` is the DAW's problem, not ours — nothing we put in the plugin's entitlements takes effect at load time. Test with `spctl -a -vvv -t install`, not just `pkgutil --check-signature`; there is a live macOS 26.3 issue where a correctly notarized pkg still fails `spctl` ([Apple forums](https://developer.apple.com/forums/thread/817887)).
 
@@ -115,7 +147,7 @@ Do the direct build first. It is the shorter path to real users, it exercises th
 
 ## Two risks worth pricing in now
 
-**CPU.** The worst case is measured at 31–40 % of one M4 Pro performance core (decisions 25b, 37), with everything else on the machine idle. In a real session the piano shares the box with a mix, and Logic will run the AUv3 out of process at whatever buffer size the project uses. Before M6 we need a quality/voice-budget control that trades partial count or resonance-bus participation for headroom, chosen by measurement rather than by feel, and a number in the marketing copy that survives a busy project. This is the product's main competitive exposure against sample libraries, which are cheap on CPU and expensive on disk.
+**CPU.** The worst case is measured at 31–40 % of one M4 Pro performance core (decisions 25b, 37), with everything else on the machine idle. In a real session the piano shares the box with a mix, and Logic will run the AUv3 out of process at whatever buffer size the project uses. Before M6 we need a quality/voice-budget control that trades partial count or resonance-bus participation for headroom, chosen by measurement rather than by feel, and a number in the README that survives a busy project. Against sample libraries — cheap on CPU, expensive on disk — this is the trade a user is choosing when they install it; with nothing being sold it is a usability question rather than a competitive one.
 
 **AUv3 host friction.** Registration through PluginKit is not the plugin folder that DAW users know; hosts that scan folders rather than querying `AVAudioUnitComponentManager` will not see us at all, and there is an open report of a *sandboxed* host failing to instantiate an `.appex` AU with `-10863` while a non-sandboxed one succeeds ([Apple forums](https://developer.apple.com/forums/thread/774322)). Test in Logic, GarageBand, Live and Reaper before the first release; M8's AUv2 build is the escape hatch if a host we care about turns out to be one of the folder scanners.
 
@@ -129,8 +161,8 @@ Do the direct build first. It is the shorter path to real users, it exercises th
 | **M3** | Standalone SwiftUI app hosting the appex via `AVAudioEngine`, CoreMIDI input, on-screen keyboard | 2 wk | Playable from a hardware keyboard, no DAW |
 | **M4** | `AUParameterTree`, factory presets, `fullState` save/restore, App Group preset import | 1–2 wk | Logic project reopens with pedal automation and preset intact |
 | **M5** | Direct distribution: signing, notarization, `.pkg`, CI | 1 wk | Notarized, stapled, installs and loads on a clean Mac |
-| **M6** | UI worth charging for (SwiftUI: keyboard, pedals, preset browser, meters) | 3–4 wk | — |
-| **M7** | Mac App Store submission: sandbox audit, IAP if paid, review iterations | 2–3 wk | Approved |
+| **M6** | UI worth ~~charging for~~ *having* (SwiftUI: keyboard, pedals, preset browser, meters) | 3–4 wk | — |
+| **M7** | Mac App Store submission: sandbox audit, ~~IAP if paid~~ (free listing), review iterations | 2–3 wk | Approved |
 | **M8** | CLAP entry point + VST3/AUv2 via `clap-wrapper-rs` | 1–2 wk | Loads in Reaper, Bitwig, Live |
 | **M9** | MIDI 2.0 depth: Piano Profile registered controllers, CC#88 hi-res velocity, MPE | 1–2 wk | Roland A-88MKII drives it at 10-bit velocity |
 
@@ -138,7 +170,7 @@ Roughly four months of focused work to a notarized direct-download product, five
 
 ## What not to do yet
 
-- **Do not runtime-parameterize the sample rate.** Option (a) above. Revisit only if a paying user demonstrates an audible difference the SRC caused.
+- **Do not runtime-parameterize the sample rate.** Option (a) above. Revisit only if a user demonstrates an audible difference the SRC caused — the original wording said *paying* user, and there are none.
 - **Do not ship AUv2 first**, tempting as the drop-in `.component` is. It is App Store-illegal, and once M8 exists it costs one macro.
 - **Do not build the AUv3 through `clap-wrapper`.** One month of field exposure on the format that carries the whole product, plus a CMake/Xcode-generator constraint on our build.
 - **Do not implement MIDI-CI.** Core MIDI negotiates and translates; we would be reimplementing the OS. Profiles are the only reason to revisit, and that is M9 at the earliest.

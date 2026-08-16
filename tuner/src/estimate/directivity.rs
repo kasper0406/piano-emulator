@@ -1,7 +1,7 @@
 //! Where a note's two polarizations sit in the stereo image, from how far its
 //! balance moves while it decays.
 //!
-//! `TUNING_REPORT.md` §5: the median per-partial left-minus-right level of a
+//! `docs/history/TUNING_REPORT.md` §5: the median per-partial left-minus-right level of a
 //! Salamander recording moves **1.2–6.2 dB** between 0.3 s and 2 s after the
 //! strike, and the engine's render of the same note moved 0.02–0.14 dB. The
 //! engine's could not move at all, for a structural reason — it panned one mono
@@ -40,7 +40,7 @@ use crate::trajectory::InharmonicModel;
 
 /// Median drift, in dB, that the engine's own renders show per unit of
 /// `voicing.polarization_pan_spread`. Measured over keys 21, 33, 45, 57, 60,
-/// 72, 84 and 96 at velocity 90 by `tuner/examples/drift_line.rs`, at five
+/// 72, 84 and 96 at velocity 90 by `forensics/src/bin/drift_line.rs`, at five
 /// spreads from 0 to the ceiling: **0.739, 1.356, 2.441, 2.913, 3.963 dB**,
 /// a straight line to within 0.170 dB.
 ///
@@ -73,7 +73,7 @@ pub const DRIFT_AT_ZERO_DB: f64 = 0.68;
 /// The engine's ceiling on the parameter (`soundboard::MAX_PAN_SPREAD`).
 pub const MAX_PAN_SPREAD: f64 = 0.4;
 
-/// The band `TUNING_REPORT.md` §5 measured the recordings' drift in: 1.2 dB at
+/// The band `docs/history/TUNING_REPORT.md` §5 measured the recordings' drift in: 1.2 dB at
 /// A0 to 6.2 dB at C6, over the whole compass and every key it sampled.
 ///
 /// [`pan_spread_table`] aims at each key's *own* recorded drift clamped into
@@ -214,7 +214,7 @@ pub fn pan_spread_for_drift(measured_db: f64) -> f64 {
 /// [`DRIFT_PER_SPREAD_DB`] is one number for the whole instrument, and the
 /// instrument does not have one: at the ceiling the engine's own renders drift
 /// 0.24 dB at A0, 1.26 at A2, 3.33 at C4, 8.67 at C5 and 5.59 at C7
-/// (`TUNING_REPORT.md` §5, Milestone A update) against the recordings' 1.24,
+/// (`docs/history/TUNING_REPORT.md` §5, Milestone A update) against the recordings' 1.24,
 /// 4.73, 3.96, 5.33 and 5.85. A spread fitted to the compass median therefore
 /// undershoots the bass by a factor of five and *overshoots* C5 and C6 — which
 /// is what `notes.pan_spread` exists to fix, and what this inverts.
@@ -319,7 +319,7 @@ mod tests {
     /// as the median key, so the same recorded drift asks for half the spread.
     #[test]
     fn a_key_is_inverted_on_its_own_line_and_not_on_the_compass_median() {
-        // The Milestone A columns of `TUNING_REPORT.md` §5, as lines.
+        // The Milestone A columns of `docs/history/TUNING_REPORT.md` §5, as lines.
         let c5 = KeyDriftLine {
             key: 72,
             at_zero_db: 0.32,

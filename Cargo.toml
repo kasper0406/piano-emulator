@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["engine", "tuner"]
+members = ["engine", "tuner", "forensics"]
+# `forensics/` is a member so that it shares the lockfile, the profiles and the
+# path dependencies — but it is not a *default* member, so plain `cargo build`,
+# `cargo test` and `cargo clippy` at the root never compile it. (An explicit
+# `--workspace` flag overrides default-members and does build it — which is why
+# the final release gate, which uses `--workspace`, covers it too.) It is the
+# reproducibility record behind `DECISIONS.md`: one-shot instruments that were
+# run once, printed a table into an item, and are kept so the item can be
+# re-derived. Build it on purpose with `cargo build -p forensics`.
+default-members = ["engine", "tuner"]
 
 [workspace.package]
 version = "0.1.0"

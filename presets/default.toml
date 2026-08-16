@@ -5,12 +5,6 @@ description = "piano-emulator v1, hand-tuned. Equal temperament; per-note tables
 excitation_scale = 0.4
 horizontal_gain_db = -12.0
 horizontal_decay_ratio = 0.29
-horizontal_offset_hz = [
-    0.35,
-    0.52,
-    0.27,
-]
-unison_coupling = 0.02
 resonance_coupling = 0.012
 
 [[voicing.unison_layout]]

@@ -1,0 +1,17 @@
+[package]
+name = "forensics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "One-shot lab instruments behind DECISIONS.md; built on demand, never by default"
+
+# There is no library here on purpose: every file under `src/bin/` is one
+# self-contained investigation, and nothing depends on anything another one
+# defines. That is what makes them safe to keep — an instrument cannot rot a
+# caller it does not have.
+[dependencies]
+piano-emulator = { path = "../engine" }
+piano-tuner = { path = "../tuner", default-features = false, features = ["engine-events"] }
+rustfft = "6"
+hound = "3.5"

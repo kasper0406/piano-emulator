@@ -2,7 +2,27 @@
 
 Physical-model piano synthesizer in Rust. Target: Apple Silicon (M-series) MacBooks, real-time latency, sound quality first. This spec defines the architecture, module boundaries, DSP math, and acceptance tests. Follow it; if you must deviate, note the deviation in your report and append to DECISIONS.md.
 
-> **Status (2026-08-13):** v1 is implemented and all acceptance tests pass; deviations from this document are logged in `DECISIONS.md` (the log wins where they disagree). The layout below predates the workspace split — the crate now lives under `engine/` (with the parameter-estimation crate under `tuner/`, per `TUNING.md`), but the module names and responsibilities are unchanged.
+> **Status (refreshed 2026-08-16). Live document, and v1 is done.** Every
+> module and every acceptance test below is implemented and green, and this file
+> is still the specification the engine is held to. Where it and `DECISIONS.md`
+> disagree the **log wins** — 320-odd numbered deviations have accumulated, and
+> the ones that contradict text below are called out where they occur.
+>
+> **What has changed under it since it was written, in one list.** The single
+> package is a workspace: the engine is `engine/`, the parameter-estimation
+> crate is `tuner/` (`TUNING.md`), the one-shot lab instruments are `forensics/`,
+> and the module names and responsibilities inside `engine/src/` are unchanged.
+> Five modules were added that the layout below does not list: `preset.rs` and
+> `midi.rs` (`TUNING.md`'s engine prerequisites 1 and 3, `DECISIONS.md` 50, 55),
+> `duplex.rs` (157-163), `noise.rs` (108-110) and `calibrate.rs` (145). Every
+> hardcoded table named below now travels through a preset file (`presets/`,
+> item 50) rather than living in the source. The string model is no
+> longer the free-running one described in §"Strings": a key's strings and
+> polarizations are the coupled eigenmodes of one bridge point (items 223-230).
+>
+> **What is specified here and deliberately not built:** nothing. The forward
+> plan is elsewhere — `PHYSICS.md` for the model, `TUNING.md` for the
+> estimation, `DISTRIBUTION.md` for the plugin.
 
 ## Project layout
 

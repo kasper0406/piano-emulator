@@ -12,6 +12,36 @@ totals ~4–6 %. The budget is not the constraint; model risk is.
 **Evidence rule.** Nothing here gets built until `TUNING.md` Phase E shows the residual it is meant to explain —
 *stated in advance* under each entry. That is why Phase E comes before this work.
 
+> **Status (refreshed 2026-08-16). Live document, and half of it has been
+> built** — Phase E ran, so the evidence rule above has been satisfied or
+> refused entry by entry rather than pending. Read each section's own header
+> first; this is the index.
+>
+> **Built and in the instrument:** §3 duplex and aliquot segments (`DECISIONS.md`
+> 157–163 — the mechanism ships, its *drive* is wrong and that is the standing
+> red gate of item 260); §4 the bridge admittance on the sympathetic bus
+> (148, 164, 182–184); §5 the action's noises (108–110, 145); §6 the silent key
+> press, release velocity and the nonlinear damper contact (111); §7 the
+> hammer's contact width in the excitation comb (107). Milestone **A** and
+> milestone **B** of the ordering at the bottom are therefore done.
+>
+> **Refuted by measurement, and not to be built:** §2's tension-modulation pitch
+> glide (its own header says so), and §9's room — item 315 measured that the
+> material carries no room to fit and item 317 refused the anonymous absorber
+> the experiment produced. §9 stands as the argument for why, not as a plan.
+>
+> **Still ahead, and this is what the file is now for:** §1 longitudinal modes
+> and phantom partials (milestone **C**, untouched, and still the largest
+> remaining timbral gap in the bass); §8 radiation, lid, microphones and the
+> listener — promoted by item 317 to the **next presentation milestone**, ahead
+> of §9, because the stereo presentation is the largest measured difference on
+> the board that nothing scores. Item 317 also puts a prerequisite on it: give
+> the realism loss a stereo term *before* building the geometry, so the stage
+> can be regressed.
+>
+> The cost yardstick above still holds; measured today the full compass with the
+> pedal down is 41.6 % of one core on the measured preset.
+
 ---
 
 ## 1. Longitudinal string modes and phantom partials
@@ -48,7 +78,7 @@ are removed and fits `f'_1` and the formant envelope, with `c_L/2L` as a hard pr
 than derive it — phantoms also arise from nonlinearity in the *structural* parts (Bilbao et al., [JASA 142(4) EL344,
 2017](https://pubs.aip.org/asa/jasa/article/142/4/EL344/853105)).
 
-## 2. Tension-modulation pitch glide — **refuted by measurement** (`TUNING_REPORT.md` §6)
+## 2. Tension-modulation pitch glide — **refuted by measurement** (`docs/history/TUNING_REPORT.md` §6)
 
 > **Status:** the check this entry prescribed was run in Phase E: beyond 200 ms the recorded fundamental holds to a
 > few cents, and inside 100 ms the measurement's own error bar (±17–108 cents on the engine control) swamps any
@@ -124,7 +154,7 @@ T60 > 0.3 s, write the strongest 2–6 per key.
 
 ## 4. Bridge admittance: two-way string ↔ soundboard coupling
 
-> **Phase E update** (`TUNING_REPORT.md` §3, §4): the *coupling* half of this entry is strengthened — the treble
+> **Phase E update** (`docs/history/TUNING_REPORT.md` §3, §4): the *coupling* half of this entry is strengthened — the treble
 > sympathetic halo is the report's #1 finding (C7 fortissimo: between-partial energy −3.5 dB vs the engine's −48 dB)
 > and its level is explicitly a stage-2 coupling parameter. But the report *refutes* using one global admittance
 > curve to explain excitation-spectrum roughness: that residual is per-note, not shared across notes at the same

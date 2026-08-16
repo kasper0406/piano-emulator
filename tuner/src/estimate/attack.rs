@@ -3,7 +3,7 @@
 //!
 //! # Why this event exists at all, and why it is not a level
 //!
-//! `TUNING_REPORT.md` §4 refuted a missing attack *transient*: broadband energy
+//! `docs/history/TUNING_REPORT.md` §4 refuted a missing attack *transient*: broadband energy
 //! between the partials over the first 85 ms came back within ~7 dB of the
 //! engine's. What two later measurements convict instead is the attack's
 //! **spectrum**:
@@ -51,7 +51,7 @@
 //! 250 Hz to 4 kHz some 15 dB under it; A2's does the same; C7's is flat from
 //! 31 Hz to 2 kHz. A shape fitted to the whole thing is a 100 Hz thump at every
 //! key — which is a sound the engine already makes twice over: the action's four
-//! events are centred at 77 to 300 Hz (`TUNING_REPORT.md` §5) and the board's own
+//! events are centred at 77 to 300 Hz (`docs/history/TUNING_REPORT.md` §5) and the board's own
 //! modes put a strike's low frequencies into the render whatever the hammer
 //! does.
 //!

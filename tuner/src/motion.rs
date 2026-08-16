@@ -4,18 +4,19 @@
 //! Everything else in this crate measures a partial's amplitude and its
 //! frequency as single numbers per frame — `f_k(t)`, `a_k(t)` on a 43 ms hop.
 //! That is the right resolution for a decay rate and the wrong one for the
-//! percept `FUNDAMENTALS.md` Part II is about, which lives at 0.1–20 Hz *inside*
+//! percept `docs/history/FUNDAMENTALS.md` Part II is about, which lives at 0.1–20 Hz *inside*
 //! one partial and is a fraction of a cent deep. This module is the measurement
-//! that resolves it, promoted out of `tuner/examples/jitter_forensics.rs` (the
-//! forensics that found the artefact) and `tuner/examples/eigenmode_prototype.rs`
+//! that resolves it, promoted out of `forensics/src/bin/jitter_forensics.rs`
+//! (the forensics that found the artefact) and
+//! `forensics/src/bin/eigenmode_prototype.rs`
 //! (which added the beat-rate and placement statistics) so that three callers
 //! can share one implementation:
 //!
 //! * [`crate::realism`]'s Columns A and B — the scoreboard gates of
-//!   `FUNDAMENTALS.md` §7.7;
+//!   `docs/history/FUNDAMENTALS.md` §7.7;
 //! * [`crate::estimate::motion`] — which inverts the same statistics into
 //!   `notes.false_beat` and `[voicing.strike_direction]`;
-//! * the two examples above, which keep their own reporting.
+//! * the two forensic instruments above, which keep their own reporting.
 //!
 //! # The measurement
 //!
@@ -52,7 +53,7 @@
 //! forensics ran through this identical code — reads 0.00–0.05 cents of
 //! [`Motion::band_cents`], because the demodulation of a decaying signal is not
 //! exactly stationary. [`IF_FLOOR_CENTS`] is that floor, and
-//! `FUNDAMENTALS.md`'s verification errata require it to be clamped in before
+//! `docs/history/FUNDAMENTALS.md`'s verification errata require it to be clamped in before
 //! any ratio of two cells is taken: without it a cell where both signals are at
 //! the floor reads a ratio of 30 instead of 1.
 
@@ -98,7 +99,7 @@ pub const MIN_PEAK_DB: f64 = 10.0;
 
 /// The measurement's own floor on [`Motion::band_cents`], in cents: what a
 /// single decaying sinusoid reads through this code. Clamp both sides in before
-/// taking any ratio (`FUNDAMENTALS.md` verification errata).
+/// taking any ratio (`docs/history/FUNDAMENTALS.md` verification errata).
 pub const IF_FLOOR_CENTS: f64 = 0.05;
 
 /// Everything one partial of one signal contributes.
@@ -122,7 +123,7 @@ pub struct Motion {
     pub beat_depth_db: f64,
     /// Dominant rate of the band-limited log envelope's own movement, Hz — see
     /// [`beat_rate`] for why it is an interpolated spectral peak and not the
-    /// sign count `FUNDAMENTALS.md` §7.4 used. This is the statistic that
+    /// sign count `docs/history/FUNDAMENTALS.md` §7.4 used. This is the statistic that
     /// decides *which* mechanism a beat comes from: a unison mistuning is a
     /// frequency ratio, so partial `k` beats at `k` times the fundamental's
     /// rate, and a split in the wire's own geometry does not know what `k` is.
@@ -134,7 +135,7 @@ pub struct Motion {
     pub tail_db_s: f64,
     /// Where the tail's straight line extrapolates back to at the strike,
     /// relative to the prompt's: the aftersound level, in dB under the prompt.
-    /// `FUNDAMENTALS.md` §7.3's own statistic, and the one the eigenmode
+    /// `docs/history/FUNDAMENTALS.md` §7.3's own statistic, and the one the eigenmode
     /// prototype broke at C6 (4.9 -> 21.2 dB).
     pub aftersound_db: f64,
 }
@@ -160,7 +161,7 @@ impl Motion {
     /// companion is, in dB under the partial, from
     /// `D = 20 log10((1 + r) / (1 - r))`.
     ///
-    /// This is `FUNDAMENTALS.md` §7.4's inversion, and it is the only reading of
+    /// This is `docs/history/FUNDAMENTALS.md` §7.4's inversion, and it is the only reading of
     /// a measured beat depth that is in the units the preset is written in.
     /// Returns `None` for a depth so large that `r` would reach 1, which is a
     /// partial that goes through an exact null rather than a pair.
@@ -333,7 +334,7 @@ pub fn partial_motion(spectrum: &mut Spectrum, nominal_hz: f64, half_width: f64)
     .sqrt();
 
     // The frequency track is detrended linearly — a partial whose pitch drifts
-    // as its unison dies (`TUNING_REPORT.md` §6) is drift and not jitter — and
+    // as its unison dies (`docs/history/TUNING_REPORT.md` §6) is drift and not jitter — and
     // the log envelope cubically, which is what a two-exponential decay looks
     // like over three seconds and is the detrend `ANALYSIS.md` metric 3 uses.
     let band = band_limited(&detrended(&cents, 1), TRACK_HZ);
@@ -397,7 +398,7 @@ fn line_through(y: &[f64], t0: f64, dt: f64) -> (f64, f64) {
 ///
 /// # Why this is the transform and not the sign count
 ///
-/// `FUNDAMENTALS.md` §7.4 and the eigenmode prototype counted the envelope's own
+/// `docs/history/FUNDAMENTALS.md` §7.4 and the eigenmode prototype counted the envelope's own
 /// **sign changes** ([`crossing_rate`]), on the argument that a 2.7 s window
 /// resolves 0.37 Hz and an FFT would put 0.7 and 1.0 Hz in the same bin. That is
 /// true of a bin *index* and false of an interpolated peak, and the count has a
@@ -465,7 +466,7 @@ pub fn beat_rate(x: &[f64], rate: f64) -> f64 {
 
 /// Mean rate of an already band-limited, zero-mean track, from its own sign
 /// changes: `crossings / (2 * span)`. [`beat_rate`]'s fallback, and the
-/// statistic `FUNDAMENTALS.md` §7.4's tables were taken with.
+/// statistic `docs/history/FUNDAMENTALS.md` §7.4's tables were taken with.
 pub fn crossing_rate(x: &[f64], rate: f64) -> f64 {
     if x.len() < 4 {
         return 0.0;
@@ -606,7 +607,7 @@ mod tests {
 
     /// A pair a known distance apart returns that distance from its envelope's
     /// sign changes — at the amplitude ratio the recordings actually show
-    /// (`FUNDAMENTALS.md` §7.4: a companion 4–7 dB down), which is where the
+    /// (`docs/history/FUNDAMENTALS.md` §7.4: a companion 4–7 dB down), which is where the
     /// log envelope is still nearly one line.
     #[test]
     fn a_pair_beats_at_the_rate_it_is_split_by() {

@@ -1,7 +1,7 @@
 //! The two motion mechanisms, inverted from the recordings: `notes.false_beat`
 //! and `[voicing.strike_direction]`.
 //!
-//! `FUNDAMENTALS.md` §7.4 is the diagnosis this module promotes into an
+//! `docs/history/FUNDAMENTALS.md` §7.4 is the diagnosis this module promotes into an
 //! estimator. Having removed the unison beat completely — the coupled
 //! construction of `DECISIONS.md` 223 locks the bass and midrange, and measures
 //! 0.01–0.17 dB of beat depth at C4's fundamental where the recording measures
@@ -49,7 +49,7 @@
 //! # 2. The strike direction: one global velocity law, from 16 layers
 //!
 //! [`fit_strike_direction`] uses the *same* inversion at every velocity layer
-//! the library has. `FUNDAMENTALS.md` §7.3's second refutation is that nothing
+//! the library has. `docs/history/FUNDAMENTALS.md` §7.3's second refutation is that nothing
 //! in a linear string model can make the beat structure depend on velocity
 //! except the **direction** of the strike vector, and `DECISIONS.md` 235 built
 //! the handle: `leak_db(v) = horizontal_gain_db + lerp(vh_db_at_pp,
@@ -505,7 +505,7 @@ pub fn velocity_spread(cells: &[Vec<f64>]) -> f64 {
 }
 
 /// `RSS(rate = s k) / RSS(rate = c)` over the measured partials — the two
-/// one-parameter models `FUNDAMENTALS.md` §7.4 sets against each other, fitted
+/// one-parameter models `docs/history/FUNDAMENTALS.md` §7.4 sets against each other, fitted
 /// and compared. Returns 0 for fewer than two points, which no caller writes on.
 fn model_ratio(measured: &[Companion]) -> f64 {
     if measured.len() < 2 {
@@ -664,7 +664,7 @@ struct LoopState {
 /// which is a measurement saying the recording's fundamental is **not** two
 /// components — the deviation is larger than any two-component pair of that
 /// depth can make at that rate. The rate written is the one that reproduces the
-/// motion the ear is shown to detect (`FUNDAMENTALS.md` §II.1: coherent slow FM
+/// motion the ear is shown to detect (`docs/history/FUNDAMENTALS.md` §II.1: coherent slow FM
 /// at 3–5 cents of threshold), not the one that reproduces the envelope line,
 /// and `DECISIONS.md` 250 records the choice with the number that forced it.
 ///
@@ -897,7 +897,7 @@ impl LoopState {
     }
 }
 
-/// The gate widths [`LoopState::cost`] is quoted in: `FUNDAMENTALS.md` §II.3's
+/// The gate widths [`LoopState::cost`] is quoted in: `docs/history/FUNDAMENTALS.md` §II.3's
 /// own `B1 <= 3 dB` and `A1 <= 2.0`.
 const B1_SCALE_DB: f64 = 3.0;
 const A1_SCALE: f64 = 2.0;
@@ -928,7 +928,7 @@ mod tests {
         20.0 * ((1.0 + r) / (1.0 - r)).log10()
     }
 
-    /// `FUNDAMENTALS.md` §7.4's C4 row, put through the estimator: flat in `k`,
+    /// `docs/history/FUNDAMENTALS.md` §7.4's C4 row, put through the estimator: flat in `k`,
     /// so it is written, and the levels and rates come back as the table quotes
     /// them.
     #[test]

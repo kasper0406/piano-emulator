@@ -523,7 +523,7 @@ fn the_pedal_down_halo_outlives_the_note() {
 /// picks up about -95 dBFS from a fortissimo G4, five decibels over the
 /// engine's own -100 dBFS audibility floor (`types::IDLE_ENERGY`), so there is
 /// nothing left to ring on with once the exciter stops — which is
-/// `TUNING_REPORT.md`'s backlog item 5, a stage-2 *coupling level*, and not a
+/// `docs/history/TUNING_REPORT.md`'s backlog item 5, a stage-2 *coupling level*, and not a
 /// property of the thresholds. Raise the level and the persistence comes with
 /// it, which is what this asserts.
 #[test]
@@ -580,7 +580,7 @@ fn a_prepared_string_rings_on_after_the_note_that_excited_it() {
 /// The coupling is raised to the maximum a preset may ask for, for the same
 /// reason `a_prepared_string_rings_on_after_the_note_that_excited_it` raises it:
 /// the shipped level puts one key's sympathetic contribution near the engine's
-/// own audibility floor, which is `TUNING_REPORT.md`'s backlog item 5 — a
+/// own audibility floor, which is `docs/history/TUNING_REPORT.md`'s backlog item 5 — a
 /// stage-2 coupling level — and not a property of this path.
 #[test]
 fn a_duplex_segment_answers_another_keys_note_through_the_bridge() {
@@ -848,7 +848,7 @@ fn range(from_s: f32, to_s: f32) -> std::ops::Range<usize> {
     (from_s * SAMPLE_RATE) as usize..(to_s * SAMPLE_RATE) as usize
 }
 
-/// `TUNING_REPORT.md` §5, the second table: a key-off plays at -25 to -39 dB
+/// `docs/history/TUNING_REPORT.md` §5, the second table: a key-off plays at -25 to -39 dB
 /// relative to a velocity-90 strike of the same key, and the engine made no
 /// sound at all. This is that column, measured back out of the finished chain.
 ///

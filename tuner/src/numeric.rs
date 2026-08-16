@@ -158,22 +158,6 @@ pub fn median(values: &[f64]) -> Option<f64> {
     })
 }
 
-/// Weighted mean. `None` when the weights sum to zero.
-pub fn weighted_mean(values: &[f64], weights: &[f64]) -> Option<f64> {
-    let (mut num, mut den) = (0.0, 0.0);
-    for (&v, &w) in values.iter().zip(weights) {
-        if w > 0.0 && v.is_finite() {
-            num += w * v;
-            den += w;
-        }
-    }
-    if den > 0.0 {
-        Some(num / den)
-    } else {
-        None
-    }
-}
-
 /// Result of a minimization.
 #[derive(Clone, Debug)]
 pub struct Minimum {

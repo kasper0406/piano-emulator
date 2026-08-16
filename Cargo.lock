@@ -276,6 +276,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "forensics"
+version = "0.1.0"
+dependencies = [
+ "hound",
+ "piano-emulator",
+ "piano-tuner",
+ "rustfft",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -123,14 +123,6 @@ impl Engine {
         &self.pedals
     }
 
-    pub fn resonance_mut(&mut self) -> &mut ResonanceBus {
-        &mut self.resonance
-    }
-
-    pub fn soundboard_mut(&mut self) -> &mut Soundboard {
-        &mut self.soundboard
-    }
-
     pub fn voice(&self, index: usize) -> &Voice {
         &self.voices[index]
     }

@@ -588,7 +588,7 @@ fn a_beating_unisons_decays_come_back_within_what_the_beating_allows() {
     // The bounds are therefore widened, once, to what is achieved with both of
     // those in: C2 19.1 %, C4 26.9 %, C6 52.6 %, against 25 / 40 / 30 before.
     // The widening is the diagnosis and not a shrug — what would close it is
-    // `FUNDAMENTALS.md` §7.7's own next item, an estimator whose model is the
+    // `docs/history/FUNDAMENTALS.md` §7.7's own next item, an estimator whose model is the
     // `2N`-mode envelope, and until that exists a gate that compares the
     // estimator with the engine's own nominal is measuring both errors at once.
     let config = DecayConfig::default();
@@ -861,7 +861,7 @@ fn the_felt_and_the_velocity_map_come_back_from_a_velocity_ladder() {
 
 // ------------------------------------------------ the refinements of Phase E
 //
-// Three parameters the engine gained after `TUNING_REPORT.md`: the signed
+// Three parameters the engine gained after `docs/history/TUNING_REPORT.md`: the signed
 // fourth-order inharmonicity of §1, the per-string decay spread of §6 and the
 // hammer's contact width of `PHYSICS.md` §7. Each is rendered into a preset,
 // played, and asked for back. The control in every case is the *same note from
@@ -881,7 +881,7 @@ fn preset_with_b4(pairs: &[(u8, f32)]) -> EnginePreset {
 #[test]
 #[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
 fn a_known_fourth_order_inharmonicity_comes_back_within_a_tenth() {
-    // Both signs of `TUNING_REPORT.md` §1's finding, at C2 — the note where §1
+    // Both signs of `docs/history/TUNING_REPORT.md` §1's finding, at C2 — the note where §1
     // measured the ratio inverting, and the one whose forty tracked partials
     // are measured well enough for the two-band test to resolve the
     // disagreement. `+3e-8` is worth 51 cents at partial 40 and `-2e-8` 34, so
@@ -975,7 +975,7 @@ fn the_bridge_splits_a_unisons_decay_rates_and_the_drift_measures_it() {
     // about the construction instead.
     //
     // What it says is the thing `estimate::spread` exists to measure, with the
-    // one handle that still moves it: the **tuning**. `FUNDAMENTALS.md` §3.2's
+    // one handle that still moves it: the **tuning**. `docs/history/FUNDAMENTALS.md` §3.2's
     // regime parameter is `mu = pi df / gamma`, so a narrow unison locks — the
     // eigenvalues' real parts stay together and nothing hands over — and a wide
     // one veers, splitting the decay rates and making the composite's pitch
@@ -1058,7 +1058,7 @@ fn the_pan_spread_comes_back_from_the_drift_it_puts_in_the_image() {
         // `gate_preset()` would be wrong here, and it is the whole reason this
         // test spent two milestones passing by a thousandth: it renders at
         // `board_mix = 0`, and the diffuse field is half of this mechanism.
-        // Measured with `tuner/examples/drift_line.rs`, the dry engine's drift
+        // Measured with `forensics/src/bin/drift_line.rs`, the dry engine's drift
         // runs 15.84 dB per unit of spread over the eight keys the constants
         // were taken on and 12.21 over these six, against 8.00 and 8.76 with
         // the board as the preset ships it. Checking a constant measured on the
@@ -1353,7 +1353,7 @@ fn halo_only(preset: &EnginePreset, key: u8, hold_s: f32, duration_s: f32) -> Ve
         .collect()
 }
 
-/// A preset with the action silenced. `TUNING_REPORT.md` §5's `harm*` files are
+/// A preset with the action silenced. `docs/history/TUNING_REPORT.md` §5's `harm*` files are
 /// a recording of the strings alone — Salamander samples the key-off thump
 /// separately — so the engine's halo has to be measured with the mechanism out
 /// of the way too, or the thump would be counted as sympathetic resonance.
@@ -1468,7 +1468,7 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
         // still not the segments — see `DECISIONS.md` 247 for why that change is
         // not shipped either. What the segment is charged by
         // is the key's own speaking length through `Voice::process`, and that is
-        // engine-side arithmetic; `FUNDAMENTALS.md` §7.7 does not list it, and
+        // engine-side arithmetic; `docs/history/FUNDAMENTALS.md` §7.7 does not list it, and
         // this is the one gate of item 232's eight that this milestone leaves
         // where it found it.
         //
@@ -1963,7 +1963,7 @@ mod per_partial {
         // modulus of a sum of six components at unrelated frequencies
         // (`DECISIONS.md` 80-84), and what that does to the *time-zero*
         // amplitude the whole excitation chain is read from is
-        // `TUNING_REPORT.md` §3's own control: 2-5 dB of estimator noise on
+        // `docs/history/TUNING_REPORT.md` §3's own control: 2-5 dB of estimator noise on
         // synthetic material, concentrated at the low partials. Measured on C4
         // this test's own pattern comes back 3-4 dB out at partials one and two
         // for exactly that reason, and inside a decibel above them.
@@ -1999,7 +1999,7 @@ mod per_partial {
         // Within a decibel RMS over the twelve partials that carry the note, and
         // no worse than 1.6 dB anywhere in them. What is left is a slow tilt: a
         // degree-2 polynomial in `ln k` is the smooth reference by construction
-        // (`TUNING_REPORT.md` §3) and it cannot be exactly the instrument's own
+        // (`docs/history/TUNING_REPORT.md` §3) and it cannot be exactly the instrument's own
         // envelope, so the pattern comes back with the difference spread over
         // it. §3's own control on synthetic material is 2-5 dB, which is what
         // this is measured against.

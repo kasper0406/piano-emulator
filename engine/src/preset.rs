@@ -38,6 +38,14 @@
 //! strike comb, nulls and all), `notes.partial_gains` and
 //! `notes.partial_sigma_scale` absent (one on every partial of every key), and
 //! `[noise.strike]` at its default (the hammer makes no noise of its own).
+//! The three **inert** fields of `DECISIONS.md` 225 are written the same way
+//! for a different reason — `voicing.unison_coupling` at zero,
+//! `voicing.horizontal_offset_hz` all zero and `voicing.unison_sigma_scale` at
+//! one are not neutral *settings*, they are the values at which nothing is
+//! being asserted, since the coupled string construction reads none of the
+//! three at any value ([`Preset::inert_fields`]). A file that still carries
+//! them loads, validates and is written back with them; nothing this crate
+//! produces has them.
 //! Those are `#[serde(default)]` on the way in and skipped on the way out
 //! while they hold the neutral value, so a file that predates the field keeps
 //! playing the instrument it always described and the engine keeps writing that
@@ -49,7 +57,7 @@
 //! exactly as it checks the mandatory ones.
 //!
 //! `[noise]` is the one such field whose default is not *neutral*: a preset
-//! that omits it gets the mechanism levels `TUNING_REPORT.md` §5 measured, not
+//! that omits it gets the mechanism levels `docs/history/TUNING_REPORT.md` §5 measured, not
 //! silence. It is written the same way — skipped while it equals the measured
 //! table — for the same reason the others are: the file is the interface to the
 //! tuner, and the engine emitting a section the tuner's copy of the schema does
@@ -96,12 +104,17 @@ pub struct Preset {
 
 /// Largest value the inert `voicing.unison_coupling` may still carry.
 ///
-/// It used to be a loop-gain ceiling: the coupling passed a fraction of the
-/// neighbours' bridge force into a string one block later, so a unison group was
-/// a feedback loop and a value near 0.1 could sustain itself. The loop is gone —
-/// the coupling is a construction-time property of the partial and lives in the
-/// eigenproblem — so this is now only a schema bound, kept at the number every
-/// preset already written was validated against so that all of them still load.
+/// **Kept for compatibility, and for nothing else.** It used to be a loop-gain
+/// ceiling: the coupling passed a fraction of the neighbours' bridge force into
+/// a string one block later, so a unison group was a feedback loop and a value
+/// near 0.1 could sustain itself. The loop is gone — the coupling is a
+/// construction-time property of the partial and lives in the eigenproblem — so
+/// this is now only a schema bound, kept at the number every preset already
+/// written was validated against so that all of them still load. Neither
+/// checked-in preset sets the field any more (`DECISIONS.md` 324), and nothing
+/// this workspace writes ever will; the bound exists for files written
+/// elsewhere, before the split. Removing it means removing the field, which
+/// means refusing to load those files.
 pub const LEGACY_MAX_UNISON_COUPLING: f32 = 0.05;
 
 /// Global string and coupling constants: the parts of the voicing that are not
@@ -127,15 +140,20 @@ pub struct Voicing {
     /// partial of every key at once — an instrument-wide, note-independent,
     /// velocity-independent pulse at 0.270 / 0.350 / 0.520 Hz, which
     /// `renders/jitter/JITTER.md` measured in every row of every table it
-    /// printed and `FUNDAMENTALS.md` §2.2 showed to be 35x the physically
+    /// printed and `docs/history/FUNDAMENTALS.md` §2.2 showed to be 35x the physically
     /// derivable split and the one shape with no mechanism behind it. The
     /// polarization split is now the bridge's reactive anisotropy times the
     /// partial's own frequency (`engine::string`), which is a few hundredths of
     /// a hertz and different in every partial of every key.
     ///
     /// Still parsed, still validated, never read. [`Preset::inert_fields`]
-    /// names it on load.
-    #[serde(serialize_with = "short::list")]
+    /// names it on load. Absent — the default, and what both checked-in presets
+    /// now have — is all zeros, which is the value that makes it silent.
+    #[serde(
+        default = "no_horizontal_offset",
+        skip_serializing_if = "is_no_horizontal_offset",
+        serialize_with = "short::list"
+    )]
     pub horizontal_offset_hz: Vec<f32>,
     /// **Inert.** Bridge coupling within a unison group, as a fraction of the
     /// string's wave impedance.
@@ -147,10 +165,15 @@ pub struct Voicing {
     /// forensics measured the whole of it end to end at **0.07 cents**. The
     /// coupling is not a free parameter at all: it is `radiated_share * sigma_k`,
     /// the same coefficient as the radiation damping the preset has already
-    /// fitted (`FUNDAMENTALS.md` §1.1), and it now lives in the eigenproblem.
+    /// fitted (`docs/history/FUNDAMENTALS.md` §1.1), and it now lives in the eigenproblem.
     ///
-    /// Still parsed, still validated, never read.
-    #[serde(serialize_with = "short::scalar")]
+    /// Still parsed, still validated, never read. Absent — the default, and
+    /// what both checked-in presets now have — is zero.
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        serialize_with = "short::scalar"
+    )]
     pub unison_coupling: f32,
     /// Fraction of the sympathetic-resonance bus injected into each undamped
     /// string.
@@ -166,7 +189,7 @@ pub struct Voicing {
     /// a single note then *moves* while it rings: 1.2–6.2 dB of drift between
     /// 0.3 s and 2 s in the recordings against 0.02–0.14 dB in the engine's own
     /// renders, which pans one mono voice per key and structurally cannot move
-    /// at all (`TUNING_REPORT.md` §5).
+    /// at all (`docs/history/TUNING_REPORT.md` §5).
     ///
     /// Zero — the default — keeps both polarizations at the key's pan and the
     /// single-buffer render path with them.
@@ -186,7 +209,7 @@ pub struct Voicing {
     /// It existed to write in by hand the one thing a group of *independent*
     /// oscillators cannot have: strings of one unison decaying at different
     /// rates, which is what moves a composite partial's pitch as the survivor
-    /// takes over (`TUNING_REPORT.md` §6). Under the coupled construction that
+    /// takes over (`docs/history/TUNING_REPORT.md` §6). Under the coupled construction that
     /// split is an **output** — the bridge pushes the group's decay rates apart
     /// by construction, by a factor of 4.6 at C4's fundamental where the
     /// free-running banks were identical to the bit — so writing it in as well
@@ -213,7 +236,7 @@ pub struct Voicing {
 /// The one place velocity can enter a linear model: the *direction* of the
 /// hammer's excitation vector.
 ///
-/// `FUNDAMENTALS.md` §7.3 refuted the hope that the coupled construction would
+/// `docs/history/FUNDAMENTALS.md` §7.3 refuted the hope that the coupled construction would
 /// bring velocity dependence with it, and the refutation is structural, not a
 /// tolerance: the strike vector `u = s_j g_k` scales **uniformly** with
 /// velocity, so `c = V^-1 u` scales uniformly too and every ratio in the mode
@@ -221,7 +244,7 @@ pub struct Voicing {
 /// and the mixture is velocity-invariant by linearity. Measured, that is the
 /// engine's 0.006 cents and 0.054 dB of beat structure across velocities 40 /
 /// 90 / 120 against the recording's **0.787 cents and 1.90 dB**
-/// (`renders/jitter/EIGENMODE.md`; `FUNDAMENTALS.md` §7.4, third fingerprint).
+/// (`renders/jitter/EIGENMODE.md`; `docs/history/FUNDAMENTALS.md` §7.4, third fingerprint).
 ///
 /// What *can* move with velocity is where the blow points. A hammer that
 /// arrives faster arrives with its felt more compressed and its face at a
@@ -247,7 +270,7 @@ pub struct Voicing {
 /// `presets/default.toml` and `presets/salamander-c5.toml` both get by leaving
 /// the section out.
 ///
-/// Nothing here can be fitted yet — `FUNDAMENTALS.md` §7.7's last row is the
+/// Nothing here can be fitted yet — `docs/history/FUNDAMENTALS.md` §7.7's last row is the
 /// estimator that would do it, and it is the next milestone.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -292,7 +315,7 @@ pub struct StrikeDirection {
 /// The quantity it offsets is `horizontal_gain_db`, fitted at −27.6 dB, and the
 /// measurements that motivate a velocity dependence at all put the recording's
 /// beat-depth swing at 1.90 dB over an 80-point velocity span
-/// (`FUNDAMENTALS.md` §7.4). Twelve decibels either way is six times the swing
+/// (`docs/history/FUNDAMENTALS.md` §7.4). Twelve decibels either way is six times the swing
 /// that has to be explained and still leaves the horizontal plane a leak rather
 /// than a second note; it is a bound on a knob nobody has fitted yet, not a
 /// measurement.
@@ -534,7 +557,7 @@ pub const MAX_DUPLEX_T60_S: f32 = 3.0;
 /// (`D = 20 log10((1+r)/(1-r))`), and got the same answer at C4 and at A2: each
 /// mid and low partial carries **a second component 4–7 dB down, 0.7–1.5 Hz
 /// away**, at a spacing that does **not** scale with the partial number
-/// (C4: 1.11, 1.48, 0.74, 0.74 Hz on k = 1..4). `FUNDAMENTALS.md` §7.4 rules
+/// (C4: 1.11, 1.48, 0.74, 0.74 Hz on k = 1..4). `docs/history/FUNDAMENTALS.md` §7.4 rules
 /// out every mechanism the model already has:
 ///
 /// * not the **unison** — a mistuning is a frequency *ratio*, so its beat rate
@@ -562,7 +585,7 @@ pub const MAX_DUPLEX_T60_S: f32 = 3.0;
 /// offset goes on the diagonal of `Omega_k` for the split string's horizontal
 /// entry, so the companion comes back as one of the group's own `2N`
 /// eigenvalues, with the decay rate the coupled system gives it
-/// (`FUNDAMENTALS.md` §7.5 step 2, `omega_(j,h) = omega_(j,v)(1 + delta_j(k))`).
+/// (`docs/history/FUNDAMENTALS.md` §7.5 step 2, `omega_(j,h) = omega_(j,v)(1 + delta_j(k))`).
 /// The mode count does not change: the false beat **moves and lifts** the
 /// horizontal mode that was already there — the aftersound — rather than adding
 /// anything to the bank.
@@ -605,7 +628,7 @@ pub struct FalseBeat {
 /// open-loop from the recording's own depth, and it cut the mechanism off
 /// exactly where the fault is loudest: the recording's bass and lower-midrange
 /// *fundamentals* move 1.1–1.4 cents on beat depths of 0.8–1.4 dB, i.e.
-/// companions at −27 dB, so the two cells `FUNDAMENTALS.md` §II.5 names first —
+/// companions at −27 dB, so the two cells `docs/history/FUNDAMENTALS.md` §II.5 names first —
 /// A2 k=1 and k=2, 29x and 22x too still — were unwritable by construction.
 /// The floor is now −40 dB (0.17 dB of depth), which is under the level at
 /// which a companion still moves a resolved partial's *frequency* by a cent,
@@ -699,7 +722,7 @@ pub struct BodyMode {
 
 /// The four mechanism events, and what each of them sounds like.
 ///
-/// `TUNING_REPORT.md` §5 is the parameter set: it measured Salamander's own
+/// `docs/history/TUNING_REPORT.md` §5 is the parameter set: it measured Salamander's own
 /// `rel*` and `pedal*` recordings, at the level the SFZ plays them, against a
 /// velocity-90 strike of the same key. Nothing here needed fitting, which is
 /// why the report ranks this the cheapest item on its backlog.
@@ -750,7 +773,7 @@ pub struct NoiseTables {
 /// (`renders/timbre-ladder/ANALYSIS.md` §8.3). That residual sits at −20 dB
 /// (C4), −16 (A2) and −10 (C6) relative to the source over the first 150 ms.
 ///
-/// It is *not* the transient `TUNING_REPORT.md` §4 refuted: that measurement was
+/// It is *not* the transient `docs/history/TUNING_REPORT.md` §4 refuted: that measurement was
 /// broadband energy between the partials over the first 85 ms, and found the
 /// engine within ~7 dB. What is missing is the residual's **spectrum** — its
 /// flatness — which is compatible with that refutation and is what a burst
@@ -789,7 +812,7 @@ pub struct StrikeNoise {
 }
 
 /// Velocity at which `[noise.strike]`'s tabulated level is the level played:
-/// the same velocity-90 strike every mechanism level in `TUNING_REPORT.md` §5 is
+/// the same velocity-90 strike every mechanism level in `docs/history/TUNING_REPORT.md` §5 is
 /// quoted against, so a level of −20 dB means −20 dB under *that* note.
 pub const NOMINAL_STRIKE_VELOCITY: u8 = 90;
 
@@ -842,7 +865,7 @@ pub struct EventNoise {
     /// action's structure-borne spectrum ends (`PHYSICS.md` §5).
     #[serde(serialize_with = "short::scalar")]
     pub centroid_hz: f32,
-    /// Time to fall 40 dB, seconds — the column `TUNING_REPORT.md` §5 reports.
+    /// Time to fall 40 dB, seconds — the column `docs/history/TUNING_REPORT.md` §5 reports.
     #[serde(serialize_with = "short::scalar")]
     pub decay_s: f32,
     /// How far the level travels, in dB, over the event's full drive range:
@@ -883,7 +906,7 @@ pub struct NoteTables {
     pub inharmonicity_b: Vec<f32>,
     /// Fourth-order coefficient B4 of the same law. **Signed**: a wound bass
     /// string's series curves one way and the short wound tenor strings' the
-    /// other (`TUNING_REPORT.md` §1). Absent means zero, which is the
+    /// other (`docs/history/TUNING_REPORT.md` §1). Absent means zero, which is the
     /// two-parameter law exactly.
     #[serde(
         default = "zero_table",
@@ -962,7 +985,7 @@ pub struct NoteTables {
     /// table: the measured excitation spectrum is 5–10 dB rougher than any
     /// smooth envelope times `sin(k pi x)` (engine control 2–5 dB) and the
     /// roughness is **not** shared between notes at the same frequency, so it
-    /// cannot be a bridge curve (`TUNING_REPORT.md` §3, backlog item 6).
+    /// cannot be a bridge curve (`docs/history/TUNING_REPORT.md` §3, backlog item 6).
     ///
     /// Absent — the default — is one everywhere. A row may be shorter than that
     /// key's partial count (the estimator tracks as far as it can) or empty, and
@@ -979,7 +1002,7 @@ pub struct NoteTables {
     /// same shape rules as [`NoteTables::partial_gains`].
     ///
     /// The two-exponential-plus-two-beats envelope law describes a real
-    /// partial's decay to about 4 dB whatever produced it (`TUNING_REPORT.md`
+    /// partial's decay to about 4 dB whatever produced it (`docs/history/TUNING_REPORT.md`
     /// §2), and the residual is per partial rather than per note: three strings
     /// and two polarizations make six components and fifteen beat rates, and the
     /// model fits two. This is the per-partial correction to the *rate*.
@@ -1107,7 +1130,7 @@ pub struct NoteTables {
     /// The global scalar is one number for the whole compass, and the compass
     /// does not want one number: at the engine's ceiling of 0.4 the drift it
     /// produces is 0.24 dB at A0 and 8.67 dB at C5 against the recordings'
-    /// 1.24 and 5.33 (`TUNING_REPORT.md` §5, Milestone A update), so a spread
+    /// 1.24 and 5.33 (`docs/history/TUNING_REPORT.md` §5, Milestone A update), so a spread
     /// that fits the bass overshoots the treble by 3 dB. Empty — the default,
     /// and absent from the file — means the global scalar applies to every
     /// key, which is the engine as it was.
@@ -1131,7 +1154,7 @@ impl Preset {
             eprintln!(
                 "warning: {}: `{field}` is accepted but no longer read - the \
                  coupled-eigenmode unison derives what it used to assert \
-                 (`FUNDAMENTALS.md` §5, `DECISIONS.md` 225)",
+                 (`docs/history/FUNDAMENTALS.md` §5, `DECISIONS.md` 225)",
                 path.display()
             );
         }
@@ -1153,7 +1176,7 @@ impl Preset {
     /// (`tuner/src/preset.rs`, deliberately independent) does not have to move
     /// in the same commit. What they used to do is now derived:
     /// `unison_coupling` is `radiated_share * sigma_k` (it is the *same
-    /// coefficient* as the radiation damping, `FUNDAMENTALS.md` §1.1),
+    /// coefficient* as the radiation damping, `docs/history/FUNDAMENTALS.md` §1.1),
     /// `horizontal_offset_hz` is the bridge's reactive anisotropy times the
     /// partial's own frequency, and `unison_sigma_scale` is the eigenproblem's
     /// own output. See `DECISIONS.md` 225.
@@ -1255,7 +1278,7 @@ impl Preset {
             }
         }
         // The fourth-order inharmonicity is the one signed table: the sign is
-        // the finding (`TUNING_REPORT.md` §1), so only finiteness can be
+        // the finding (`docs/history/TUNING_REPORT.md` §1), so only finiteness can be
         // checked entry by entry. What the value has to *do* is checked below,
         // against the series it produces.
         table_length("inharmonicity_b4", n.inharmonicity_b4.len())?;
@@ -2127,7 +2150,7 @@ fn is_default_noise(noise: &NoiseTables) -> bool {
     *noise == NoiseTables::default()
 }
 
-/// The mechanism as `TUNING_REPORT.md` §5 measured it.
+/// The mechanism as `docs/history/TUNING_REPORT.md` §5 measured it.
 ///
 /// Levels are that table's "peak re strike" column, anchored at the keys the
 /// samples belong to: `rel1` = A0, `rel37` = A3, `rel40` = C4, `rel52` = C5,
@@ -2200,7 +2223,7 @@ impl Default for NoiseTables {
                 }],
             },
             // Silent, and the only one of the five that is: nothing in
-            // `TUNING_REPORT.md` §5 measured a hammer on its own, so the level
+            // `docs/history/TUNING_REPORT.md` §5 measured a hammer on its own, so the level
             // belongs in the preset that was fitted with one.
             strike: StrikeNoise::default(),
         }
@@ -2226,6 +2249,17 @@ fn is_zero_table(table: &[f32]) -> bool {
 
 fn is_zero(value: &f32) -> bool {
     *value == 0.0
+}
+
+/// The neutral [`Voicing::horizontal_offset_hz`]: no fixed hertz split on any
+/// string of a unison. The field is inert (`DECISIONS.md` 225), so this is not
+/// a *setting* — it is the one value that also switches off the warning.
+fn no_horizontal_offset() -> Vec<f32> {
+    vec![0.0; MAX_UNISON]
+}
+
+fn is_no_horizontal_offset(offsets: &[f32]) -> bool {
+    offsets.len() == MAX_UNISON && offsets.iter().all(|&o| o == 0.0)
 }
 
 /// The neutral [`Voicing::unison_sigma_scale`]: every string of every group
@@ -2505,8 +2539,14 @@ impl Default for Preset {
                 excitation_scale: 0.40,
                 horizontal_gain_db: -12.0,
                 horizontal_decay_ratio: 0.29,
-                horizontal_offset_hz: vec![0.35, 0.52, 0.27],
-                unison_coupling: 0.02,
+                // The two inert fields of `DECISIONS.md` 225, at the value that
+                // is both neutral and silent. They used to carry 0.35 / 0.52 /
+                // 0.27 Hz and 0.02 — the free-running unison's metronome and
+                // its one-block-late cross-feed — and the coupled construction
+                // reads neither. Carrying them would put two numbers nothing
+                // computes into every preset written from this one.
+                horizontal_offset_hz: no_horizontal_offset(),
+                unison_coupling: 0.0,
                 resonance_coupling: 0.012,
                 // The hand-tuned instrument is the point-force, one-`B`,
                 // one-damping-law, one-pan-position piano v1 was: every field
@@ -2535,7 +2575,7 @@ impl Default for Preset {
                     .map(|(hz, weight)| DamperAnchor { hz, weight })
                     .collect(),
                 // The fitted strike vector, at every velocity. Nothing in the
-                // tuner can fit a velocity dependence yet (`FUNDAMENTALS.md`
+                // tuner can fit a velocity dependence yet (`docs/history/FUNDAMENTALS.md`
                 // §7.7's last row), and the default is the instrument as it was.
                 strike_direction: None,
             },
@@ -2601,7 +2641,7 @@ impl Default for Preset {
                 // applies to the whole compass, as it always did.
                 pan_spread: Vec::new(),
             },
-            // The action as `TUNING_REPORT.md` §5 measured it. Unlike the other
+            // The action as `docs/history/TUNING_REPORT.md` §5 measured it. Unlike the other
             // fields a preset may leave out, this one's default is not silence:
             // the report's point is that the engine made *no* sound at a
             // release or a pedal move, and that was the model error.
@@ -3526,7 +3566,7 @@ mod tests {
     /// the within-string split and the velocity-dependent strike direction —
     /// write in full, read back bit for bit, and reach the key they describe.
     ///
-    /// They are checked together because they are one finding: `FUNDAMENTALS.md`
+    /// They are checked together because they are one finding: `docs/history/FUNDAMENTALS.md`
     /// §7.4 says the recording's mid and low partials each carry a companion
     /// 4–7 dB down and 0.7–1.5 Hz away (the split), and that *how much of each
     /// plane the hammer excites depends on how the hammer meets the string*,
@@ -3583,7 +3623,7 @@ mod tests {
     fn the_per_partial_tables_and_the_hammers_noise_round_trip() {
         let mut preset = Preset::default();
         // A2's comb null is k = 17 and its measured roughness is the fault
-        // `renders/timbre-ladder/ANALYSIS.md` §4a and `TUNING_REPORT.md` §3
+        // `renders/timbre-ladder/ANALYSIS.md` §4a and `docs/history/TUNING_REPORT.md` §3
         // report; this is the shape of the table that answers them, on one key.
         let a2 = key_index(45).unwrap();
         let c8 = NUM_KEYS - 1;

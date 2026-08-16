@@ -33,11 +33,38 @@ cargo run -p piano-emulator
 ```
 
 The repository is a cargo workspace: `engine/` is the instrument, `tuner/` is
-the offline analysis and parameter-estimation crate `TUNING.md` describes, and
-`presets/` holds the instrument's parameters as data. `cargo test --release` at
+the offline analysis and parameter-estimation crate `TUNING.md` describes,
+`presets/` holds the instrument's parameters as data, and `docs/history/` holds
+the investigation records the numbered decisions were made from. `cargo test --release` at
 the root runs both crates, including the self-calibration gate, which puts the
 tuner's whole estimation pipeline over notes the engine rendered from a known
 preset and checks that the parameters come back.
+
+A fourth directory, `forensics/`, is a workspace member but **not** a default
+one, so nothing at the root ever builds it: it holds the one-shot instruments
+that were each built to settle one question, run, and quoted into a numbered
+`DECISIONS.md` item. They are the reproducibility record behind those items and
+are built on demand with `cargo build -p forensics`; `forensics/README.md` is
+their index. Everything that gets run *again* when the instrument moves — the
+preset factory and the standing boards — is a subcommand of the `piano-tuner`
+binary instead:
+
+```sh
+cargo run -p piano-tuner -- --help
+```
+
+```
+track / estimate           one recording: trajectories, or the whole analysis
+survey                     stage 1, over a whole sample library
+fit --stage <name>         stage 2, the per-note fits (see below)
+sympathetic                stage 2: duplex, halo coupling, stereo spread
+tail                       stage 2: the upper partials' decay
+bench / compass / melody / chain
+                           the standing boards, each writing its own document
+                           into renders/
+score / brilliance / residuals / ab
+                           the audits: print, print, print, render
+```
 
 **Two of those gates are red, on purpose and by name.**
 
@@ -92,10 +119,7 @@ cargo test --release
 already `opt-level = 3`, and the release-only perf/calibration gates skip
 themselves) and run `cargo test --release --workspace` once before calling work
 done — the dev cycle is several times faster because release carries thin LTO
-and a single codegen unit for honest perf numbers. The one-shot forensic
-examples in `tuner/examples/` are behind the `diagnostics` feature so routine
-builds skip them; run them with
-`cargo run --release -p piano-tuner --features diagnostics --example <name>`.
+and a single codegen unit for honest perf numbers.
 
 **The measurement tools are parallel and cache what is not under test.** The
 batch drivers render tens of independent notes per run — each render builds its
@@ -121,8 +145,8 @@ bit-identical to a fresh render, not merely close, and
 speed: deleting `data/cache/` changes no number anywhere, and `data/` is
 gitignored, so a fresh checkout simply starts cold.
 
-Measured on an M4 Pro (`DECISIONS.md` 284): `compass_scan` 39 s -> 4.2 s cold and
-3.1 s warm, `realism_bench` 59 s -> 14.3 s and 6.2 s, and
+Measured on an M4 Pro (`DECISIONS.md` 284): `compass` 39 s -> 4.2 s cold and
+3.1 s warm, `bench` 59 s -> 14.3 s and 6.2 s, and
 `cargo test --release -p piano-tuner --test calibration` 161 s -> 41 s and 36 s.
 The calibration gate's own subsets are named in that file's header.
 
@@ -141,27 +165,31 @@ cargo run --release -p piano-tuner -- survey \
     --preset presets/default.toml --cache data/cache/salamander \
     --name salamander-c5 --out presets/salamander-c5.toml \
     --credit 'Salamander Grand Piano V3 (Yamaha C5) by Alexander Holm, CC-BY 3.0'
-cargo run --release -p piano-tuner --example fit_sympathetic -- \
+cargo run --release -p piano-tuner -- sympathetic \
     data/salamander/SalamanderGrandPiano-V3+20200602.sfz \
     --preset presets/salamander-c5.toml --out presets/salamander-c5.toml
-cargo run --release -p piano-tuner --example fit_motion -- \
+cargo run --release -p piano-tuner -- fit \
     data/salamander/SalamanderGrandPiano-V3+20200602.sfz \
     --preset presets/salamander-c5.toml --out presets/salamander-c5.toml
-cargo run --release -p piano-tuner --example salamander_ab   # A/B renders into renders/
-cargo run --release -p piano-tuner --example verify_milestone_b -- [old-preset.toml]
+cargo run --release -p piano-tuner -- tail \
+    data/salamander presets/salamander-c5.toml \
+    --passes 8 --out presets/salamander-c5.toml
+cargo run --release -p piano-tuner -- ab      # A/B renders into renders/
+cargo run --release -p forensics --bin verify_milestone_b -- [old-preset.toml]
 ```
 
-`verify_milestone_b` re-measures the sympathetic milestone from rendered audio
+`verify_milestone_b` — a `forensics/` instrument, built on demand — re-measures
+the sympathetic milestone from rendered audio
 with the same code the recordings are measured with — the spectrum census, the
 halo isolated by subtraction, render health, neutrality, cost, and what the
 between-partial statistic is actually made of. Given the preset as it stood
 before a change it prints both columns.
 
-`fit_motion` is stage 2's *motion* half: the within-string false beat (`notes.false_beat`) and the
+`fit` is stage 2's *motion* half: the within-string false beat (`notes.false_beat`) and the
 strike vector's velocity law (`[voicing.strike_direction]`) inverted from the recordings' own beat
 depth and rate, `notes.detune_cents` re-fitted where the coupled unison still lets a beat identify
 it, and `notes.partial_gains` as the full measured ratio of the recording's time-zero spectrum to
-the engine's own render of the same note. Unlike `fit_partials` it is re-entrant: every fit clears
+the engine's own render of the same note. Unlike `--stage partials` it is re-entrant: every fit clears
 the field it writes from the probe before rendering it. `DECISIONS.md` 239-248.
 
 Its fifth stage, `--stage texture`, is the one that reaches the 58 keys the library never sampled.
@@ -179,10 +207,10 @@ through the same rails, the same power pin and the same close-on-the-render the 
 without guessing. `DECISIONS.md` 284-291.
 
 `survey` is stage 1: everything an isolated recorded note can identify.
-`fit_sympathetic` is stage 2, which is render-and-measure — it fits the duplex
+`sympathetic` is the other half of stage 2, which is render-and-measure — it fits the duplex
 segments from the library's release-resonance recordings, the sympathetic
 coupling and bridge admittance by rendering the engine and measuring it against
-`TUNING_REPORT.md`'s own numbers, and the per-key stereo spread by inverting
+`docs/history/TUNING_REPORT.md`'s own numbers, and the per-key stereo spread by inverting
 each key's drift on a line measured on the engine. Run it without `--out` to
 measure and print without writing anything.
 
@@ -192,10 +220,23 @@ measure and print without writing anything.
 
 ## Documentation
 
-- `SPEC.md` — the model specification and acceptance tests.
-- `DECISIONS.md` — the running log of every design decision and deviation.
-- `TUNING.md` — the plan for estimating parameters automatically from recordings of real pianos (in progress; stage 1, its self-calibration gate and the first measured preset are built, in `tuner/`).
-- `renders/realism/REALISM.md` — the standing realism scoreboard: six fixed phrases rendered from one event list through both the engine and the Salamander recordings, with `TUNING.md`'s stage-2 losses measured over each pair *and* the same measurement between two recordings of the same piano, which is the noise floor that makes the first number readable. It also carries **Columns A and B** (`FUNDAMENTALS.md` §II.3): four per-cell measurements of how a single partial *moves* — instantaneous-frequency mismatch and placement, beat-depth error and velocity coherence — over sixteen key × partial cells at three velocities, each with a gate, because every other column on the board is a functional of energy and the artefact those were built to catch is not. All four gates pass on the measured preset (`DECISIONS.md` 253); `cargo run --release -p piano-tuner --example motion_score` is the same four numbers with every cell printed, in seven seconds, for iterating a fit against them. Written by `cargo run --release -p piano-tuner --example realism_bench` (needs `data/fetch_salamander.sh`); the metrics themselves live in `tuner/src/realism.rs` so the scoreboard and the loss an optimizer minimises are one piece of code.
+The four documents at the root are **live** — each carries a status header
+saying what in it is implemented and what is still a plan, and each is expected
+to be true of the instrument as it stands today. `docs/history/` holds the
+**investigation records**: two long reports that were written to settle a
+question, were acted on, and are kept because they are the reasoning and the
+measurements behind numbered `DECISIONS.md` items. They describe the instrument
+as it was on the day they were written and each says so in a banner at the top.
+Where a history document and `DECISIONS.md` disagree, the log wins.
+
+- `SPEC.md` — the model specification and acceptance tests. **Live**, v1 implemented.
+- `DECISIONS.md` — the running log of every design decision and deviation. It is the authority: the other documents defer to it.
+- `TUNING.md` — the plan for estimating parameters automatically from recordings of real pianos (in progress; stage 1, its self-calibration gate, the first measured preset and most of stage 2 are built, in `tuner/`).
+- `PHYSICS.md` — the modelling iterations that are *not* in the instrument yet, ranked, each with the residual it would have to explain. **Live**, and a plan rather than a description.
+- `DISTRIBUTION.md` — the plan for turning the engine into an AUv3 plugin. **Live as engineering, moot as commerce**: the project is MIT-licensed and given away, so every pricing, licence-key and in-app-purchase clause in it is dead text and marked as such in its header.
+- `docs/history/TUNING_REPORT.md` — **history.** Phase E's measured-vs-model residuals on the Salamander recordings (2026-08-13); acted on in `DECISIONS.md` 98-133, 145-207, 237. The `residuals` subcommand still re-runs the measurements in it.
+- `docs/history/FUNDAMENTALS.md` — **history.** The physics review that convicted the free-running unison and derived the coupled one (2026-08-14); acted on in `DECISIONS.md` 223-261 and 296-302. It reviews a string model the engine no longer has.
+- `renders/realism/REALISM.md` — the standing realism scoreboard: six fixed phrases rendered from one event list through both the engine and the Salamander recordings, with `TUNING.md`'s stage-2 losses measured over each pair *and* the same measurement between two recordings of the same piano, which is the noise floor that makes the first number readable. It also carries **Columns A and B** (`docs/history/FUNDAMENTALS.md` §II.3): four per-cell measurements of how a single partial *moves* — instantaneous-frequency mismatch and placement, beat-depth error and velocity coherence — over sixteen key × partial cells at three velocities, each with a gate, because every other column on the board is a functional of energy and the artefact those were built to catch is not. All four gates pass on the measured preset (`DECISIONS.md` 253); `cargo run --release -p piano-tuner -- score` is the same four numbers with every cell printed, in seven seconds, for iterating a fit against them. Written by `cargo run --release -p piano-tuner -- bench` (needs `data/fetch_salamander.sh`); the metrics themselves live in `tuner/src/realism.rs` so the scoreboard and the loss an optimizer minimises are one piece of code.
 - **The melody gate** is the listener's own test, made permanent
   (`DECISIONS.md` 296-298): `cargo test -p piano-tuner --test melody` plays the
   Ode to Joy melody line alone — the soprano of the `excerpt` phrase, the same
@@ -205,11 +246,27 @@ measure and print without writing anything.
   recordings' worst note stands off theirs. It exists because every other
   standing number here is either a *compass* statistic (88 keys struck alone) or
   a mean over a phrase, and neither of those is a tune with one note wrong in it.
-  `cargo run --release -p piano-tuner --features diagnostics --example melody_line`
+  `cargo run --release -p piano-tuner -- melody`
   is the same measurement printed in full, with flags that undo one table at a
   time so a failure can be attributed to the table that causes it; it writes
   `renders/melody/MELODY.md` and the two rendered lines beside it, because the
   complaint this gate exists for was made by listening to them.
-- **Brilliance** has no standing report, because the audit that measured it (`DECISIONS.md` 292-295) moved nothing: `cargo run --release -p piano-tuner --features diagnostics --example brilliance` prints, per key and per phrase, how much 2-6 kHz and 6-12 kHz energy the engine carries against the recording of the same note at 0.1 s and at 1 s, each against the reference's own velocity-layer spread. It exists because `COMPASS.md`'s `centroid` is a mean *partial index* and the ear's brightness is absolute. It refused the top octave's decay (the recording's late energy there is its room, 20-30 dB over the note's own partial), acquitted the master shelf on its measured leverage, and convicted the partial envelope above the fitted rows — an error in partial *number* rather than in frequency, and one whose fix is a decay re-fit rather than a filter. The measurements are in `tuner/src/estimate/brilliance.rs`.
+- **Brilliance** has no standing report, because the audit that measured it (`DECISIONS.md` 292-295) moved nothing: `cargo run --release -p piano-tuner -- brilliance` prints, per key and per phrase, how much 2-6 kHz and 6-12 kHz energy the engine carries against the recording of the same note at 0.1 s and at 1 s, each against the reference's own velocity-layer spread. It exists because `COMPASS.md`'s `centroid` is a mean *partial index* and the ear's brightness is absolute. It refused the top octave's decay (the recording's late energy there is its room, 20-30 dB over the note's own partial), acquitted the master shelf on its measured leverage, and convicted the partial envelope above the fitted rows — an error in partial *number* rather than in frequency, and one whose fix is a decay re-fit rather than a filter. The measurements are in `tuner/src/estimate/brilliance.rs`.
 - `presets/default.toml` — the hand-tuned v1 instrument, written out in full.
 - `presets/salamander-c5.toml` — the same instrument with everything stage 1 could measure off a real Yamaha C5 written into it. Its `notes.partial_gains` and `notes.false_beat` tables now cover the whole compass: 28 keys measured against their own recordings and 50 **drawn** from those keys' distributions, named in `notes.synthesized_texture` (`DECISIONS.md` 284-291, 300). Both halves of a drawn key are closed on the **render** — the row against the recordings' own roughness of that register, the splits against their own beat depth — which is what a fitted key's row and a fitted key's splits are each closed against too.
+
+## Licence
+
+MIT (`LICENSE`), and the instrument is free: there is no paid tier, no licence
+key and no in-app purchase anywhere in the plan, which is why
+`DISTRIBUTION.md`'s commercial sections are marked moot rather than deleted —
+they are still an accurate account of what the Mac App Store requires of anyone
+who does charge.
+
+The **recordings** the measured preset was estimated from are not MIT and are
+not distributed here: the Salamander Grand Piano V3 is CC-BY 3.0 by Alexander
+Holm, credited in `ATTRIBUTION.md`, in `presets/salamander-c5.toml`'s own
+`description` field, and by the fetch script that downloads it. What ships in
+this repository is the *parameters* estimated from those recordings, not the
+audio. Any future library the pipeline is pointed at has to be recorded in
+`ATTRIBUTION.md` before its numbers ship in a preset.

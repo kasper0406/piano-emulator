@@ -1,7 +1,22 @@
-//! The tuner's driver: `track` runs the partial tracker over one recording,
-//! `estimate` runs the whole per-note analysis on it and, given a base preset,
-//! writes the estimates out as a preset file, and `survey` does that for every
-//! note of a whole sample library at once.
+//! The tuner's driver. One binary, one subcommand per operational tool.
+//!
+//! Three groups, and the grouping is the point:
+//!
+//! - **One recording**: `track` runs the partial tracker over it, `estimate`
+//!   runs the whole per-note analysis and, given a base preset, writes the
+//!   estimates out as a preset file.
+//! - **The preset factory**, in the order the stages run: `survey` is stage 1
+//!   — everything an isolated recorded note can identify, over a whole sample
+//!   library at once — and `fit`, `sympathetic` and `tail` are stage 2, which
+//!   is render-and-measure.
+//! - **The standing boards and audits**: `bench`, `compass`, `melody` and
+//!   `chain` each write a document into `renders/` that a milestone is read
+//!   off; `score`, `brilliance` and `residuals` print; `ab` renders.
+//!
+//! The drivers themselves are [`tools`]; `track`, `estimate` and `survey` are
+//! still below, because they predate the split and have no engine in them.
+
+mod tools;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -23,12 +38,51 @@ use piano_tuner::{
 };
 
 const USAGE: &str = "\
-piano-tuner — offline analysis for piano-emulator parameter estimation
+piano-tuner — offline analysis and parameter estimation for piano-emulator
 
 usage:
-  piano-tuner track <input.wav|input.flac> --f0 <hz> [options]
-  piano-tuner estimate <input.wav|input.flac> --f0 <hz> [options]
-  piano-tuner survey <instrument.sfz> --preset <base.toml> [options]
+  piano-tuner <command> [arguments]
+
+one recording:
+  track <in.wav|in.flac> --f0 <hz>     the partial trajectories
+  estimate <in.wav|in.flac> --f0 <hz>  the whole per-note analysis
+
+the preset factory, in the order the stages run:
+  survey <instrument.sfz> --preset <base.toml> [options]
+        stage 1: everything an isolated recorded note identifies, over a
+        whole sample library
+  fit <instrument.sfz> --preset <base.toml> [--out <f>] [--stage <name>]...
+        stage 2, the per-note fits. Stages, in order, and all five run when
+        --stage is not given: false_beat, strike_direction, detune,
+        partial_gains, texture. --stage partials is the sixth and runs
+        alone: it is not re-entrant and is fitted from the survey base.
+        Also: --key <n>, --draw-over-measured (motion stages);
+        --keys <a,b,..>, --cache <dir> (partials).
+  sympathetic <instrument.sfz> --preset <base.toml> [--out <f>]
+        stage 2, render-and-measure: notes.duplex, the halo coupling and
+        [voicing.bridge], notes.pan_spread
+  tail [data/salamander] [preset.toml] [--key <n>] [--passes <n>] [--out <f>]
+        stage 2, the upper partials' decay: notes.partial_sigma_scale and
+        notes.synthesized_decay
+
+the standing boards, each writing its own document:
+  bench [data] [renders/realism] [preset.toml]     -> REALISM.md
+  compass [data] [renders/compass] [preset.toml] [keys...]
+                                                   -> COMPASS.md
+  melody [data] [renders/melody] [preset.toml] [flags]
+                                                   -> MELODY.md
+  chain [data] [renders/chain] [preset.toml]       -> CHAIN.md
+
+the audits:
+  score [preset.toml] [data]              Columns A and B, cell by cell
+  brilliance [data] [preset.toml] [shelf_db] [shelf_hz] [--trim <n>]
+                                          2-6 and 6-12 kHz against the
+                                          recordings, per key and phrase
+  residuals [data] [preset.toml] [cache]  the whole residual census
+  ab [data] [renders/salamander-ab]       A/B renders of both presets
+
+the one-shot instruments behind DECISIONS.md are not here: they are the
+forensics/ crate, outside the workspace's default members. See its README.
 
 options:
   --f0 <hz>          fundamental of the recorded note (required)
@@ -39,6 +93,9 @@ options:
   --pad <n>          zero-pad the transform to n times the window [2]
   --out <file>       track: write the trajectories as JSON
                      estimate/survey: write the preset (needs --preset)
+
+  (track and estimate only; every other command documents its own flags
+   in its module header and in the list above)
 
 estimate only:
   --key <n>          MIDI key of the recorded note, for the preset table
@@ -66,16 +123,34 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: Vec<String>) -> Result<()> {
+/// The subcommands print their own diagnosis and carry it out as
+/// `Box<dyn Error>` — which is what their `main` returned when they were
+/// examples — so the dispatcher's error type is the wider one and each
+/// message reaches the terminal exactly as its own tool wrote it.
+type Exit = std::result::Result<(), Box<dyn std::error::Error>>;
+
+fn run(args: Vec<String>) -> Exit {
+    let rest = || args[1..].to_vec();
     match args.first().map(String::as_str) {
-        Some("track") => track(&args[1..]),
-        Some("estimate") => estimate(&args[1..]),
-        Some("survey") => survey(&args[1..]),
+        Some("track") => Ok(track(&args[1..])?),
+        Some("estimate") => Ok(estimate(&args[1..])?),
+        Some("survey") => Ok(survey(&args[1..])?),
+        Some("fit") => tools::fit::run(rest()),
+        Some("sympathetic") => Ok(tools::sympathetic::run(rest())?),
+        Some("tail") => tools::tail::run(rest()),
+        Some("bench") => tools::bench::run(rest()),
+        Some("compass") => tools::compass::run(rest()),
+        Some("melody") => tools::melody::run(rest()),
+        Some("chain") => tools::chain::run(rest()),
+        Some("score") => tools::score::run(rest()),
+        Some("brilliance") => tools::brilliance::run(rest()),
+        Some("residuals") => tools::residuals::run(rest()),
+        Some("ab") => tools::ab::run(rest()),
         Some("help") | Some("--help") | Some("-h") | None => {
             print!("{USAGE}");
             Ok(())
         }
-        Some(other) => Err(Error::Config(format!("unknown command {other:?}\n\n{USAGE}"))),
+        Some(other) => Err(Error::Config(format!("unknown command {other:?}\n\n{USAGE}")).into()),
     }
 }
 
@@ -383,7 +458,7 @@ fn survey(args: &[String]) -> Result<()> {
     report_notes(&survey, &base, &decay);
 
     let spread_config = SpreadConfig::default();
-    let spread = report_spread(&survey, &base, &spread_config);
+    report_spread(&survey, &base, &spread_config);
     let pan_spread = report_directivity(&library, &options.config);
     let noise = report_mechanism(&library, &base);
 
@@ -428,9 +503,14 @@ fn survey(args: &[String]) -> Result<()> {
             map.ok_or_else(|| Error::Estimate("no velocity map was fitted".into()))?,
         );
     }
-    if !spread.is_neutral() {
-        builder = builder.sigma_scale(spread.rows());
-    }
+    // `spread` is measured and printed above and deliberately **not** written.
+    // `voicing.unison_sigma_scale` has been inert since `DECISIONS.md` 225 —
+    // the per-string decay split it existed to carry is an output of the
+    // coupled construction, not an input — so a survey that wrote it put a
+    // number into every preset it emitted that nothing computes with, and the
+    // engine warned about it on every load (item 324). The measurement is worth
+    // printing: it is the recordings' own drift, and it is what
+    // `tuner/tests/calibration.rs` still closes the construction against.
     if let Some(pan_spread) = pan_spread.filter(|s| *s > 0.0) {
         builder = builder.pan_spread(pan_spread as f32);
     }
@@ -543,7 +623,12 @@ fn report_notes(survey: &Survey, base: &Preset, decay: &DecayConfig) {
 }
 
 /// The per-string decay spread, note by note, and what it pools to.
-fn report_spread(survey: &Survey, base: &Preset, config: &SpreadConfig) -> SigmaSpread {
+///
+/// Printed and not written: `voicing.unison_sigma_scale` is inert
+/// (`DECISIONS.md` 225, 324). What it measures is still the recordings' own
+/// drift, and the compass it prints it over is how a reader sees whether the
+/// instrument's unisons hand over at all.
+fn report_spread(survey: &Survey, base: &Preset, config: &SpreadConfig) {
     let notes = survey.spreads(base, config);
     println!("\n key  strings   detune   drift      spread");
     for note in &notes {
@@ -573,7 +658,6 @@ fn report_spread(survey: &Survey, base: &Preset, config: &SpreadConfig) -> Sigma
         pooled.notes,
         pooled.saturated,
     );
-    pooled
 }
 
 /// The mechanism's own recordings: the `[noise]` section, measured.
@@ -622,7 +706,7 @@ fn report_mechanism(
 /// The loudest layer of every sampled key, in stereo — which is the one thing
 /// in the survey that cannot come from the trajectory cache, because the cache
 /// holds the mono sum. One note per key, not sixteen: the drift is a property
-/// of how the instrument radiates, and `TUNING_REPORT.md` §5 measured it on the
+/// of how the instrument radiates, and `docs/history/TUNING_REPORT.md` §5 measured it on the
 /// loudest layer for the same reason (a soft note's high partials are in the
 /// floor by 2 s and the floor has a balance of its own).
 fn report_directivity(library: &piano_tuner::SampleLibrary, config: &SurveyConfig) -> Option<f64> {

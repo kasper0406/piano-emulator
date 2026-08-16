@@ -1,7 +1,7 @@
 //! What a velocity-90 strike measures at the output, so that the mechanism's
 //! tabulated levels mean what they say.
 //!
-//! `TUNING_REPORT.md` §5 quotes every mechanism level as a **peak relative to a
+//! `docs/history/TUNING_REPORT.md` §5 quotes every mechanism level as a **peak relative to a
 //! velocity-90 strike of the same key** — measured, on both sides, at the
 //! microphone. The engine's key-off thump reaches the ear the same way the
 //! strike does, through the board (`DECISIONS.md` 110), so the ratio the preset
@@ -55,7 +55,7 @@ const STRIKE_WINDOW_S: f32 = 0.05;
 /// How long a burst is rendered for the board's gain, and over how many noise
 /// realizations. The ratio of the two peaks is what is averaged, so the window
 /// only has to be long enough to contain both — a quarter of a second holds the
-/// peak of every shape in `TUNING_REPORT.md` §5's table.
+/// peak of every shape in `docs/history/TUNING_REPORT.md` §5's table.
 const BURST_WINDOW_S: f32 = 0.25;
 const BURST_DRAWS: u64 = 8;
 
@@ -67,7 +67,7 @@ const REFERENCE_VELOCITY: u8 = 90;
 /// nearest C4 (`estimate::noise`), so the engine reads its own C4.
 pub const PEDAL_REFERENCE_KEY: u8 = 60;
 
-/// The two measurements that turn `TUNING_REPORT.md` §5's dB into amplitudes.
+/// The two measurements that turn `docs/history/TUNING_REPORT.md` §5's dB into amplitudes.
 #[derive(Clone, Copy, Debug)]
 pub struct MechanismCalibration {
     /// Output peak of a velocity-90 strike at each of [`ANCHOR_KEYS`].
@@ -112,7 +112,7 @@ impl MechanismCalibration {
 
     /// Board-input peak amplitude at which an event of `shape_index` on `key`
     /// renders at the same output peak as a velocity-90 strike of that key —
-    /// the amplitude a level of 0 dB in `TUNING_REPORT.md` §5's table means.
+    /// the amplitude a level of 0 dB in `docs/history/TUNING_REPORT.md` §5's table means.
     fn reference(&self, key: u8, shape_index: usize) -> f32 {
         let mut anchors = [(0.0f32, 0.0f32); ANCHOR_KEYS.len()];
         for (anchor, (&k, &peak)) in anchors

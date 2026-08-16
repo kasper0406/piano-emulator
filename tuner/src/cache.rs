@@ -1,8 +1,7 @@
 //! Content-addressed disk caches for the offline tooling.
 //!
-//! Two of the batch drivers spend most of their time re-deriving something that
-//! did not change. `examples/compass_scan.rs` and `examples/realism_bench.rs`
-//! both render the *reference* — the Salamander recordings played by
+//! Two of the batch subcommands spend most of their time re-deriving something
+//! that did not change. `compass` and `bench` both render the *reference* — the Salamander recordings played by
 //! [`crate::sampler`] — beside the engine's own render, and the reference side
 //! only moves when the sampler's code, the SFZ, or the material asked of it
 //! moves. Re-rendering it on every iteration of the engine is pure waste.

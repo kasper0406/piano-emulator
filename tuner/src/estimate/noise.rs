@@ -1,6 +1,6 @@
 //! The mechanism's own sounds, from a library's release and pedal recordings.
 //!
-//! `TUNING_REPORT.md` §5 ranked this the cheapest item on its backlog because
+//! `docs/history/TUNING_REPORT.md` §5 ranked this the cheapest item on its backlog because
 //! nothing here needs fitting in the sense the rest of `estimate` does: the
 //! recordings *are* the parameter set. Salamander ships one key-off sample per
 //! key (`rel1`…`rel88`) and four pedal samples, the SFZ says what level they

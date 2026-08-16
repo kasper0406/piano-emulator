@@ -36,7 +36,7 @@
 //!
 //! ## Columns A and B: what those five are blind to
 //!
-//! Every metric above is a functional of *energy*, and `FUNDAMENTALS.md` Part II
+//! Every metric above is a functional of *energy*, and `docs/history/FUNDAMENTALS.md` Part II
 //! is the argument that the percept the instrument is still failing on is not
 //! one. A 4-cent frequency modulation of a resolved partial is several times
 //! detection threshold and changes a mel feature vector by exactly nothing (the
@@ -1825,7 +1825,7 @@ pub fn phrase_set() -> Vec<Phrase> {
 // ---------------------------------------------------------------------------
 
 /// The keys the motion columns are measured on, in the order they are reported.
-/// `FUNDAMENTALS.md` Part II §II.3 pins four, and the verification errata pin
+/// `docs/history/FUNDAMENTALS.md` Part II §II.3 pins four, and the verification errata pin
 /// that it is these four and not section 7's three: A4 is the cell the forensics
 /// found the engine's worst frequency excursion on, and leaving it out is why
 /// Part II's `A1` baseline (~4.5 over 16 cells) and section 7's (3.39 over 12)
@@ -1938,7 +1938,7 @@ impl MotionColumns {
 /// A1, A2 and B1 are taken over the [`MOTION_REFERENCE_VELOCITY`] cells; B2 is
 /// taken over the same cells' spread across all of [`MOTION_VELOCITIES`]. That
 /// split is pinned here rather than left to the caller because
-/// `FUNDAMENTALS.md`'s two halves quote the columns over different cell sets and
+/// `docs/history/FUNDAMENTALS.md`'s two halves quote the columns over different cell sets and
 /// the errata require an implementation to choose one.
 ///
 /// Every per-cell frequency deviation is clamped at

@@ -8,7 +8,7 @@
 //! report:
 //!
 //! * **equivalence** — the eigenmode construction replaced the free-running one
-//!   (`FUNDAMENTALS.md` §5, `DECISIONS.md` 223-229). It cannot be bit-exact, so
+//!   (`docs/history/FUNDAMENTALS.md` §5, `DECISIONS.md` 223-229). It cannot be bit-exact, so
 //!   what is pinned is what a listener could tell apart, on
 //!   `presets/default.toml`, and the contract is **0.5 cents of pitch, 5 % of
 //!   T60, 0.5 dB of level**. Each of the three is asserted at that number on the
@@ -522,7 +522,7 @@ fn every_partial_sits_at_the_pitch_the_preset_asks_for() {
 /// 0.350 and 0.520 Hz — inside every partial of every key, so a held chord
 /// modulated coherently at a rate no note in it had chosen
 /// (`renders/jitter/JITTER.md`, every row of every component table;
-/// `FUNDAMENTALS.md` §2.3).
+/// `docs/history/FUNDAMENTALS.md` §2.3).
 ///
 /// What a render can say about that, and what it cannot, are worth separating.
 /// The three shipped numbers are **not** tested for literally here: on
@@ -596,7 +596,7 @@ fn the_prompt_sound_and_the_aftersound_are_still_two_decays() {
 
 /// C6, where the prototype's aftersound broke, and where it does not here.
 ///
-/// `FUNDAMENTALS.md` §7.3 measured the prototype's C6 aftersound level going
+/// `docs/history/FUNDAMENTALS.md` §7.3 measured the prototype's C6 aftersound level going
 /// 4.9 → 21.2 dB of error against the recording and blamed `detune_cents`
 /// fitted through the free-running forward model — `mu = 1.74` on the shipped
 /// preset, which the verification errata corrects to ~1.05 under the resolved
@@ -606,7 +606,7 @@ fn the_prompt_sound_and_the_aftersound_are_still_two_decays() {
 /// is the part that does not depend on which preset is loaded — C6's fundamental
 /// still has a tail slower than its prompt — and it is the cell to watch if the
 /// treble ever needs `detune_cents` re-fitted under the new forward model
-/// (`FUNDAMENTALS.md` §7.5 step 4).
+/// (`docs/history/FUNDAMENTALS.md` §7.5 step 4).
 #[test]
 fn c6_still_has_an_aftersound_under_its_fundamental() {
     let preset = Preset::default();
@@ -712,7 +712,7 @@ fn the_strike_lands_at_the_level_it_always_did() {
 /// `presets/default.toml` with one key's unison narrowed to 0.3 cents.
 ///
 /// The false beat has to be *told apart* from the unison, which is the whole of
-/// `FUNDAMENTALS.md` §7.4's argument, and on the default preset at C4 the two
+/// `docs/history/FUNDAMENTALS.md` §7.4's argument, and on the default preset at C4 the two
 /// live in the same band: 2.9 cents of detune is 0.88 Hz of spread at the second
 /// partial, which is the size of the split under test. Narrowing the unison of
 /// the one key the test measures leaves the mechanism alone and takes the other
@@ -749,7 +749,7 @@ fn with_split(key: u8, k: usize, hz: f32, db: f32) -> Preset {
 ///
 /// What the window says instead is the rate, and the rate is the finding: the
 /// recording's companions sit **0.7–1.5 Hz** away at a spacing that does not
-/// scale with the partial number (`FUNDAMENTALS.md` §7.4), where a unison
+/// scale with the partial number (`docs/history/FUNDAMENTALS.md` §7.4), where a unison
 /// mistuning must scale with it and the bridge's polarization split is a hundred
 /// times narrower. Three splits are asked for and three rates come back.
 ///
@@ -836,7 +836,7 @@ fn a_false_beat_beats_on_the_partial_it_names_and_nowhere_else() {
 /// Velocity moves the rendered beat structure, and without a strike direction it
 /// cannot.
 ///
-/// `FUNDAMENTALS.md`'s single cleanest discriminator, and the one column
+/// `docs/history/FUNDAMENTALS.md`'s single cleanest discriminator, and the one column
 /// (`B2`, velocity coherence) that no construction has ever passed: the
 /// recording's beat depth moves **1.90 dB** over velocities 40 / 90 / 120 and
 /// the shipped engine's moves **0.054** — "nothing stochastic or

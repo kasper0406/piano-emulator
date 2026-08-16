@@ -9,20 +9,30 @@ description = "Offline partial tracking and parameter estimation for piano-emula
 name = "piano_tuner"
 path = "src/lib.rs"
 
+# The operational tools are subcommands of this binary rather than examples:
+# the preset factory (`survey`, `fit`, `sympathetic`, `tail`) and the standing
+# boards and gates (`bench`, `compass`, `melody`, `chain`, `score`,
+# `brilliance`, `residuals`, `ab`). They live in `src/tools/`, which is part of
+# the *binary* target and not of the library, so the library keeps the
+# dependency surface described below.
 [[bin]]
 name = "piano-tuner"
 path = "src/main.rs"
+required-features = ["tools"]
 
 [features]
+# The tools' own dependencies: the engine they render through, the thread pool
+# the batch subcommands use, and the PNG encoder the boards draw with. On by
+# default, so `cargo build -p piano-tuner` produces a working binary; a
+# downstream that wants the *library* alone takes it with
+# `default-features = false` and links none of them.
+default = ["tools"]
+tools = ["engine-events", "dep:png", "dep:rayon"]
 # The sampler's translation of the engine's own event list into the reference
-# player's (`sampler::engine_events`). Off by default so the library still
-# links without the engine; on inside this crate's own tests, which have the
-# engine as a dev-dependency anyway.
+# player's, and back (`sampler::engine_events`). Not on by itself, so the
+# library still links without the engine; on inside this crate's own tests,
+# which have the engine as a dev-dependency anyway, and on whenever `tools` is.
 engine-events = ["dep:piano-emulator"]
-# Gates the one-shot forensic examples out of the default build graph; see the
-# [[example]] blocks at the end of this file. Implies engine-events, which most
-# of those drivers need to render through the real instrument.
-diagnostics = ["engine-events"]
 
 [dependencies]
 hound = "3.5"
@@ -37,105 +47,26 @@ serde = { version = "1", features = ["derive"] }
 # written. Estimators must give the same answer from cache as from a rerun.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.8"
+# Images for the `bench` subcommand's plots. Pure Rust, no C, no
+# image-processing stack: an encoder and nothing else.
+png = { version = "0.17", optional = true }
+# The batch subcommands and the self-calibration gate render tens of
+# independent notes per run; each render builds its own engine and shares
+# nothing, so the loops over them are data-parallel by construction. The
+# library measures one signal at a time and stays single-threaded; only the
+# tools that run it in bulk pay for a thread pool, which is why this is behind
+# `tools` rather than unconditional. Every parallel loop collects into an
+# ordered container, so the output is the same bytes at any thread count
+# (`DECISIONS.md` 284).
+rayon = { version = "1.12", optional = true }
 
-# The engine is a *dev*-dependency: the self-calibration gate renders its test
-# material through the real instrument, but the library itself analyses
-# recordings and must stay usable without an audio device on the link line.
+# The engine is also a *dev*-dependency: the self-calibration gate renders its
+# test material through the real instrument, and a test target cannot rely on
+# an optional dependency being switched on. The library itself analyses
+# recordings and must stay usable without an audio device on the link line,
+# which is what `default-features = false` buys.
 [dev-dependencies]
 piano-emulator = { path = "../engine" }
-# Images for `examples/realism_bench.rs`. Pure Rust, no C, no image-processing
-# stack: an encoder and nothing else. A dev-dependency because the library
-# measures and the examples draw.
-png = "0.17"
-# The batch drivers and the self-calibration gate render tens of independent
-# notes per run; each render builds its own engine and shares nothing, so the
-# loops over them are data-parallel by construction. A *dev*-dependency for the
-# same reason `png` is: the library measures one signal at a time and stays
-# single-threaded, and only the tools that run it in bulk pay for a thread pool.
-# Every parallel loop here collects into an ordered container, so the output is
-# the same bytes at any thread count (`DECISIONS.md` 284).
+# The calibration gate renders in bulk for the same reason the batch
+# subcommands do.
 rayon = "1.12"
-
-# One-shot forensic/audit drivers: gated so `cargo test`/`cargo build` do not
-# compile them on every iteration (they are ~1-2k lines each). Run with
-#   cargo run --release -p piano-tuner --features diagnostics --example <name>
-
-[[example]]
-name = "audit_render"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "brilliance"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "chain_fit"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "drift_line"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "eigenmode_prototype"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "fit_sympathetic"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "gain_level"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "independent_audit"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "jitter_forensics"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "key_probe"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "ladder_analysis"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "limiter_probe"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "output_gain"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "timbre_ladder"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "top_octave"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "verify_ladder"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "verify_milestone_a"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "verify_milestone_b"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "verify_scan"
-required-features = ["diagnostics"]
-
-[[example]]
-name = "melody_line"
-required-features = ["diagnostics"]

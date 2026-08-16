@@ -6,10 +6,13 @@ and action-noise tables — was estimated from recordings of a Yamaha C5
 published as the **Salamander Grand Piano** (V3) by **Alexander Holm**,
 licensed **CC-BY 3.0**: <https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html>.
 
-The recordings themselves are not distributed with this repository; the
-gitignored `data/fetch_salamander.sh` downloads them (checksummed) for anyone
-re-running the estimation pipeline, and the reference side of the realism
-benchmark plays them back for comparison.
+The recordings themselves are not distributed with this repository;
+`data/fetch_salamander.sh` downloads them (checksummed, into the gitignored
+`data/`) for anyone re-running the estimation pipeline, and the reference side
+of the realism benchmark plays them back for comparison. The script is checked
+in and the data it fetches is not — the licence above travels with the
+recordings, and what this repository ships is the parameters estimated from
+them.
 
 Action-noise levels and structure-borne bandwidth were cross-checked against
 figures published in the piano-acoustics literature (Askenfelt; Goebl, Bresin

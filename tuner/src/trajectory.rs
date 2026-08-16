@@ -33,7 +33,7 @@ pub struct InharmonicModel {
     pub b: f64,
     /// Fourth-order coefficient `B4`, **signed** and normally zero. A wound
     /// bass string's `B` falls 25–37 % along its own series and a short wound
-    /// tenor string's rises 24–45 % (`TUNING_REPORT.md` §1); one `k^4` term is
+    /// tenor string's rises 24–45 % (`docs/history/TUNING_REPORT.md` §1); one `k^4` term is
     /// how much of that shape the engine can be told about.
     ///
     /// `#[serde(default)]`: trajectory caches written before the term existed

@@ -450,14 +450,6 @@ impl DecayReport {
             .collect()
     }
 
-    /// The same, as `(frequency, amplitude)` pairs.
-    pub fn excitation_by_frequency(&self) -> Vec<(f64, f64)> {
-        self.partials
-            .iter()
-            .map(|fit| (fit.frequency_hz, fit.initial_amplitude()))
-            .collect()
-    }
-
     pub fn fit(&self, k: u32) -> Option<&DecayFit> {
         self.partials.iter().find(|fit| fit.k == k)
     }

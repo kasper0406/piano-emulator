@@ -15,7 +15,7 @@
 //! *eigenmodes of a coupled group*: the strike projects onto a non-orthogonal
 //! eigenbasis, so each mode starts at its own phase, and that phase is the
 //! difference between a unison that beats once and settles and one that beats
-//! forever (`FUNDAMENTALS.md` §5.2, `engine::string`). It costs one FMA per mode
+//! forever (`docs/history/FUNDAMENTALS.md` §5.2, `engine::string`). It costs one FMA per mode
 //! per sample in [`Chunk::step`].
 //!
 //! State is stored SoA. The recurrence is serial along the sample axis, so the
@@ -218,7 +218,7 @@ impl ModalBank {
     /// `pub` for the same reason [`ModalBank::pole_radius`] is: a threshold that
     /// decides when a note ends has to be checkable against the thing it is
     /// applied to rather than against a proxy for it
-    /// (`tuner/examples/top_octave.rs`, `DECISIONS.md` 275-276).
+    /// (`forensics/src/bin/top_octave.rs`, `DECISIONS.md` 275-276).
     pub fn mode_amplitude(&self, k: usize) -> f32 {
         self.re[k].hypot(self.im[k])
     }
@@ -227,11 +227,6 @@ impl ModalBank {
     /// with [`ModalBank::push_mode`].
     pub fn mode_gain_im(&self, k: usize) -> f32 {
         self.g_im[k]
-    }
-
-    pub fn set_mode_gain(&mut self, k: usize, gain: f32) {
-        self.g_re[k] = gain;
-        self.g_im[k] = 0.0;
     }
 
     /// Rewrites mode `k`'s complex input gain, leaving its pole and its state

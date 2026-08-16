@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::estimate::compass::CompassCurve;
 use crate::estimate::decay::{DecayCurve, DecayReport, PolarizationSplit};
-use crate::estimate::hammer::{HammerFit, VelocityMap};
+use crate::estimate::hammer::VelocityMap;
 use crate::estimate::inharmonic::InharmonicFit;
 use crate::estimate::strike::StrikeFit;
 use crate::estimate::unison::UnisonEstimate;
@@ -186,7 +186,7 @@ pub struct Preset {
     pub hammer: HammerVoicing,
     pub soundboard: SoundboardVoicing,
     pub notes: NoteTables,
-    /// The action's own sounds. Absent means the levels `TUNING_REPORT.md` §5
+    /// The action's own sounds. Absent means the levels `docs/history/TUNING_REPORT.md` §5
     /// measured — the one defaulted field here whose default is not neutral,
     /// exactly as in the engine.
     #[serde(default, skip_serializing_if = "is_default_noise")]
@@ -206,9 +206,22 @@ pub struct Voicing {
     /// rate ratio of the same two exponentials.
     #[serde(serialize_with = "short::scalar")]
     pub horizontal_decay_ratio: f32,
-    #[serde(serialize_with = "short::list")]
+    /// **Inert** (`DECISIONS.md` 225), and the tuner writes nothing into it.
+    /// Kept in the schema because a preset written before the coupled string
+    /// construction still carries it and must still load; all zeros — the
+    /// default — is the value the engine's own warning is silent at.
+    #[serde(
+        default = "no_horizontal_offset",
+        skip_serializing_if = "is_no_horizontal_offset",
+        serialize_with = "short::list"
+    )]
     pub horizontal_offset_hz: Vec<f32>,
-    #[serde(serialize_with = "short::scalar")]
+    /// **Inert** (`DECISIONS.md` 225); see [`Voicing::horizontal_offset_hz`].
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        serialize_with = "short::scalar"
+    )]
     pub unison_coupling: f32,
     #[serde(serialize_with = "short::scalar")]
     pub resonance_coupling: f32,
@@ -216,7 +229,7 @@ pub struct Voicing {
     /// displacement either side of the key's own position. Because the two
     /// decay at very different rates, a nonzero spread makes a single note's
     /// balance *move* while it rings — the 1.2–6.2 dB of drift
-    /// `TUNING_REPORT.md` §5 measured on the recordings against 0.02–0.14 dB on
+    /// `docs/history/TUNING_REPORT.md` §5 measured on the recordings against 0.02–0.14 dB on
     /// the engine's own renders. Zero, the default, is the old mono-per-key
     /// image.
     #[serde(
@@ -234,7 +247,7 @@ pub struct Voicing {
     /// Decay-rate multipliers for the individual strings of a unison, one row
     /// per group size exactly like [`Voicing::unison_layout`]. Estimated from
     /// the drift of a beating composite partial's measured frequency
-    /// (`TUNING_REPORT.md` §6): strings that are mistuned *and* decay at
+    /// (`docs/history/TUNING_REPORT.md` §6): strings that are mistuned *and* decay at
     /// different rates move that frequency as the survivor takes over, and one
     /// shared damping law cannot. All ones is the shared law.
     #[serde(
@@ -248,7 +261,7 @@ pub struct Voicing {
     /// far the group's per-string share asymmetry tilts between them. Absent —
     /// the default — is the fitted, velocity-independent strike vector, which is
     /// what every preset written so far has. Nothing fits it yet
-    /// (`FUNDAMENTALS.md` §7.7's last row).
+    /// (`docs/history/FUNDAMENTALS.md` §7.7's last row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strike_direction: Option<StrikeDirection>,
 }
@@ -273,7 +286,7 @@ pub struct StrikeDirection {
 
 /// One within-string split: the two transverse planes of **one wire** at
 /// genuinely different frequencies, which is Capleton's false beat (JASA 115(2),
-/// 2004) and the only mechanism `FUNDAMENTALS.md` §7.4's measurements support
+/// 2004) and the only mechanism `docs/history/FUNDAMENTALS.md` §7.4's measurements support
 /// for the companion each recorded mid and low partial carries — 4–7 dB down,
 /// 0.7–1.5 Hz away, at a spacing that does **not** scale with the partial
 /// number. See `engine::preset::FalseBeat`.
@@ -489,7 +502,7 @@ pub struct NoteTables {
     pub inharmonicity_b: Vec<f32>,
     /// Fourth-order coefficient B4 of `f_k = k f0 sqrt(1 + B k^2 + B4 k^4)`,
     /// **signed**: a wound bass string's series curves one way and the short
-    /// wound tenor strings' the other (`TUNING_REPORT.md` §1). Absent means
+    /// wound tenor strings' the other (`docs/history/TUNING_REPORT.md` §1). Absent means
     /// zero, which is the two-parameter law exactly.
     #[serde(
         default = "zero_table",
@@ -529,7 +542,7 @@ pub struct NoteTables {
     /// Per-partial linear gain multipliers on the excitation comb, one row per
     /// key, 1-based in the partial index.
     ///
-    /// `TUNING_REPORT.md` §3's backlog item 6: the measured excitation is
+    /// `docs/history/TUNING_REPORT.md` §3's backlog item 6: the measured excitation is
     /// 5–10 dB rougher than any smooth envelope times `sin(k pi x)` and the
     /// roughness is not shared between notes at the same frequency, so it cannot
     /// be a bridge curve. Absent — the default — is one everywhere; a row may be
@@ -545,7 +558,7 @@ pub struct NoteTables {
     /// Per-partial multipliers on the note's fitted `sigma(f)` law, with the
     /// same shape rules as [`NoteTables::partial_gains`]. Applied before the
     /// polarization split, so both banks and the damper profile follow it
-    /// (`TUNING_REPORT.md` §2: the envelope law describes a real partial to
+    /// (`docs/history/TUNING_REPORT.md` §2: the envelope law describes a real partial to
     /// about 4 dB whatever produced it, and the residual is per partial).
     #[serde(
         default,
@@ -617,7 +630,7 @@ pub struct NoteTables {
     /// default — means the global scalar applies to the whole compass. The
     /// compass does not want one number: at the engine's ceiling of 0.4 the
     /// drift it produces is 0.24 dB at A0 and 8.67 dB at C5 against the
-    /// recordings' 1.24 and 5.33 (`TUNING_REPORT.md` §5).
+    /// recordings' 1.24 and 5.33 (`docs/history/TUNING_REPORT.md` §5).
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -628,7 +641,7 @@ pub struct NoteTables {
 
 /// The four mechanism events, and what each of them sounds like.
 ///
-/// The estimator's end of `engine::preset::NoiseTables`. `TUNING_REPORT.md` §5
+/// The estimator's end of `engine::preset::NoiseTables`. `docs/history/TUNING_REPORT.md` §5
 /// measured the table the engine defaults to; [`estimate::noise`](crate::estimate::noise)
 /// re-fits it from a library's own release and pedal recordings.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -741,7 +754,7 @@ impl NoiseTables {
     }
 }
 
-/// The mechanism as `TUNING_REPORT.md` §5 measured it — the engine's own
+/// The mechanism as `docs/history/TUNING_REPORT.md` §5 measured it — the engine's own
 /// default, duplicated here because the file is the interface between the two
 /// crates and a section written at its default must not appear in it.
 impl Default for NoiseTables {
@@ -813,6 +826,16 @@ fn is_zero_table(table: &[f32]) -> bool {
 
 fn is_zero(value: &f32) -> bool {
     *value == 0.0
+}
+
+/// The neutral [`Voicing::horizontal_offset_hz`]: no fixed hertz split on any
+/// string of a unison, which is the value the inert field asserts nothing at.
+fn no_horizontal_offset() -> Vec<f32> {
+    vec![0.0; MAX_UNISON]
+}
+
+fn is_no_horizontal_offset(offsets: &[f32]) -> bool {
+    offsets.len() == MAX_UNISON && offsets.iter().all(|&o| o == 0.0)
 }
 
 /// The neutral [`Voicing::unison_sigma_scale`]: every string of every group
@@ -915,7 +938,7 @@ impl Preset {
             }
         }
         // The fourth-order inharmonicity is the one signed table — the sign is
-        // the finding (`TUNING_REPORT.md` §1) — so entry by entry only
+        // the finding (`docs/history/TUNING_REPORT.md` §1) — so entry by entry only
         // finiteness can be checked. What the value has to *do* is checked
         // below, against the series it produces.
         table_length("inharmonicity_b4", n.inharmonicity_b4.len())?;
@@ -1864,13 +1887,6 @@ impl NoteEstimate {
         self.contact_width = fit.contact_width;
         self
     }
-
-    pub fn with_hammer(mut self, fit: &HammerFit) -> Self {
-        self.hammer_mass = Some(fit.felt.mass);
-        self.hammer_stiffness = Some(fit.felt.stiffness);
-        self.hammer_exponent = Some(fit.felt.exponent);
-        self
-    }
 }
 
 /// Assembles a preset from a base and a set of per-note estimates.
@@ -1880,7 +1896,6 @@ pub struct PresetBuilder {
     notes: Vec<NoteEstimate>,
     polarization: Option<PolarizationSplit>,
     velocity_map: Option<VelocityMap>,
-    sigma_scale: Option<Vec<UnisonSigmaScale>>,
     pan_spread: Option<f32>,
     noise: Option<NoiseTables>,
     partial_gains: Option<Vec<Vec<f32>>>,
@@ -1898,16 +1913,11 @@ impl PresetBuilder {
             notes: Vec::new(),
             polarization: None,
             velocity_map: None,
-            sigma_scale: None,
             pan_spread: None,
             noise: None,
             partial_gains: None,
             partial_sigma_scale: None,
         }
-    }
-
-    pub fn from_base_file(path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self::new(Preset::load(path)?))
     }
 
     pub fn name(mut self, name: impl Into<String>) -> Self {
@@ -1940,15 +1950,6 @@ impl PresetBuilder {
         self
     }
 
-    /// The per-string decay spread, which is global in the engine: one row per
-    /// unison size, normally
-    /// [`SigmaSpread::rows`](crate::estimate::spread::SigmaSpread::rows) over
-    /// the notes that showed the drift.
-    pub fn sigma_scale(mut self, rows: Vec<UnisonSigmaScale>) -> Self {
-        self.sigma_scale = Some(rows);
-        self
-    }
-
     /// How far apart the two polarizations are panned. Not estimated by stage
     /// 1: what a recording shows is the *drift* of one note's balance
     /// ([`residual::stereo_balance`](crate::residual::stereo_balance)), and
@@ -1968,7 +1969,7 @@ impl PresetBuilder {
 
     /// The per-partial excitation gains, one ragged row per key, from
     /// [`estimate::shaping`](crate::estimate::shaping). Not interpolated across
-    /// the compass and deliberately so: `TUNING_REPORT.md` §3 measured that the
+    /// the compass and deliberately so: `docs/history/TUNING_REPORT.md` §3 measured that the
     /// roughness is *not* shared between notes at the same frequency, so a row
     /// invented for an unsampled key would be its neighbour's roughness under
     /// its own partials. An unsampled key gets an empty row, which is 1.0
@@ -2137,9 +2138,6 @@ impl PresetBuilder {
         if let Some(map) = self.velocity_map {
             preset.hammer.velocity_min = map.velocity_min as f32;
             preset.hammer.velocity_max = map.velocity_max as f32;
-        }
-        if let Some(rows) = &self.sigma_scale {
-            preset.voicing.unison_sigma_scale = rows.clone();
         }
         if let Some(spread) = self.pan_spread {
             preset.voicing.polarization_pan_spread = spread;
@@ -2341,10 +2339,20 @@ mod tests {
         // module reads what the engine writes, and writes what the engine
         // reads. A field added on either side, or renamed, or reordered, fails
         // here.
-        let text = std::fs::read_to_string(default_preset_path()).expect("read");
-        let preset = Preset::from_toml(&text).expect("parse");
-        assert_eq!(preset.to_toml(), text);
-        assert_eq!(preset.notes.f0_hz.len(), NUM_KEYS);
+        //
+        // Both shipped files, not just the hand-tuned one: `salamander-c5.toml`
+        // is the file this crate's own factory rewrites, and it is the one that
+        // would silently re-acquire a stripped field (`DECISIONS.md` 324) if a
+        // `skip_serializing_if` were ever dropped on this side.
+        for path in [
+            default_preset_path(),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/salamander-c5.toml"),
+        ] {
+            let text = std::fs::read_to_string(&path).expect("read");
+            let preset = Preset::from_toml(&text).expect("parse");
+            assert_eq!(preset.to_toml(), text, "{} does not round trip", path.display());
+            assert_eq!(preset.notes.f0_hz.len(), NUM_KEYS);
+        }
     }
 
     /// `validate` is duplicated across the two crates rather than shared, so
@@ -3038,15 +3046,6 @@ mod tests {
                 contact_width: Some(0.012),
                 ..NoteEstimate::new(72)
             })
-            .sigma_scale(vec![
-                UnisonSigmaScale { scale: vec![1.0] },
-                UnisonSigmaScale {
-                    scale: vec![0.85, 1.15],
-                },
-                UnisonSigmaScale {
-                    scale: vec![0.85, 1.0, 1.15],
-                },
-            ])
             .pan_spread(0.22)
             .noise(NoiseTables {
                 key_off: EventNoise {
@@ -3067,7 +3066,6 @@ mod tests {
         assert!(between > 0.012 && between < 0.018, "{between}");
         assert_eq!(preset.notes.contact_width[key_index(21).unwrap()], 0.018);
         assert_eq!(preset.voicing.polarization_pan_spread, 0.22);
-        assert_eq!(preset.voicing.unison_sigma_scale[1].scale, vec![0.85, 1.15]);
         assert_eq!(preset.noise.key_off.centroid_hz, 205.0);
         // ... and a preset the engine will play.
         assert!(piano_emulator::Preset::from_toml(&preset.to_toml()).is_ok());

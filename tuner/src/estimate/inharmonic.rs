@@ -22,7 +22,7 @@
 //! # The fourth-order term, and when it is not fitted
 //!
 //! One `B` describes the measured series to 1–5 cents from D#2 up and misplaces
-//! partials by up to 78 cents below it (`TUNING_REPORT.md` §1): a wound bass
+//! partials by up to 78 cents below it (`docs/history/TUNING_REPORT.md` §1): a wound bass
 //! string's `B` *falls* 25–37 % along its own series and the short wound tenor
 //! strings' *rises* 24–45 %. The diagnostic that found it is a `B` fitted twice
 //! over disjoint bands of `k` and the ratio of the two, and that is exactly the
@@ -73,7 +73,7 @@ pub struct InharmonicConfig {
     pub fourth_order: bool,
     /// The two bands of the diagnostic, as inclusive ranges of `k`.
     ///
-    /// The low band is `TUNING_REPORT.md` §1's own: partials 1–8, which is
+    /// The low band is `docs/history/TUNING_REPORT.md` §1's own: partials 1–8, which is
     /// where a single `B` is always anchored. The high band is *not* — §1 used
     /// 14–26 and this is everything above the split, bounded only by
     /// [`Self::max_partial`] — and the difference was measured rather than
@@ -104,7 +104,7 @@ pub struct InharmonicConfig {
     pub band_sigmas: f64,
     /// Largest the `B4 k^4` term may be, at the highest partial the fit used,
     /// as a fraction of the `B k^2` term there. The measured shifts are
-    /// 25–45 % (`TUNING_REPORT.md` §1); past this the quartic has run away and
+    /// 25–45 % (`docs/history/TUNING_REPORT.md` §1); past this the quartic has run away and
     /// the two-parameter answer is reported instead.
     pub max_band_shift: f64,
     /// Multiple of the series' own local spacing at which a step from one
@@ -267,7 +267,7 @@ pub fn fit_inharmonic_partials(
 /// there to within a cent, track 25 lands 21 Hz above the peak the spectrum
 /// has and 12 Hz below the next, and from 26 up every track is the partial
 /// above its index. Fitting all of them is what gave A0 the `B` the preset
-/// wrote, and with it the 78 cents of misplaced fundamental `TUNING_REPORT.md`
+/// wrote, and with it the 78 cents of misplaced fundamental `docs/history/TUNING_REPORT.md`
 /// §1 reports.
 ///
 /// Only consecutive indices are compared: a partial that was never tracked at
@@ -464,7 +464,7 @@ fn refine(
 ///
 /// The unconstrained fit is taken whole where it is [`plausible`]. Where it is
 /// not — and in the wound bass it usually is not, because the shape
-/// `TUNING_REPORT.md` §1 measures is larger than one `k^4` term can carry
+/// `docs/history/TUNING_REPORT.md` §1 measures is larger than one `k^4` term can carry
 /// without folding the top of the series — the term is shrunk rather than
 /// dropped: the coefficient is scaled towards zero and `(f0, B)` refitted
 /// against what is left, by bisection on the largest fraction that is still a
@@ -689,7 +689,7 @@ fn model_from_coefficients(c: &[f64]) -> Result<InharmonicModel> {
     // A negative slope is a negative B: a string whose partials converge, which
     // no string does. It means the data is noise-dominated; report the
     // harmonic layout rather than a square root of a negative number. `B4` is
-    // *not* clamped — its sign is the finding (`TUNING_REPORT.md` §1) — and
+    // *not* clamped — its sign is the finding (`docs/history/TUNING_REPORT.md` §1) — and
     // what keeps it a layout is `plausible`.
     Ok(InharmonicModel::with_b4(
         intercept.sqrt(),
@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn an_exact_fourth_order_series_gives_up_both_coefficients() {
         // A wound bass string's shape: `B` at the top of the series is 25 %
-        // below `B` at the bottom, which is `TUNING_REPORT.md` §1's A0.
+        // below `B` at the bottom, which is `docs/history/TUNING_REPORT.md` §1's A0.
         let truth = InharmonicModel::with_b4(27.5, 3.0e-4, -1.9e-7);
         let fit = fit_inharmonic_partials(&quartic(truth, 26), &InharmonicConfig::default())
             .unwrap();

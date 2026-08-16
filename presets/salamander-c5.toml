@@ -5,12 +5,6 @@ description = "estimated by piano-tuner from data/salamander/SalamanderGrandPian
 excitation_scale = 0.4
 horizontal_gain_db = -27.61234
 horizontal_decay_ratio = 0.17211238
-horizontal_offset_hz = [
-    0.35,
-    0.52,
-    0.27,
-]
-unison_coupling = 0.02
 resonance_coupling = 0.010398103
 polarization_pan_spread = 0.4
 
@@ -205,22 +199,6 @@ share = [
     1.09,
     1.0,
     0.91,
-]
-
-[[voicing.unison_sigma_scale]]
-scale = [1.0]
-
-[[voicing.unison_sigma_scale]]
-scale = [
-    1.0,
-    1.0,
-]
-
-[[voicing.unison_sigma_scale]]
-scale = [
-    0.87782794,
-    1.0,
-    1.1221721,
 ]
 
 [[voicing.damper_weight]]

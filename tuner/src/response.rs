@@ -346,11 +346,6 @@ fn resonator(mode: &DuplexMode) -> (f32, f32, f32) {
     (r, w, 2.0 * 10f32.powf(mode.gain_db / 20.0) * (1.0 - r))
 }
 
-/// Decay rate of a segment, 1/s.
-pub fn duplex_sigma(mode: &DuplexMode) -> f32 {
-    T60_DECADES / mode.t60_s
-}
-
 /// `|D(f)|` of a whole row of segments as realised: signal out per unit of
 /// drive at `hz` (`engine::duplex::magnitude`).
 ///
