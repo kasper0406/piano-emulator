@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="piano emulator" width="640">
+</p>
+
 # piano-emulator
 
 A physically modeled (simulated) grand piano — no samples. Every note is synthesized in real time from a model of the instrument: stiff strings, felt hammers, dampers, pedals, and a soundboard. The design goal is sound quality first, with all model parameters exposed so they can later be fitted automatically to recordings of real pianos (see `TUNING.md`).

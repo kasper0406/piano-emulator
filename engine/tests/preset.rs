@@ -228,4 +228,29 @@ fn the_measured_presets_provenance_list_matches_its_own_tables() {
         measured.iter().all(|key| (key - 21) % 3 == 0),
         "the measured keys are not the library's own: {measured:?}"
     );
+
+    // The decay list is its own, and it is deliberately not the same set
+    // (`DECISIONS.md` 304): every key it names carries a `partial_sigma_scale`
+    // row, no key the library sampled is in it, and the two lists disagree —
+    // which is the whole reason there are two of them.
+    let drawn_decay = &preset.notes.synthesized_decay;
+    assert!(
+        !drawn_decay.is_empty(),
+        "the shipped preset draws no decay rows"
+    );
+    for &key in drawn_decay {
+        let index = usize::from(key - piano_emulator::types::LOWEST_KEY);
+        assert!(
+            !preset.notes.partial_sigma_scale[index].is_empty(),
+            "key {key} is named as a drawn decay and carries no row"
+        );
+        assert!(
+            (key - 21) % 3 != 0,
+            "key {key} is one the library sampled and its decay row is not a draw"
+        );
+    }
+    assert_ne!(
+        drawn_decay, drawn,
+        "the two provenance lists are the same set and one of them is redundant"
+    );
 }

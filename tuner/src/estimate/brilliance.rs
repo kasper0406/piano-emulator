@@ -114,6 +114,14 @@ pub fn hf_ratio(engine: &[f64], reference: &[f64], sample_rate: f64, bnd: (f64, 
 /// free of every gain in the chain, so the difference of two drops is free of
 /// the level offset, of the master gain, and of the band's own filter. Negative
 /// means `engine`'s band dies faster than `reference`'s.
+///
+/// **This number is a bound and not a measurement wherever either signal's late
+/// reading has fallen into that signal's own floor**, which on these recordings
+/// is most of the compass in [`HF2`] (`DECISIONS.md` 319). It has no floor
+/// discipline because it cannot have any: two spectra do not say what is under
+/// them. [`band_decay`] takes each signal's own late-time floor as well and
+/// returns the same number with the direction it is bounded in beside it; every
+/// caller that *reports* this statistic should use that one.
 pub fn band_decay_gap(
     engine_early: &[f64],
     engine_late: &[f64],
@@ -124,6 +132,109 @@ pub fn band_decay_gap(
 ) -> f64 {
     db(band(engine_late, sample_rate, bnd) / band(engine_early, sample_rate, bnd))
         - db(band(reference_late, sample_rate, bnd) / band(reference_early, sample_rate, bnd))
+}
+
+/// Which way a floor tells us the truth lies from [`BandDecay::gap_db`].
+///
+/// A late reading that has fallen into its own signal's floor reads the floor,
+/// which is *higher* than the band really is, so that signal's own drop is
+/// under-stated. Under-stating the engine's drop raises the gap and
+/// under-stating the reference's lowers it — so one saturated side leaves a
+/// one-sided bound and two leave nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GapBound {
+    /// Both late readings stand [`FLOOR_MARGIN_DB`] over their own floors.
+    Measured,
+    /// The reference is inside its floor: the truth is at least the number.
+    AtLeast,
+    /// The engine is inside its floor: the truth is at most the number.
+    AtMost,
+    /// Both are: the number says nothing in either direction.
+    Unresolved,
+}
+
+/// One band's decay gap with the headroom each signal's own floor leaves it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandDecay {
+    /// [`band_decay_gap`]: `engine` minus `reference`, dB.
+    pub gap_db: f64,
+    /// How far the engine's late reading stands over the engine's own late-time
+    /// floor in this band, dB.
+    pub engine_headroom_db: f64,
+    /// The same for the reference.
+    pub reference_headroom_db: f64,
+}
+
+impl BandDecay {
+    /// What the gap is evidence of, given the two headrooms.
+    pub fn bound(&self) -> GapBound {
+        match (
+            self.engine_headroom_db >= FLOOR_MARGIN_DB,
+            self.reference_headroom_db >= FLOOR_MARGIN_DB,
+        ) {
+            (true, true) => GapBound::Measured,
+            (true, false) => GapBound::AtLeast,
+            (false, true) => GapBound::AtMost,
+            (false, false) => GapBound::Unresolved,
+        }
+    }
+
+    /// Whether both sides of the gap are measurements.
+    pub fn is_measured(&self) -> bool {
+        self.bound() == GapBound::Measured
+    }
+
+    /// The mark a report puts beside the number: `≥`, `≤`, `?` or nothing.
+    pub fn mark(&self) -> &'static str {
+        match self.bound() {
+            GapBound::Measured => " ",
+            GapBound::AtLeast => "≥",
+            GapBound::AtMost => "≤",
+            GapBound::Unresolved => "?",
+        }
+    }
+}
+
+/// [`band_decay_gap`] with each signal's own late-time floor spectrum beside the
+/// two instants, so that a saturated reading is reported as the bound it is.
+///
+/// The floor spectrum is the same thing [`floor_under_peak`] reads and from the
+/// same instant ([`FLOOR_FROM_S`]): what is left in the band when the note is
+/// over. A late reading within [`FLOOR_MARGIN_DB`] of it is not that band's
+/// energy, it is the room and the tape on the recording and the board field and
+/// the halo on the render — and the drop computed from it is a lower bound on
+/// the drop that really happened, never the drop itself.
+///
+/// This is `DECISIONS.md` 89 and 293's rule taken to the *band*: item 304 put it
+/// on every partial and left the band statistic the milestone is gated on
+/// without it, which is how a reference side that was sitting 0.4-7.0 dB over
+/// its own floor came to be read as an engine overshoot (`DECISIONS.md` 319).
+#[allow(clippy::too_many_arguments)]
+pub fn band_decay(
+    engine_early: &[f64],
+    engine_late: &[f64],
+    engine_floor: &[f64],
+    reference_early: &[f64],
+    reference_late: &[f64],
+    reference_floor: &[f64],
+    sample_rate: f64,
+    bnd: (f64, f64),
+) -> BandDecay {
+    let headroom = |late: &[f64], floor: &[f64]| {
+        db(band(late, sample_rate, bnd) / band(floor, sample_rate, bnd))
+    };
+    BandDecay {
+        gap_db: band_decay_gap(
+            engine_early,
+            engine_late,
+            reference_early,
+            reference_late,
+            sample_rate,
+            bnd,
+        ),
+        engine_headroom_db: headroom(engine_late, engine_floor),
+        reference_headroom_db: headroom(reference_late, reference_floor),
+    }
 }
 
 /// The envelope of the band around `hz`, in dB, one point per millisecond.
@@ -419,6 +530,70 @@ mod tests {
         // The engine drops 20 dB where the reference drops 10.
         let gap = band_decay_gap(&e0, &e1, &r0, &r1, SR, HF1);
         assert!((gap + 10.0).abs() < 1e-9, "gap {gap}");
+    }
+
+    #[test]
+    fn a_band_decay_reads_each_sides_headroom_over_its_own_floor() {
+        let (e0, e1) = (flat(2049, 1.0), flat(2049, 0.01));
+        let (r0, r1) = (flat(2049, 5.0), flat(2049, 0.5));
+        // Both floors 30 dB under their own late reading.
+        let d = band_decay(
+            &e0,
+            &e1,
+            &flat(2049, 0.01e-3),
+            &r0,
+            &r1,
+            &flat(2049, 0.5e-3),
+            SR,
+            HF1,
+        );
+        assert!((d.gap_db + 10.0).abs() < 1e-9, "gap {}", d.gap_db);
+        assert!((d.engine_headroom_db - 30.0).abs() < 1e-9);
+        assert!((d.reference_headroom_db - 30.0).abs() < 1e-9);
+        assert_eq!(d.bound(), GapBound::Measured);
+        assert!(d.is_measured());
+    }
+
+    #[test]
+    fn a_saturated_side_makes_the_gap_a_one_sided_bound() {
+        // The case the milestone was read wrong on: the reference's late
+        // reading has fallen into the recording's own floor, so its drop is
+        // under-stated and the gap is a *lower* bound on the truth. Whatever
+        // the sign of the number, "the engine decays faster" is not in it.
+        let (e0, e1) = (flat(2049, 1.0), flat(2049, 0.01));
+        let (r0, r1) = (flat(2049, 5.0), flat(2049, 0.5));
+        let deep = flat(2049, 1e-9);
+        let at_floor = flat(2049, 0.4);
+        let reference_saturated = band_decay(&e0, &e1, &deep, &r0, &r1, &at_floor, SR, HF1);
+        assert_eq!(reference_saturated.bound(), GapBound::AtLeast);
+        assert!(!reference_saturated.is_measured());
+        assert_eq!(reference_saturated.mark(), "≥");
+        // The truth: had the recording's floor been lower, the reference would
+        // have shown a bigger drop and the gap would have been larger.
+        let unsaturated = band_decay(&e0, &e1, &deep, &r0, &flat(2049, 0.05), &deep, SR, HF1);
+        assert!(
+            unsaturated.gap_db > reference_saturated.gap_db,
+            "{} against {}",
+            unsaturated.gap_db,
+            reference_saturated.gap_db
+        );
+        // The mirror image, and both at once.
+        let engine_saturated = band_decay(&e0, &e1, &flat(2049, 0.008), &r0, &r1, &deep, SR, HF1);
+        assert_eq!(engine_saturated.bound(), GapBound::AtMost);
+        let neither = band_decay(&e0, &e1, &flat(2049, 0.008), &r0, &r1, &at_floor, SR, HF1);
+        assert_eq!(neither.bound(), GapBound::Unresolved);
+        assert_eq!(neither.mark(), "?");
+    }
+
+    #[test]
+    fn the_bounded_gap_is_the_plain_one() {
+        let (e0, e1) = (flat(2049, 1.0), flat(2049, 0.01));
+        let (r0, r1) = (flat(2049, 5.0), flat(2049, 0.5));
+        for bnd in [HF1, HF2, FULL] {
+            let d = band_decay(&e0, &e1, &flat(2049, 1e-9), &r0, &r1, &flat(2049, 1e-9), SR, bnd);
+            let plain = band_decay_gap(&e0, &e1, &r0, &r1, SR, bnd);
+            assert!((d.gap_db - plain).abs() < 1e-12, "{} {plain}", d.gap_db);
+        }
     }
 
     /// A spectrum that is zero everywhere except a narrow line at each partial,

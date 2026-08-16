@@ -69,6 +69,10 @@ name = "brilliance"
 required-features = ["diagnostics"]
 
 [[example]]
+name = "chain_fit"
+required-features = ["diagnostics"]
+
+[[example]]
 name = "drift_line"
 required-features = ["diagnostics"]
 

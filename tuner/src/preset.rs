@@ -88,6 +88,33 @@ pub const MAX_SHARE_TILT: f32 = 0.2;
 /// (`engine::string::{MIN,MAX}_PARTIAL_SIGMA_SCALE`).
 pub const MIN_PARTIAL_SIGMA_SCALE: f32 = 0.25;
 pub const MAX_PARTIAL_SIGMA_SCALE: f32 = 4.0;
+
+/// One provenance list — `notes.synthesized_texture` or
+/// `notes.synthesized_decay` — checked the way the engine checks it: real keys,
+/// in order, each named once.
+///
+/// Strictly ascending does both jobs at once, and it is checked rather than
+/// sorted on load because a list that names a key twice is a list somebody
+/// built by appending, and the second entry is the one that would be lost.
+fn validate_provenance(name: &str, list: &[u8]) -> Result<()> {
+    let mut previous: Option<u8> = None;
+    for &key in list {
+        if !(LOWEST_KEY..=HIGHEST_KEY).contains(&key) {
+            return Err(Error::Preset(format!(
+                "{name} names key {key}, outside {LOWEST_KEY}..={HIGHEST_KEY}"
+            )));
+        }
+        if let Some(last) = previous {
+            if key <= last {
+                return Err(Error::Preset(format!(
+                    "{name} is not strictly ascending: {key} after {last}"
+                )));
+            }
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
 /// Bounds on `[noise.strike]`, mirroring `engine::preset`. The bandwidth is the
 /// one field the four action events do not have: their 2 kHz ceiling is
 /// Askenfelt's structure-borne measurement of the *action*, and a hammer meeting
@@ -578,6 +605,14 @@ pub struct NoteTables {
     /// the file — is a preset every row of which is a measurement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub synthesized_texture: Vec<u8>,
+    /// The keys whose `partial_sigma_scale` row was **drawn** rather than
+    /// measured: the engine's `notes.synthesized_decay`, same rules, same
+    /// validation. See that field for why it is a sibling of
+    /// `synthesized_texture` and not the same list — the decay stage draws per
+    /// *band* rather than per key, and may only declare a key whose row it owns
+    /// outright, because this list is also the list the re-fit clears.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_decay: Vec<u8>,
     /// Per-key override of `voicing.polarization_pan_spread`. Empty — the
     /// default — means the global scalar applies to the whole compass. The
     /// compass does not want one number: at the engine's ceiling of 0.4 the
@@ -988,6 +1023,7 @@ impl Preset {
         self.validate_partial_tables(&partial_counts)?;
         self.validate_false_beats(&partial_counts)?;
         self.validate_synthesized_texture()?;
+        validate_provenance("notes.synthesized_decay", &self.notes.synthesized_decay)?;
 
         let v = &self.voicing;
         positive("voicing.excitation_scale", v.excitation_scale)?;
@@ -1314,24 +1350,7 @@ impl Preset {
     /// The provenance list: the engine's `validate_synthesized_texture`, on the
     /// same bounds and with the same messages.
     fn validate_synthesized_texture(&self) -> Result<()> {
-        let mut previous: Option<u8> = None;
-        for &key in &self.notes.synthesized_texture {
-            if !(LOWEST_KEY..=HIGHEST_KEY).contains(&key) {
-                return Err(Error::Preset(format!(
-                    "notes.synthesized_texture names key {key}, outside \
-                     {LOWEST_KEY}..={HIGHEST_KEY}"
-                )));
-            }
-            if let Some(last) = previous {
-                if key <= last {
-                    return Err(Error::Preset(format!(
-                        "notes.synthesized_texture is not strictly ascending: {key} after {last}"
-                    )));
-                }
-            }
-            previous = Some(key);
-        }
-        Ok(())
+        validate_provenance("notes.synthesized_texture", &self.notes.synthesized_texture)
     }
 
     /// The bridge admittance's shape, and what it does to the coupling loop.
@@ -2387,6 +2406,7 @@ mod tests {
         preset.notes.partial_gains[0] = vec![0.5, 1.75];
         preset.notes.partial_sigma_scale = vec![Vec::new(); NUM_KEYS];
         preset.notes.partial_sigma_scale[39] = vec![0.6, 1.0, 1.9];
+        preset.notes.synthesized_decay = vec![39 + LOWEST_KEY];
         // The two motion mechanisms: a within-string split on one key, and the
         // velocity law for the strike vector's direction.
         preset.notes.false_beat = vec![Vec::new(); NUM_KEYS];
@@ -2536,7 +2556,7 @@ mod tests {
 
     #[test]
     fn both_crates_refuse_the_same_broken_voicing() {
-        let breakages: [fn(&mut Preset); 114] = [
+        let breakages: [fn(&mut Preset); 118] = [
             // The two motion mechanisms, on the same bounds the engine states.
             |p| p.notes.false_beat = vec![Vec::new(); NUM_KEYS - 1],
             // The provenance list: real keys, in order, once each.
@@ -2544,6 +2564,10 @@ mod tests {
             |p| p.notes.synthesized_texture = vec![HIGHEST_KEY + 1],
             |p| p.notes.synthesized_texture = vec![61, 60],
             |p| p.notes.synthesized_texture = vec![60, 60],
+            |p| p.notes.synthesized_decay = vec![LOWEST_KEY - 1],
+            |p| p.notes.synthesized_decay = vec![HIGHEST_KEY + 1],
+            |p| p.notes.synthesized_decay = vec![61, 60],
+            |p| p.notes.synthesized_decay = vec![60, 60],
             |p| p.notes.false_beat = split_with(|e| e.k = 0),
             |p| p.notes.false_beat = split_with(|e| e.hz = 0.05),
             |p| p.notes.false_beat = split_with(|e| e.hz = 4.0),

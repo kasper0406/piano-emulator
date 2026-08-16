@@ -71,7 +71,8 @@ use piano_tuner::cache;
 use piano_tuner::realism::{self, Phrase, VelocityLayers, PHRASE_SET_VERSION};
 use piano_tuner::sampler::SAMPLER_VERSION;
 use piano_tuner::estimate::brilliance::{
-    band, band_decay_gap, continuation_db, fitted_t60, floor_under_peak, hf_ratio, narrowband_db,
+    band, band_decay, continuation_db, fitted_t60, floor_under_peak, hf_ratio, narrowband_db,
+    BandDecay, FLOOR_FROM_S,
     trim_gain_db, FULL, HF1, HF2, TRIM_CAP_DB,
 };
 use piano_tuner::estimate::shaping::MAX_ROW_CELLS;
@@ -171,20 +172,45 @@ fn db(ratio: f64) -> f64 {
     10.0 * ratio.max(1e-30).log10()
 }
 
-/// [`band_decay_gap`] over the two instants of this tool, off two renders.
-fn decay_gap(stft: &Stft, engine: &[f32], reference: &[f32], bnd: (f64, f64)) -> f64 {
+/// [`band_decay`] over the two instants of this tool, off two renders, with the
+/// headroom each signal's own late-time floor leaves it.
+///
+/// A gap whose reference side has fallen into the recording's own floor is a
+/// **bound** and not a measurement, and above 6 kHz that is most of this
+/// compass (`DECISIONS.md` 319) — so this returns the whole reading and the
+/// tables print the mark rather than the number alone.
+fn decay_gap(stft: &Stft, engine: &[f32], reference: &[f32], bnd: (f64, f64)) -> Option<BandDecay> {
     let at = |signal: &[f32], t: f64| {
         frame_power(stft, signal, (t * f64::from(SAMPLE_RATE)) as usize)
     };
-    let (Some(e0), Some(e1), Some(r0), Some(r1)) = (
+    let floor = |signal: &[f32]| at(signal, FLOOR_FROM_S);
+    let (Some(e0), Some(e1), Some(ef), Some(r0), Some(r1), Some(rf)) = (
         at(engine, INSTANTS[0]),
         at(engine, INSTANTS[1]),
+        floor(engine),
         at(reference, INSTANTS[0]),
         at(reference, INSTANTS[1]),
+        floor(reference),
     ) else {
-        return f64::NAN;
+        return None;
     };
-    band_decay_gap(&e0, &e1, &r0, &r1, SR, bnd)
+    Some(band_decay(&e0, &e1, &ef, &r0, &r1, &rf, SR, bnd))
+}
+
+/// The gap alone, for a column that has no room for its mark.
+fn gap_db(cell: Option<BandDecay>) -> f64 {
+    cell.map_or(f64::NAN, |d| d.gap_db)
+}
+
+/// The bound the *median* cell of a column carries, read off the same cells the
+/// median is.
+fn bound_mark(cells: &[BandDecay]) -> &'static str {
+    BandDecay {
+        gap_db: f64::NAN,
+        engine_headroom_db: median(cells.iter().map(|d| d.engine_headroom_db)),
+        reference_headroom_db: median(cells.iter().map(|d| d.reference_headroom_db)),
+    }
+    .mark()
 }
 
 /// Both bands at both instants: `[hf1@0.1, hf2@0.1, hf1@1.0, hf2@1.0]`.
@@ -358,8 +384,8 @@ struct Row {
     reference_bands: [Vec<f64>; INSTANTS.len()],
     layer_bands: [Vec<f64>; INSTANTS.len()],
     /// Engine-minus-reference decay of `[full, 2-6k, 6-12k]` over the interval.
-    decay_gap: [f64; 3],
-    layer_decay_gap: [f64; 3],
+    decay_gap: [Option<BandDecay>; 3],
+    layer_decay_gap: [Option<BandDecay>; 3],
     /// The fundamental's own fitted T60 on the engine and on the recording.
     tail: [Option<f64>; 2],
     /// The same, for each of [`PARTIAL_PROBE`]; empty off [`PROBE_KEYS`].
@@ -618,11 +644,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r.layer[1].abs(),
             r.layer[2].abs(),
             r.layer[3].abs(),
-            r.decay_gap[0],
-            r.decay_gap[1],
-            r.decay_gap[2],
-            r.layer_decay_gap[1].abs(),
-            r.layer_decay_gap[2].abs(),
+            gap_db(r.decay_gap[0]),
+            gap_db(r.decay_gap[1]),
+            gap_db(r.decay_gap[2]),
+            gap_db(r.layer_decay_gap[1]).abs(),
+            gap_db(r.layer_decay_gap[2]).abs(),
         );
     }
 
@@ -684,25 +710,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{:<14} {:>10} {:>10} {:>10} {:>18}",
         "register", "full", "2-6k", "6-12k", "floor 2-6k/6-12k"
     );
+    println!(
+        "  a cell marked `≥` has its reference side inside the recording's own floor and is a lower bound; \
+         `≤` is the engine's side, `?` is both (`DECISIONS.md` 319)"
+    );
     for &(name, lo, hi) in &registers {
         let sel = || rows.iter().filter(move |r| (lo..=hi).contains(&r.key));
+        let cell = |b: usize| -> String {
+            let cells: Vec<BandDecay> = sel().filter_map(|r| r.decay_gap[b]).collect();
+            format!(
+                "{:>+9.2}{}",
+                median(cells.iter().map(|d| d.gap_db)),
+                bound_mark(&cells)
+            )
+        };
         println!(
-            "{name:<14} {:>+10.2} {:>+10.2} {:>+10.2} {:>9.2}/{:<8.2}",
-            median(sel().map(|r| r.decay_gap[0])),
-            median(sel().map(|r| r.decay_gap[1])),
-            median(sel().map(|r| r.decay_gap[2])),
-            median(sel().map(|r| r.layer_decay_gap[1].abs())),
-            median(sel().map(|r| r.layer_decay_gap[2].abs())),
+            "{name:<14} {} {} {} {:>9.2}/{:<8.2}",
+            cell(0),
+            cell(1),
+            cell(2),
+            median(sel().map(|r| gap_db(r.layer_decay_gap[1]).abs())),
+            median(sel().map(|r| gap_db(r.layer_decay_gap[2]).abs())),
         );
     }
     println!(
         "{:<14} {:>+10.2} {:>+10.2} {:>+10.2} {:>9.2}/{:<8.2}",
         "ALL median",
-        median(rows.iter().map(|r| r.decay_gap[0])),
-        median(rows.iter().map(|r| r.decay_gap[1])),
-        median(rows.iter().map(|r| r.decay_gap[2])),
-        median(rows.iter().map(|r| r.layer_decay_gap[1].abs())),
-        median(rows.iter().map(|r| r.layer_decay_gap[2].abs())),
+        median(rows.iter().map(|r| gap_db(r.decay_gap[0]))),
+        median(rows.iter().map(|r| gap_db(r.decay_gap[1]))),
+        median(rows.iter().map(|r| gap_db(r.decay_gap[2]))),
+        median(rows.iter().map(|r| gap_db(r.layer_decay_gap[1]).abs())),
+        median(rows.iter().map(|r| gap_db(r.layer_decay_gap[2]).abs())),
     );
 
     // ---- the fundamental's own tail ---------------------------------------

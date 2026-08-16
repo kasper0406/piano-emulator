@@ -222,7 +222,19 @@ impl LogLine {
 
     /// The line's value at `key` times one draw of its own scatter.
     pub fn draw(&self, key: u8, rng: &mut Draw) -> f64 {
-        (self.intercept + self.slope * f64::from(key) + self.sigma * rng.normal()).exp()
+        self.at_deviate(key, rng.normal())
+    }
+
+    /// The line's value at `key` displaced by `z` of its **own** standard
+    /// deviations.
+    ///
+    /// For a caller that has to draw two quantities of one key *coherently* —
+    /// two statistics of the same recording of the same note do not scatter
+    /// independently, and drawing them as though they did lets one key come out
+    /// long in one and short in the other — and for a caller that has a deviate
+    /// of its own rather than a stream to take one from.
+    pub fn at_deviate(&self, key: u8, z: f64) -> f64 {
+        (self.intercept + self.slope * f64::from(key) + self.sigma * z).exp()
     }
 }
 

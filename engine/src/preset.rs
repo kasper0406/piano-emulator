@@ -1072,6 +1072,36 @@ pub struct NoteTables {
     /// so the list cannot name a key twice or a key that does not exist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub synthesized_texture: Vec<u8>,
+    /// The keys whose [`NoteTables::partial_sigma_scale`] row was **drawn**
+    /// rather than measured (`DECISIONS.md` 304).
+    ///
+    /// A sibling of [`NoteTables::synthesized_texture`] and deliberately not the
+    /// same list, because the two do not cover the same keys and each stage has
+    /// to clear exactly its own to stay idempotent. The texture stage draws for
+    /// the keys the library never sampled; the decay stage draws **per band**
+    /// rather than per key — a key the library did sample still has its 6-12 kHz
+    /// drawn for where its own recording resolves too few partials there to read
+    /// a band off — and it refuses any band whose correction its measurements
+    /// cannot resolve, so its list is neither a subset nor a superset of the
+    /// other. Folding both into one list would say "this key's rows are drawn"
+    /// of a key with a measured gain row and a drawn decay row, which is what
+    /// the field exists to distinguish.
+    ///
+    /// The decay stage may only declare a key here if the row is **its own**:
+    /// the list is also the clearing list, and a sampled key's row can carry
+    /// cells from the shaping stage that this one cannot reproduce
+    /// (`DECISIONS.md` 321). On `presets/salamander-c5.toml` that leaves the six
+    /// sampled keys of the top octave with no decay row at all, and the reason
+    /// is measured rather than structural: A6 and C7 do resolve their 6-12 kHz
+    /// band and it says the engine already decays faster than the recording
+    /// there, and D#7 upward have too few partials standing over the render's
+    /// own floor for anything to be closed on.
+    ///
+    /// Same rules as its sibling: the engine does not read it, a key appears
+    /// only if a drawn row was written for it, entries are strictly ascending
+    /// and inside `LOWEST_KEY..=HIGHEST_KEY`, and empty is absent from the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_decay: Vec<u8>,
     /// Per-key override of [`Voicing::polarization_pan_spread`].
     ///
     /// The global scalar is one number for the whole compass, and the compass
@@ -1330,6 +1360,7 @@ impl Preset {
         self.validate_partial_tables()?;
         self.validate_false_beats()?;
         self.validate_synthesized_texture()?;
+        self.validate_provenance("notes.synthesized_decay", &self.notes.synthesized_decay)?;
 
         let v = &self.voicing;
         // `excitation_scale` divides the unison bridge coupling, and the
@@ -1675,18 +1706,22 @@ impl Preset {
     /// sorted on load because a list that names a key twice is a list somebody
     /// built by appending, and the second entry is the one that would be lost.
     fn validate_synthesized_texture(&self) -> Result<(), PresetError> {
+        self.validate_provenance("notes.synthesized_texture", &self.notes.synthesized_texture)
+    }
+
+    /// One provenance list, named so that the message says which one.
+    fn validate_provenance(&self, name: &str, list: &[u8]) -> Result<(), PresetError> {
         let mut previous: Option<u8> = None;
-        for &key in &self.notes.synthesized_texture {
+        for &key in list {
             if !(LOWEST_KEY..=HIGHEST_KEY).contains(&key) {
                 return Err(PresetError::invalid(format!(
-                    "notes.synthesized_texture names key {key}, outside \
-                     {LOWEST_KEY}..={HIGHEST_KEY}"
+                    "{name} names key {key}, outside {LOWEST_KEY}..={HIGHEST_KEY}"
                 )));
             }
             if let Some(last) = previous {
                 if key <= last {
                     return Err(PresetError::invalid(format!(
-                        "notes.synthesized_texture is not strictly ascending: {key} after {last}"
+                        "{name} is not strictly ascending: {key} after {last}"
                     )));
                 }
             }
@@ -2561,6 +2596,7 @@ impl Default for Preset {
                 // Every row of the default preset is a law or a measurement,
                 // and none of it is drawn.
                 synthesized_texture: Vec::new(),
+                synthesized_decay: Vec::new(),
                 // No per-key override: `voicing.polarization_pan_spread`
                 // applies to the whole compass, as it always did.
                 pan_spread: Vec::new(),
@@ -2902,7 +2938,7 @@ mod tests {
 
         // Every one of these would reach the DSP as a divide by zero, a NaN,
         // or a resonator pole outside the unit circle.
-        let breakages: [fn(&mut Preset); 142] = [
+        let breakages: [fn(&mut Preset); 146] = [
             |p: &mut Preset| p.notes.f0_hz[3] = 0.0,
             |p: &mut Preset| p.notes.sigma0[3] = -1.0,
             |p: &mut Preset| p.notes.inharmonicity_b[3] = -1e-4,
@@ -3237,6 +3273,10 @@ mod tests {
             |p: &mut Preset| p.notes.synthesized_texture = vec![HIGHEST_KEY + 1],
             |p: &mut Preset| p.notes.synthesized_texture = vec![61, 60],
             |p: &mut Preset| p.notes.synthesized_texture = vec![60, 60],
+            |p: &mut Preset| p.notes.synthesized_decay = vec![LOWEST_KEY - 1],
+            |p: &mut Preset| p.notes.synthesized_decay = vec![HIGHEST_KEY + 1],
+            |p: &mut Preset| p.notes.synthesized_decay = vec![61, 60],
+            |p: &mut Preset| p.notes.synthesized_decay = vec![60, 60],
             // The velocity law for the strike vector's direction reaches the
             // mode gains at note-on, so its two ends and its tilt are bounded
             // exactly like everything else that does.

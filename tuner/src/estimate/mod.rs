@@ -34,6 +34,7 @@
 
 pub mod attack;
 pub mod brilliance;
+pub mod chain;
 pub mod compass;
 pub mod damper;
 pub mod decay;
@@ -48,6 +49,7 @@ pub mod noise;
 pub mod shaping;
 pub mod spread;
 pub mod strike;
+pub mod tail;
 pub mod texture;
 pub mod unison;
 
