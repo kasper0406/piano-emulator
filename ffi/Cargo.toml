@@ -1,0 +1,21 @@
+[package]
+name = "piano-emulator-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "piano_emulator_ffi"
+path = "src/lib.rs"
+# cdylib for the AUv3 appex and the standalone app, staticlib for anything that
+# would rather not carry a second binary, rlib so the tests can call the same
+# entry points the C header declares.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+piano-emulator = { path = "../engine" }
+rubato = "0.15"
+
+[dev-dependencies]
+hound = "3.5"
+rustfft = "6"

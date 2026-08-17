@@ -93,29 +93,30 @@ impl Sequence {
         Sequence { events: Vec::new() }
     }
 
-    fn note(&mut self, at: f32, key: u8, vel: u8, dur: f32) -> &mut Self {
-        self.events.push(RenderEvent::new(at, Event::NoteOn { key, vel }));
+    fn note(&mut self, at: f32, key: u8, vel: u16, dur: f32) -> &mut Self {
         self.events
-            .push(RenderEvent::new(
-                at + dur,
-                Event::NoteOff {
-                    key,
-                    vel: DEFAULT_RELEASE_VELOCITY,
-                },
-            ));
+            .push(RenderEvent::new(at, Event::NoteOn { key, vel }));
+        self.events.push(RenderEvent::new(
+            at + dur,
+            Event::NoteOff {
+                key,
+                vel: DEFAULT_RELEASE_VELOCITY,
+            },
+        ));
         self
     }
 
     /// A note let go at a stated release velocity, for phrases where how fast
     /// the damper falls is part of what is being heard.
-    fn note_released(&mut self, at: f32, key: u8, vel: u8, dur: f32, rel: u8) -> &mut Self {
-        self.events.push(RenderEvent::new(at, Event::NoteOn { key, vel }));
+    fn note_released(&mut self, at: f32, key: u8, vel: u16, dur: f32, rel: u16) -> &mut Self {
+        self.events
+            .push(RenderEvent::new(at, Event::NoteOn { key, vel }));
         self.events
             .push(RenderEvent::new(at + dur, Event::NoteOff { key, vel: rel }));
         self
     }
 
-    fn chord(&mut self, at: f32, keys: &[u8], vel: u8, dur: f32) -> &mut Self {
+    fn chord(&mut self, at: f32, keys: &[u8], vel: u16, dur: f32) -> &mut Self {
         for &key in keys {
             self.note(at, key, vel, dur);
         }
@@ -124,11 +125,12 @@ impl Sequence {
 
     /// A key pressed below escapement: the damper lifts and nothing is struck.
     fn hold(&mut self, at: f32, key: u8) -> &mut Self {
-        self.events.push(RenderEvent::new(at, Event::KeyDown { key }));
+        self.events
+            .push(RenderEvent::new(at, Event::KeyDown { key }));
         self
     }
 
-    fn release(&mut self, at: f32, key: u8, rel: u8) -> &mut Self {
+    fn release(&mut self, at: f32, key: u8, rel: u16) -> &mut Self {
         self.events
             .push(RenderEvent::new(at, Event::NoteOff { key, vel: rel }));
         self
@@ -140,8 +142,7 @@ impl Sequence {
     }
 
     fn finish(&mut self) -> Vec<RenderEvent> {
-        self.events
-            .sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+        self.events.sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
         std::mem::take(&mut self.events)
     }
 }
@@ -164,7 +165,7 @@ pub fn demo_sequence() -> Vec<RenderEvent> {
     s.pedal(0.0, PedalEvent::Sustain(1.0));
     s.chord(0.05, &[45, 52], 62, 1.8);
     for &(at, key, vel, dur) in &[
-        (0.15f32, 69u8, 64u8, 0.55f32),
+        (0.15f32, 69u8, 64u16, 0.55f32),
         (0.60, 72, 66, 0.50),
         (1.00, 76, 70, 0.55),
         (1.50, 74, 68, 0.50),
@@ -189,7 +190,12 @@ pub fn demo_sequence() -> Vec<RenderEvent> {
     .iter()
     .enumerate()
     {
-        s.chord(4.00 + i as f32 * 0.35, keys, if i % 2 == 0 { 88 } else { 80 }, 0.09);
+        s.chord(
+            4.00 + i as f32 * 0.35,
+            keys,
+            if i % 2 == 0 { 88 } else { 80 },
+            0.09,
+        );
     }
     s.chord(5.40, &[45, 57, 60, 64], 96, 0.30);
 
@@ -200,7 +206,7 @@ pub fn demo_sequence() -> Vec<RenderEvent> {
         .iter()
         .enumerate()
     {
-        let vel = 26 + (i as f32 * 8.4) as u8;
+        let vel = 26 + (i as f32 * 8.4) as u16;
         s.note(5.90 + i as f32 * 0.13, key, vel, 0.5);
     }
     s.chord(7.60, &[69, 72, 76, 81], 118, 1.0);
@@ -211,7 +217,7 @@ pub fn demo_sequence() -> Vec<RenderEvent> {
     s.pedal(8.80, PedalEvent::Sustain(1.0));
     s.chord(8.85, &[40, 52], 40, 0.80);
     for (i, &key) in [69u8, 67, 65, 64].iter().enumerate() {
-        s.note(9.00 + i as f32 * 0.40, key, 34 - i as u8 * 2, 0.45);
+        s.note(9.00 + i as f32 * 0.40, key, 34 - i as u16 * 2, 0.45);
     }
     s.chord(10.50, &[36, 48], 36, 1.00);
     // Half pedal thins the wash without cutting it off.
@@ -223,8 +229,11 @@ pub fn demo_sequence() -> Vec<RenderEvent> {
     //    over it with the sustain pedal up, then a fortissimo close.
     s.chord(11.60, &[33, 45], 100, 0.55);
     s.pedal(11.75, PedalEvent::Sostenuto(true));
-    for (i, keys) in [[60u8, 64, 67], [62, 65, 69], [64, 67, 72]].iter().enumerate() {
-        s.chord(12.20 + i as f32 * 0.35, keys, 75 + i as u8 * 4, 0.12);
+    for (i, keys) in [[60u8, 64, 67], [62, 65, 69], [64, 67, 72]]
+        .iter()
+        .enumerate()
+    {
+        s.chord(12.20 + i as f32 * 0.35, keys, 75 + i as u16 * 4, 0.12);
     }
     s.pedal(13.25, PedalEvent::Sostenuto(false));
     s.pedal(13.30, PedalEvent::Sustain(1.0));
@@ -306,7 +315,7 @@ pub fn halo_sequence() -> Vec<RenderEvent> {
         .iter()
         .enumerate()
     {
-        s.note(18.20 + i as f32 * 0.09, key, 96 + (i as u8).min(20), 0.35);
+        s.note(18.20 + i as f32 * 0.09, key, 96 + (i as u16).min(20), 0.35);
     }
     s.chord(20.20, &[45, 57, 64, 69], 120, 0.30);
     s.pedal(26.50, PedalEvent::Sustain(0.0));

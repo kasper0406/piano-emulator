@@ -7,8 +7,8 @@
 //!   estimates out as a preset file.
 //! - **The preset factory**, in the order the stages run: `survey` is stage 1
 //!   — everything an isolated recorded note can identify, over a whole sample
-//!   library at once — and `fit`, `sympathetic`, `tail` and `noise` are
-//!   stage 2, which is render-and-measure.
+//!   library at once — and `fit`, `sympathetic`, `tail`, `noise` and `mics`
+//!   are stage 2, which is render-and-measure.
 //! - **The standing boards and audits**: `bench`, `compass`, `melody` and
 //!   `chain` each write a document into `renders/` that a milestone is read
 //!   off; `score`, `brilliance` and `residuals` print; `ab` renders.
@@ -68,6 +68,15 @@ the preset factory, in the order the stages run:
         stage 2, the mechanism's balance: [noise.strike]'s level and
         velocity law, inverted on the engine's own attack against the
         recordings' at the recorded keys
+  mics [data/salamander] [preset.toml] [--out <f>] [--stage <name>]...
+        stage 2, the microphone pair: [voicing.mics]. --stage geometry
+        inverts spacing_m and span_m from the recording's own interchannel
+        delays; --stage profile prints the recording's sixth-octave
+        interchannel curve; --stage coherence closes width and
+        diffuse_coherence and --stage modal the board's mode-controlled
+        band, both on the engine's render against the same recordings.
+        All but profile run when --stage is not given. --no-holdout skips
+        the held-out velocity check.
 
 the standing boards, each writing its own document:
   bench [data] [renders/realism] [preset.toml]     -> REALISM.md
@@ -76,6 +85,9 @@ the standing boards, each writing its own document:
   melody [data] [renders/melody] [preset.toml] [flags]
                                                    -> MELODY.md
   chain [data] [renders/chain] [preset.toml]       -> CHAIN.md
+  stereo [data] [renders/stereo] [preset.toml]     -> STEREO.md
+        the one board that is not a mono sum: the same music through the
+        pan-pot, the capsule pair, the shipped preset and the recording
 
 the audits:
   score [preset.toml] [data]              Columns A and B, cell by cell
@@ -146,7 +158,9 @@ fn run(args: Vec<String>) -> Exit {
         Some("compass") => tools::compass::run(rest()),
         Some("melody") => tools::melody::run(rest()),
         Some("noise") => tools::noise::run(rest()),
+        Some("mics") => tools::mics::run(rest()),
         Some("chain") => tools::chain::run(rest()),
+        Some("stereo") => tools::stereo::run(rest()),
         Some("score") => tools::score::run(rest()),
         Some("brilliance") => tools::brilliance::run(rest()),
         Some("residuals") => tools::residuals::run(rest()),

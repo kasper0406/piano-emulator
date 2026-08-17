@@ -76,7 +76,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         let group: Vec<(String, Stereo)> = presets
             .iter()
             .map(|(label, preset)| {
-                let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: VELOCITY })];
+                let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(VELOCITY) })];
                 (
                     format!("note_{name}_{label}"),
                     render_to_buffer(preset, &events, NOTE_SECONDS),
@@ -165,10 +165,10 @@ fn mechanism_phrase() -> Vec<RenderEvent> {
         hold: f32,
         release: u8,
     ) {
-        events.push(RenderEvent::new(at, Event::NoteOn { key, vel }));
+        events.push(RenderEvent::new(at, Event::NoteOn { key, vel: u16::from(vel) }));
         events.push(RenderEvent::new(
             at + hold,
-            Event::NoteOff { key, vel: release },
+            Event::NoteOff { key, vel: u16::from(release) },
         ));
     }
 
@@ -224,7 +224,7 @@ fn pedal_phrase() -> Vec<RenderEvent> {
     let mut events = vec![RenderEvent::new(0.0, Event::Pedal(PedalEvent::Sustain(1.0)))];
     let mut strike = |at: f32, keys: &[u8], vel: u8, hold: f32| {
         for &key in keys {
-            events.push(RenderEvent::new(at, Event::NoteOn { key, vel }));
+            events.push(RenderEvent::new(at, Event::NoteOn { key, vel: u16::from(vel) }));
             events.push(RenderEvent::new(at + hold, Event::NoteOff { key, vel: 64 }));
         }
     };

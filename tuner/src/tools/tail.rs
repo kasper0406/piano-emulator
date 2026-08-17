@@ -137,7 +137,7 @@ fn with_sampler<T>(
 fn render_engine(preset: &Preset, key: u8) -> Audio {
     let events = [RenderEvent::new(
         PREROLL_S as f32,
-        Event::NoteOn { key, vel: VELOCITY },
+        Event::NoteOn { key, vel: u16::from(VELOCITY) },
     )];
     let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + RENDER_S) as f32);
     let skip = (PREROLL_S * SR) as usize;

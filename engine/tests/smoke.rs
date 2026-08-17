@@ -94,7 +94,7 @@ fn dense_playing_stays_finite_and_bounded() {
     for i in 0..600 {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let key = 21 + (state >> 16) as u8 % 88;
-        let vel = 30 + (state >> 8) as u8 % 90;
+        let vel = 30 + (state >> 8) as u16 % 90;
         let t = i as f32 * 0.02;
         events.push(RenderEvent::new(t, Event::NoteOn { key, vel }));
         events.push(RenderEvent::new(t + 0.4, Event::NoteOff { key, vel: 64 }));
@@ -121,7 +121,9 @@ fn peak_frequency_near(signal: &[f32], fft_size: usize, around: f32) -> f32 {
             Complex32::new(x * if i < signal.len() { w } else { 0.0 }, 0.0)
         })
         .collect();
-    FftPlanner::new().plan_fft_forward(fft_size).process(&mut buffer);
+    FftPlanner::new()
+        .plan_fft_forward(fft_size)
+        .process(&mut buffer);
 
     let mag: Vec<f32> = buffer[..fft_size / 2].iter().map(|c| c.norm()).collect();
     let bin = |f: f32| (f * fft_size as f32 / SAMPLE_RATE) as usize;
@@ -208,7 +210,9 @@ fn spreading_the_polarizations_makes_a_held_notes_balance_drift() {
     let drift = |key: u8, spread: f32| -> f32 {
         let mut preset = Preset::default();
         preset.voicing.polarization_pan_spread = spread;
-        preset.validate().expect("a spread within the ceiling is legal");
+        preset
+            .validate()
+            .expect("a spread within the ceiling is legal");
         let f0 = preset.f0(key);
         // Held, so nothing but the string's own decay is in the measurement.
         let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: 100 })];
@@ -283,5 +287,8 @@ fn the_mechanism_stays_under_the_music() {
     // ... and it is genuinely there in both channels.
     let right: Vec<f32> = r.iter().zip(&qr).map(|(a, b)| a - b).collect();
     assert!(rms(&right) > 0.0 && rms(&noise) > 0.0);
-    assert!(peak(&noise).max(peak(&right)) < 0.1, "the action is far too loud");
+    assert!(
+        peak(&noise).max(peak(&right)) < 0.1,
+        "the action is far too loud"
+    );
 }

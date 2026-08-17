@@ -15,7 +15,7 @@ use crate::preset::Preset;
 use crate::resonance::ResonanceBus;
 use crate::soundboard::{pan_for_key, Soundboard};
 use crate::string::PianoString;
-use crate::types::{key_index, BLOCK, DEFAULT_RELEASE_VELOCITY, SAMPLE_RATE};
+use crate::types::{key_index, velocity_from_midi, BLOCK, DEFAULT_RELEASE_VELOCITY, SAMPLE_RATE};
 
 /// Time constant of the damper engage/release ramp at the nominal release
 /// velocity. The felt takes a few milliseconds to settle onto the string;
@@ -328,7 +328,7 @@ impl Voice {
     /// tonal at every key (`renders/timbre-ladder/ANALYSIS.md` §8.3). It is
     /// triggered here, in the same block as the hammer pulse, so that the burst
     /// and the blow start on the same sample.
-    pub fn note_on(&mut self, vel: u8, pedals: &PedalState, frame: u64) {
+    pub fn note_on(&mut self, vel: u16, pedals: &PedalState, frame: u64) {
         self.press(pedals);
         self.hammer.set_una_corda(pedals.una_corda());
         // Both halves of the strike vector's direction, in one pass over the
@@ -344,7 +344,7 @@ impl Voice {
         // cannot click.
         self.strike_noise.trigger(
             &self.strike_noise_model,
-            vel as f32 / 127.0,
+            velocity_from_midi(vel) / 127.0,
             noise::seed_of(self.key, frame ^ STRIKE_SEED_SALT),
         );
     }
@@ -353,7 +353,7 @@ impl Voice {
     /// nothing is struck. The damper leaving the string is the only sound, and
     /// the key counts as held — which is what lets sostenuto capture a silently
     /// prepared note, the reason the gesture exists.
-    pub fn key_down(&mut self, vel: u8, pedals: &PedalState, frame: u64) {
+    pub fn key_down(&mut self, vel: u16, pedals: &PedalState, frame: u64) {
         // Read before the target moves: the felt only makes a noise if it was
         // on the string to begin with. A key pressed again while it is still
         // held, or pressed with the pedal already down, lifts nothing.
@@ -362,7 +362,7 @@ impl Voice {
         if lifting {
             self.noise.trigger(
                 &self.damper_lift_noise,
-                vel as f32 / 127.0,
+                velocity_from_midi(vel) / 127.0,
                 noise::seed_of(self.key, frame),
             );
         }
@@ -379,7 +379,7 @@ impl Voice {
 
     /// A key release at release velocity `vel`, which sets both how fast the
     /// damper falls and how loud the key-off thump is.
-    pub fn note_off(&mut self, vel: u8, pedals: &PedalState, frame: u64) {
+    pub fn note_off(&mut self, vel: u16, pedals: &PedalState, frame: u64) {
         self.held = false;
         self.update_dampers(pedals);
         self.damper_step = damper_step(vel);
@@ -388,7 +388,7 @@ impl Voice {
         // measured releases. What stops at G6 is the damper, not the key.
         self.noise.trigger(
             &self.key_off_noise,
-            vel as f32 / 127.0,
+            velocity_from_midi(vel) / 127.0,
             noise::seed_of(self.key, frame),
         );
     }
@@ -787,9 +787,9 @@ impl Voice {
 /// release at MIDI velocity `vel`. Geometric around [`DAMPER_RAMP_SECONDS`] at
 /// the nominal velocity, so the ramp the engine has always used is exactly what
 /// a source with no release velocity still gets.
-fn damper_step(vel: u8) -> f32 {
-    let exponent =
-        (DEFAULT_RELEASE_VELOCITY as f32 - vel as f32) / (127 - DEFAULT_RELEASE_VELOCITY) as f32;
+fn damper_step(vel: u16) -> f32 {
+    let exponent = (DEFAULT_RELEASE_VELOCITY as f32 - velocity_from_midi(vel))
+        / (127 - DEFAULT_RELEASE_VELOCITY) as f32;
     let seconds = DAMPER_RAMP_SECONDS * DAMPER_RAMP_RANGE.powf(exponent);
     BLOCK as f32 / (seconds * SAMPLE_RATE)
 }
@@ -1363,7 +1363,7 @@ mod tests {
     fn render_note(
         preset: &Preset,
         key: u8,
-        vel: u8,
+        vel: u16,
         blocks: usize,
         frame: u64,
     ) -> (Vec<f32>, Vec<f32>) {

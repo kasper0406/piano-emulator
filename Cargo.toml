@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["engine", "tuner", "forensics"]
+members = ["engine", "ffi", "tuner", "forensics"]
 # `forensics/` is a member so that it shares the lockfile, the profiles and the
 # path dependencies — but it is not a *default* member, so plain `cargo build`,
 # `cargo test` and `cargo clippy` at the root never compile it. (An explicit
@@ -9,7 +9,7 @@ members = ["engine", "tuner", "forensics"]
 # reproducibility record behind `DECISIONS.md`: one-shot instruments that were
 # run once, printed a table into an item, and are kept so the item can be
 # re-derived. Build it on purpose with `cargo build -p forensics`.
-default-members = ["engine", "tuner"]
+default-members = ["engine", "ffi", "tuner"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +22,27 @@ rust-version = "1.80"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# The profile the shipped `ffi` cdylib is built with, and the only place
+# `panic = "abort"` belongs.
+#
+# A Rust panic that unwinds across the C ABI into Swift or into a host's render
+# thread is undefined behaviour, so the shipped library must not unwind
+# (`DISTRIBUTION.md` M1). Cargo has no per-crate-type panic setting, so putting
+# `panic = "abort"` in `[profile.release]` would change what *everything* else —
+# the CLI, the tuner, the acceptance suite's own worst cases — is measured
+# under, for one library's benefit. A separate profile keeps the release numbers
+# the release numbers:
+#
+#     cargo build --profile dist -p piano-emulator-ffi
+#
+# The `catch_unwind` at every entry point (`ffi/src/lib.rs`) is what makes the
+# *other* profiles sound: with abort, no panic reaches the boundary; without it,
+# the guard turns one into an error code. Both halves are needed, because the
+# staticlib and the rlib are linked into binaries this profile does not build.
+[profile.dist]
+inherits = "release"
+panic = "abort"
 
 # The DSP is unusable at opt-level 0, so the default (dev) profile is optimized
 # too: plain `cargo run` / `cargo test` produce real-time-capable code while

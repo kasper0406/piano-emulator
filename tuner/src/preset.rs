@@ -84,6 +84,27 @@ pub const MAX_FALSE_BEAT_DB: f32 = 0.0;
 /// velocity enters a linear string model.
 pub const MAX_STRIKE_DIRECTION_DB: f32 = 12.0;
 pub const MAX_SHARE_TILT: f32 = 0.2;
+/// Bounds on `[voicing.mics]` (`engine::soundboard`): the virtual capsule pair.
+/// `MIN_MIC_SPACING_M` is not a taste — a spacing of zero is a division by zero
+/// in the diffuse field's coherence corner — and `MAX_MIC_SPACING_M` is what
+/// sizes the engine's own difference-signal buffer.
+pub const MIN_MIC_SPACING_M: f32 = 1.0e-4;
+pub const MAX_MIC_SPACING_M: f32 = 1.0;
+pub const MIN_MIC_HEIGHT_M: f32 = 0.02;
+pub const MAX_MIC_HEIGHT_M: f32 = 3.0;
+pub const MIN_MIC_SPAN_M: f32 = 0.05;
+pub const MAX_MIC_SPAN_M: f32 = 3.0;
+pub const MAX_MIC_WIDTH: f32 = 2.0;
+pub const MIN_MIC_DIFFUSE_COHERENCE: f32 = 0.25;
+pub const MAX_MIC_DIFFUSE_COHERENCE: f32 = 8.0;
+/// Bounds on `[voicing.mics.modal]`, the board's mode-controlled band. The
+/// edges are held inside the range a soundboard is plausibly mode-controlled
+/// over at all, and they must be ordered — an edge pair that crosses is a
+/// notch rather than a lobe.
+pub const MIN_MIC_MODAL_HZ: f32 = 40.0;
+pub const MAX_MIC_MODAL_HZ: f32 = 2_000.0;
+pub const MAX_MIC_MODAL_LIFT: f32 = 6.0;
+
 /// Bounds on a per-partial correction to the *fitted* decay rate
 /// (`engine::string::{MIN,MAX}_PARTIAL_SIGMA_SCALE`).
 pub const MIN_PARTIAL_SIGMA_SCALE: f32 = 0.25;
@@ -264,6 +285,55 @@ pub struct Voicing {
     /// (`docs/history/FUNDAMENTALS.md` §7.7's last row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strike_direction: Option<StrikeDirection>,
+    /// The virtual microphone pair the instrument is heard through
+    /// (`PHYSICS.md` §8). Absent — the default — is the pan-pot and the board's
+    /// orthogonal output taps, bit for bit; see `engine::soundboard::Mics`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mics: Option<MicVoicing>,
+}
+
+/// Two virtual capsules above the string band. See `engine::preset::MicVoicing`
+/// for what each number means and `engine::soundboard::Mics` for what they
+/// build.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MicVoicing {
+    /// Capsule separation along the bass-treble axis, metres.
+    #[serde(serialize_with = "short::scalar")]
+    pub spacing_m: f32,
+    /// Height of the capsules above the string plane, metres.
+    #[serde(serialize_with = "short::scalar")]
+    pub height_m: f32,
+    /// Half the width of the string band, metres: where `|pan| = 1` sits.
+    #[serde(serialize_with = "short::scalar")]
+    pub span_m: f32,
+    /// Gain on the geometric difference signal; 1.0 is the geometry itself.
+    #[serde(serialize_with = "short::scalar")]
+    pub width: f32,
+    /// How much longer than an isotropic field's the board field's coherence
+    /// length is; 1.0 is isotropic.
+    #[serde(serialize_with = "short::scalar")]
+    pub diffuse_coherence: f32,
+    /// The board's mode-controlled band; absent is the diffuse coherence alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalBand>,
+}
+
+/// The board's mode-controlled band: where its modes put a nodal line between
+/// the two capsules, and how much more difference than sum they then see. See
+/// `engine::preset::ModalBand` and `engine::soundboard::ModalLobe`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModalBand {
+    /// Bottom edge, Hz: the first mode with a nodal line across the pair.
+    #[serde(serialize_with = "short::scalar")]
+    pub lo_hz: f32,
+    /// Top edge, Hz: modal overlap, above which there is no sign to see.
+    #[serde(serialize_with = "short::scalar")]
+    pub hi_hz: f32,
+    /// How much larger than the sum the difference is inside the band.
+    #[serde(serialize_with = "short::scalar")]
+    pub lift: f32,
 }
 
 /// The velocity law for the strike vector's direction. See
@@ -351,7 +421,11 @@ pub struct BridgeVoicing {
     /// `sigma_k <- sigma_k · (1 + share · (|P(f_k)| − 1))`, clamped to a factor
     /// of four either way by the engine. Zero (the default, and an absent
     /// field) leaves every string bit for bit what it was.
-    #[serde(default, skip_serializing_if = "is_zero", serialize_with = "short::scalar")]
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        serialize_with = "short::scalar"
+    )]
     pub radiated_share: f32,
 }
 
@@ -927,7 +1001,12 @@ impl Preset {
         // rather than by the fit. Mirrors `engine::preset::Preset::validate`
         // (`DECISIONS.md` 257).
         for (i, &c) in n.detune_cents.iter().enumerate() {
-            within(&format!("notes.detune_cents[{i}]"), c, 0.0, MAX_DETUNE_CENTS)?;
+            within(
+                &format!("notes.detune_cents[{i}]"),
+                c,
+                0.0,
+                MAX_DETUNE_CENTS,
+            )?;
         }
         for (i, &s) in n.sigma0.iter().enumerate() {
             if s < MIN_MODE_SIGMA {
@@ -959,7 +1038,12 @@ impl Preset {
         // the count that loop produces.
         table_length("comb_floor", n.comb_floor.len())?;
         for (i, &floor) in n.comb_floor.iter().enumerate() {
-            within(&format!("notes.comb_floor[{i}]"), floor, 0.0, MAX_COMB_FLOOR)?;
+            within(
+                &format!("notes.comb_floor[{i}]"),
+                floor,
+                0.0,
+                MAX_COMB_FLOOR,
+            )?;
         }
         // Either absent — the global spread applies — or a whole compass of
         // them, each inside the range the scalar itself is held to, because
@@ -1093,6 +1177,58 @@ impl Preset {
                 -MAX_SHARE_TILT,
                 MAX_SHARE_TILT,
             )?;
+        }
+        // The microphone geometry, bounded exactly as the engine bounds it: the
+        // spacing because `spacing / c` is the longest interchannel delay the
+        // stage's own buffer is sized for, the rest because a length that is
+        // not a length is not a microphone position.
+        if let Some(m) = &v.mics {
+            within(
+                "voicing.mics.spacing_m",
+                m.spacing_m,
+                MIN_MIC_SPACING_M,
+                MAX_MIC_SPACING_M,
+            )?;
+            within(
+                "voicing.mics.height_m",
+                m.height_m,
+                MIN_MIC_HEIGHT_M,
+                MAX_MIC_HEIGHT_M,
+            )?;
+            within(
+                "voicing.mics.span_m",
+                m.span_m,
+                MIN_MIC_SPAN_M,
+                MAX_MIC_SPAN_M,
+            )?;
+            within("voicing.mics.width", m.width, 0.0, MAX_MIC_WIDTH)?;
+            within(
+                "voicing.mics.diffuse_coherence",
+                m.diffuse_coherence,
+                MIN_MIC_DIFFUSE_COHERENCE,
+                MAX_MIC_DIFFUSE_COHERENCE,
+            )?;
+            if let Some(b) = &m.modal {
+                within(
+                    "voicing.mics.modal.lo_hz",
+                    b.lo_hz,
+                    MIN_MIC_MODAL_HZ,
+                    MAX_MIC_MODAL_HZ,
+                )?;
+                within(
+                    "voicing.mics.modal.hi_hz",
+                    b.hi_hz,
+                    MIN_MIC_MODAL_HZ,
+                    MAX_MIC_MODAL_HZ,
+                )?;
+                within("voicing.mics.modal.lift", b.lift, 0.0, MAX_MIC_MODAL_LIFT)?;
+                if b.lo_hz >= b.hi_hz {
+                    return Err(Error::Preset(format!(
+                        "voicing.mics.modal needs lo_hz < hi_hz, got {} and {}",
+                        b.lo_hz, b.hi_hz
+                    )));
+                }
+            }
         }
         if v.horizontal_offset_hz.len() != MAX_UNISON {
             return Err(Error::Preset(format!(
@@ -1357,8 +1493,18 @@ impl Preset {
                         entry.k, partial_counts[i]
                     )));
                 }
-                within(&format!("{at}.hz"), entry.hz, MIN_FALSE_BEAT_HZ, MAX_FALSE_BEAT_HZ)?;
-                within(&format!("{at}.db"), entry.db, MIN_FALSE_BEAT_DB, MAX_FALSE_BEAT_DB)?;
+                within(
+                    &format!("{at}.hz"),
+                    entry.hz,
+                    MIN_FALSE_BEAT_HZ,
+                    MAX_FALSE_BEAT_HZ,
+                )?;
+                within(
+                    &format!("{at}.db"),
+                    entry.db,
+                    MIN_FALSE_BEAT_DB,
+                    MAX_FALSE_BEAT_DB,
+                )?;
                 if row[..e].iter().any(|other| other.k == entry.k) {
                     return Err(Error::Preset(format!(
                         "{at} splits partial {} a second time",
@@ -2068,7 +2214,13 @@ impl PresetBuilder {
             // preset the pipeline cannot write. Neither moves a fitted value —
             // the measured preset's smallest `sigma0` is 0.126 and its widest
             // spread is 3.89 cents.
-            ("sigma0", |n| n.sigma0, true, f64::from(MIN_MODE_SIGMA), f64::MAX),
+            (
+                "sigma0",
+                |n| n.sigma0,
+                true,
+                f64::from(MIN_MODE_SIGMA),
+                f64::MAX,
+            ),
             ("sigma1", |n| n.sigma1, false, 0.0, f64::MAX),
             (
                 "detune_cents",
@@ -2078,7 +2230,13 @@ impl PresetBuilder {
                 f64::from(MAX_DETUNE_CENTS),
             ),
             ("hammer_mass", |n| n.hammer_mass, true, 1e-4, 1.0),
-            ("hammer_stiffness", |n| n.hammer_stiffness, true, 1.0, f64::MAX),
+            (
+                "hammer_stiffness",
+                |n| n.hammer_stiffness,
+                true,
+                1.0,
+                f64::MAX,
+            ),
             ("hammer_exponent", |n| n.hammer_exponent, false, 1.0, 6.0),
         ];
         for (name, get, log_values, low, high) in fields {
@@ -2196,7 +2354,9 @@ fn fill(base: &[f64], samples: &[(u8, f64)], log_values: bool) -> Result<Option<
     }
     let index_of = |key: u8| {
         key_index(key).ok_or_else(|| {
-            Error::Preset(format!("estimate for key {key}, which is not on the keyboard"))
+            Error::Preset(format!(
+                "estimate for key {key}, which is not on the keyboard"
+            ))
         })
     };
     // Moves the whole base table onto `measured` at `key`.
@@ -2220,8 +2380,16 @@ fn fill(base: &[f64], samples: &[(u8, f64)], log_values: bool) -> Result<Option<
         return Ok(Some(moved(samples[0].0, samples[0].1)?));
     }
     let curve = CompassCurve::from_keys(samples, log_values)?;
-    let lowest = samples.iter().map(|&(key, _)| key).min().expect("non-empty");
-    let highest = samples.iter().map(|&(key, _)| key).max().expect("non-empty");
+    let lowest = samples
+        .iter()
+        .map(|&(key, _)| key)
+        .min()
+        .expect("non-empty");
+    let highest = samples
+        .iter()
+        .map(|&(key, _)| key)
+        .max()
+        .expect("non-empty");
     let below = moved(lowest, curve.value_at_key(lowest))?;
     let above = moved(highest, curve.value_at_key(highest))?;
     Ok(Some(
@@ -2299,10 +2467,7 @@ mod short {
 
     /// The same, one row per key: the per-partial tables are ragged, so they are
     /// a list of lists rather than a list.
-    pub fn table<S: Serializer>(
-        rows: &[Vec<f32>],
-        s: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
+    pub fn table<S: Serializer>(rows: &[Vec<f32>], s: S) -> std::result::Result<S::Ok, S::Error> {
         let mut seq = s.serialize_seq(Some(rows.len()))?;
         for row in rows {
             let widened: Vec<f64> = row.iter().map(|&x| widen(x)).collect();
@@ -2350,7 +2515,12 @@ mod tests {
         ] {
             let text = std::fs::read_to_string(&path).expect("read");
             let preset = Preset::from_toml(&text).expect("parse");
-            assert_eq!(preset.to_toml(), text, "{} does not round trip", path.display());
+            assert_eq!(
+                preset.to_toml(),
+                text,
+                "{} does not round trip",
+                path.display()
+            );
             assert_eq!(preset.notes.f0_hz.len(), NUM_KEYS);
         }
     }
@@ -2387,10 +2557,15 @@ mod tests {
         preset.noise.key_off.centroid_hz = 210.0;
         preset.noise.pedal_down.decay_s = 4.5;
         preset.voicing.bridge = Some(piano_emulator::preset::BridgeVoicing {
-            backbone: [(30.0, -12.0), (250.0, 1.5), (1_100.0, 0.0), (10_000.0, -13.0)]
-                .into_iter()
-                .map(|(hz, gain_db)| piano_emulator::preset::BridgeAnchor { hz, gain_db })
-                .collect(),
+            backbone: [
+                (30.0, -12.0),
+                (250.0, 1.5),
+                (1_100.0, 0.0),
+                (10_000.0, -13.0),
+            ]
+            .into_iter()
+            .map(|(hz, gain_db)| piano_emulator::preset::BridgeAnchor { hz, gain_db })
+            .collect(),
             peaks: [(58.0, 22.0, 8.0), (188.0, 30.0, 6.5), (3_800.0, 4.0, 3.0)]
                 .into_iter()
                 .map(|(hz, q, gain_db)| piano_emulator::preset::BridgePeak { hz, q, gain_db })
@@ -2399,8 +2574,16 @@ mod tests {
         });
         preset.notes.duplex = vec![Vec::new(); NUM_KEYS];
         preset.notes.duplex[60] = vec![
-            piano_emulator::preset::DuplexMode { hz: 3_121.5, gain_db: -22.5, t60_s: 1.2 },
-            piano_emulator::preset::DuplexMode { hz: 4_703.0, gain_db: -27.0, t60_s: 0.8 },
+            piano_emulator::preset::DuplexMode {
+                hz: 3_121.5,
+                gain_db: -22.5,
+                t60_s: 1.2,
+            },
+            piano_emulator::preset::DuplexMode {
+                hz: 4_703.0,
+                gain_db: -27.0,
+                t60_s: 0.8,
+            },
         ];
         preset.notes.pan_spread = (0..NUM_KEYS).map(|i| 0.02 + 0.002 * i as f32).collect();
         // The five fields of this milestone: a per-key comb floor, two ragged
@@ -2419,13 +2602,33 @@ mod tests {
         // velocity law for the strike vector's direction.
         preset.notes.false_beat = vec![Vec::new(); NUM_KEYS];
         preset.notes.false_beat[39] = vec![
-            piano_emulator::preset::FalseBeat { k: 1, hz: 1.11, db: -6.1 },
-            piano_emulator::preset::FalseBeat { k: 3, hz: 0.74, db: -6.6 },
+            piano_emulator::preset::FalseBeat {
+                k: 1,
+                hz: 1.11,
+                db: -6.1,
+            },
+            piano_emulator::preset::FalseBeat {
+                k: 3,
+                hz: 0.74,
+                db: -6.6,
+            },
         ];
         preset.voicing.strike_direction = Some(piano_emulator::preset::StrikeDirection {
             vh_db_at_pp: -2.5,
             vh_db_at_ff: 3.75,
             share_tilt: 0.06,
+        });
+        preset.voicing.mics = Some(piano_emulator::preset::MicVoicing {
+            spacing_m: 0.5,
+            height_m: 0.45,
+            span_m: 1.0,
+            width: 1.5,
+            diffuse_coherence: 5.0,
+            modal: Some(piano_emulator::preset::ModalBand {
+                lo_hz: 190.0,
+                hi_hz: 330.0,
+                lift: 2.4,
+            }),
         });
         preset.noise.strike = piano_emulator::preset::StrikeNoise {
             centroid_hz: 1_450.0,
@@ -2453,14 +2656,22 @@ mod tests {
         assert!(text.contains("pan_spread = ["));
         assert!(text.contains("false_beat"));
         assert!(text.contains("[voicing.strike_direction]"));
+        assert!(text.contains("[voicing.mics]"));
 
         let ours = Preset::from_toml(&text).expect("the tuner reads it");
         assert_eq!(ours.to_toml(), text);
         assert_eq!(ours.notes.inharmonicity_b4[40], 2.5e-7);
         assert_eq!(ours.voicing.polarization_pan_spread, 0.25);
-        assert_eq!(ours.voicing.unison_sigma_scale[2].scale, vec![0.75, 1.0, 1.25]);
+        assert_eq!(
+            ours.voicing.unison_sigma_scale[2].scale,
+            vec![0.75, 1.0, 1.25]
+        );
         assert_eq!(ours.noise.key_off.centroid_hz, 210.0);
-        let bridge = ours.voicing.bridge.as_ref().expect("the bridge came through");
+        let bridge = ours
+            .voicing
+            .bridge
+            .as_ref()
+            .expect("the bridge came through");
         assert_eq!(bridge.backbone.len(), 4);
         assert_eq!(bridge.peaks[1].q, 30.0);
         assert_eq!(ours.duplex_modes(81).len(), 2);
@@ -2479,6 +2690,11 @@ mod tests {
             .voicing
             .strike_direction
             .expect("the strike direction came through");
+        let mics = ours.voicing.mics.expect("the microphone pair came through");
+        assert_eq!(
+            (mics.spacing_m, mics.height_m, mics.span_m, mics.width, mics.diffuse_coherence),
+            (0.5, 0.45, 1.0, 1.5, 5.0)
+        );
         assert_eq!(direction.vh_db_at_pp, -2.5);
         assert_eq!(direction.vh_db_at_ff, 3.75);
         assert_eq!(direction.share_tilt, 0.06);
@@ -2490,9 +2706,8 @@ mod tests {
         // safety rests on, not merely on the numbers in the file: `max|B|`
         // comes out of a *fitted* shelf cascade, so a mirror that drifted would
         // let a preset through one crate and not the other.
-        let theirs = piano_emulator::resonance::BridgeFilter::new(
-            preset.voicing.bridge.as_ref().unwrap(),
-        );
+        let theirs =
+            piano_emulator::resonance::BridgeFilter::new(preset.voicing.bridge.as_ref().unwrap());
         let mine = crate::response::BridgeResponse::of(ours.voicing.bridge.as_ref());
         assert_eq!(mine.max_magnitude(), theirs.max_magnitude());
         for hz in [20.0f32, 58.0, 188.0, 440.0, 1_100.0, 3_800.0, 12_000.0] {
@@ -2549,6 +2764,24 @@ mod tests {
         table
     }
 
+    /// The shipped microphone geometry with one field bent.
+    fn mics_with(break_it: impl Fn(&mut MicVoicing)) -> MicVoicing {
+        let mut mics = MicVoicing {
+            spacing_m: 0.5,
+            height_m: 0.45,
+            span_m: 1.0,
+            width: 1.5,
+            diffuse_coherence: 5.0,
+            modal: Some(ModalBand {
+                lo_hz: 190.0,
+                hi_hz: 330.0,
+                lift: 2.4,
+            }),
+        };
+        break_it(&mut mics);
+        mics
+    }
+
     /// A well-formed split table with the one entry broken.
     fn split_with(break_it: impl Fn(&mut FalseBeat)) -> Vec<Vec<FalseBeat>> {
         let mut entry = FalseBeat {
@@ -2564,7 +2797,7 @@ mod tests {
 
     #[test]
     fn both_crates_refuse_the_same_broken_voicing() {
-        let breakages: [fn(&mut Preset); 118] = [
+        let breakages: [fn(&mut Preset); 134] = [
             // The two motion mechanisms, on the same bounds the engine states.
             |p| p.notes.false_beat = vec![Vec::new(); NUM_KEYS - 1],
             // The provenance list: real keys, in order, once each.
@@ -2576,6 +2809,76 @@ mod tests {
             |p| p.notes.synthesized_decay = vec![HIGHEST_KEY + 1],
             |p| p.notes.synthesized_decay = vec![61, 60],
             |p| p.notes.synthesized_decay = vec![60, 60],
+            // The microphone geometry, on the same bounds the engine states.
+            |p| p.voicing.mics = Some(mics_with(|m| m.spacing_m = 0.0)),
+            |p| p.voicing.mics = Some(mics_with(|m| m.spacing_m = MAX_MIC_SPACING_M + 0.01)),
+            |p| p.voicing.mics = Some(mics_with(|m| m.height_m = 0.0)),
+            |p| p.voicing.mics = Some(mics_with(|m| m.height_m = MAX_MIC_HEIGHT_M + 0.01)),
+            |p| p.voicing.mics = Some(mics_with(|m| m.span_m = 0.0)),
+            |p| p.voicing.mics = Some(mics_with(|m| m.span_m = MAX_MIC_SPAN_M + 0.01)),
+            |p| p.voicing.mics = Some(mics_with(|m| m.width = -0.01)),
+            |p| p.voicing.mics = Some(mics_with(|m| m.width = MAX_MIC_WIDTH + 0.01)),
+            |p| p.voicing.mics = Some(mics_with(|m| m.diffuse_coherence = 0.0)),
+            |p| {
+                p.voicing.mics =
+                    Some(mics_with(|m| m.diffuse_coherence = MAX_MIC_DIFFUSE_COHERENCE + 0.01))
+            },
+            |p| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: MIN_MIC_MODAL_HZ - 0.01,
+                        hi_hz: 330.0,
+                        lift: 2.4,
+                    })
+                }))
+            },
+            |p| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: 190.0,
+                        hi_hz: MAX_MIC_MODAL_HZ + 0.01,
+                        lift: 2.4,
+                    })
+                }))
+            },
+            |p| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: 190.0,
+                        hi_hz: 330.0,
+                        lift: MAX_MIC_MODAL_LIFT + 0.01,
+                    })
+                }))
+            },
+            |p| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: 190.0,
+                        hi_hz: 330.0,
+                        lift: f32::NAN,
+                    })
+                }))
+            },
+            // A crossed band, and a band whose edges coincide: both are the one
+            // way this section can be written down and mean a notch.
+            |p| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: 330.0,
+                        hi_hz: 190.0,
+                        lift: 2.4,
+                    })
+                }))
+            },
+            |p| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: 250.0,
+                        hi_hz: 250.0,
+                        lift: 2.4,
+                    })
+                }))
+            },
             |p| p.notes.false_beat = split_with(|e| e.k = 0),
             |p| p.notes.false_beat = split_with(|e| e.hz = 0.05),
             |p| p.notes.false_beat = split_with(|e| e.hz = 4.0),
@@ -2616,7 +2919,13 @@ mod tests {
             // back down, and one large enough to take it under the root.
             |p| p.notes.inharmonicity_b4[0] = -1.0e-6,
             |p| p.notes.inharmonicity_b4[0] = -2.0,
-            |p| p.notes.inharmonicity_b4.pop().map(|_| ()).unwrap_or_default(),
+            |p| {
+                p.notes
+                    .inharmonicity_b4
+                    .pop()
+                    .map(|_| ())
+                    .unwrap_or_default()
+            },
             |p| p.notes.contact_width[3] = f32::NAN,
             |p| p.notes.contact_width[3] = 0.06,
             |p| p.notes.contact_width[3] = -0.01,
@@ -2666,12 +2975,16 @@ mod tests {
             |p| p.voicing.bridge = Some(bridge(&[(100.0, 0.0), (MAX_BRIDGE_HZ + 1.0, 0.0)], &[])),
             |p| p.voicing.bridge = Some(bridge(&[(100.0, f32::NAN), (400.0, 0.0)], &[])),
             |p| {
-                p.voicing.bridge =
-                    Some(bridge(&[(100.0, MIN_BRIDGE_GAIN_DB - 1.0), (400.0, 0.0)], &[]))
+                p.voicing.bridge = Some(bridge(
+                    &[(100.0, MIN_BRIDGE_GAIN_DB - 1.0), (400.0, 0.0)],
+                    &[],
+                ))
             },
             |p| {
-                p.voicing.bridge =
-                    Some(bridge(&[(100.0, MAX_BRIDGE_GAIN_DB + 1.0), (400.0, 0.0)], &[]))
+                p.voicing.bridge = Some(bridge(
+                    &[(100.0, MAX_BRIDGE_GAIN_DB + 1.0), (400.0, 0.0)],
+                    &[],
+                ))
             },
             |p| {
                 p.voicing.bridge = Some(bridge(
@@ -2681,7 +2994,9 @@ mod tests {
                         .collect::<Vec<_>>(),
                 ))
             },
-            |p| p.voicing.bridge = Some(bridge(&[(100.0, 0.0), (400.0, 0.0)], &[(250.0, 0.0, 3.0)])),
+            |p| {
+                p.voicing.bridge = Some(bridge(&[(100.0, 0.0), (400.0, 0.0)], &[(250.0, 0.0, 3.0)]))
+            },
             |p| {
                 p.voicing.bridge = Some(bridge(
                     &[(100.0, 0.0), (400.0, 0.0)],
@@ -2778,7 +3093,11 @@ mod tests {
             |p| {
                 p.notes.duplex = duplex_table(|_| {});
                 p.notes.duplex[7] = (0..=MAX_DUPLEX_MODES)
-                    .map(|k| DuplexMode { hz: 4_000.0 + 11.0 * k as f32, gain_db: -30.0, t60_s: 1.0 })
+                    .map(|k| DuplexMode {
+                        hz: 4_000.0 + 11.0 * k as f32,
+                        gain_db: -30.0,
+                        t60_s: 1.0,
+                    })
                     .collect();
             },
             |p| p.notes.duplex = duplex_table(|m| m.hz = MIN_DUPLEX_HZ - 1.0),
@@ -2820,7 +3139,10 @@ mod tests {
         for (i, break_it) in breakages.into_iter().enumerate() {
             let mut preset = default_preset();
             break_it(&mut preset);
-            assert!(preset.validate().is_err(), "the tuner accepted breakage {i}");
+            assert!(
+                preset.validate().is_err(),
+                "the tuner accepted breakage {i}"
+            );
             let text = preset.to_toml();
             assert!(
                 piano_emulator::Preset::from_toml(&text).is_err(),
@@ -2949,7 +3271,10 @@ mod tests {
             .zip(&base.notes.inharmonicity_b)
         {
             let ratio = f64::from(*estimated) / f64::from(*original);
-            assert!((ratio - 1.5).abs() < 1e-5, "the curve's shape changed: {ratio}");
+            assert!(
+                (ratio - 1.5).abs() < 1e-5,
+                "the curve's shape changed: {ratio}"
+            );
         }
 
         let retuned = PresetBuilder::new(base.clone())
@@ -3056,7 +3381,10 @@ mod tests {
             })
             .build()
             .unwrap();
-        assert_eq!(preset.notes.inharmonicity_b4[key_index(36).unwrap()], -3.0e-9);
+        assert_eq!(
+            preset.notes.inharmonicity_b4[key_index(36).unwrap()],
+            -3.0e-9
+        );
         assert_eq!(preset.notes.inharmonicity_b4[key_index(72).unwrap()], 0.0);
         assert!((preset.notes.contact_width[key_index(36).unwrap()] - 0.018).abs() < 1e-9);
         // Between the two measured notes the interpolant; past them the

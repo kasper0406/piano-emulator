@@ -104,7 +104,9 @@
 use crate::modal::ModalBank;
 use crate::preset::{FalseBeat, StrikeDirection, Voicing, NOMINAL_STRIKE_VELOCITY};
 use crate::resonance::BridgeFilter;
-use crate::types::{db_to_amp, BLOCK, MAX_PARTIALS, MAX_PARTIAL_RATIO, MAX_UNISON, SAMPLE_RATE};
+use crate::types::{
+    db_to_amp, velocity_from_midi, BLOCK, MAX_PARTIALS, MAX_PARTIAL_RATIO, MAX_UNISON, SAMPLE_RATE,
+};
 
 /// Note the per-note output gains are normalised against, so the preset's
 /// `excitation_scale` stays a plain level control: mode k's force on the bridge
@@ -475,8 +477,8 @@ fn horizontal_leak(voicing: &Voicing) -> f64 {
 ///
 /// Velocity 0 is a note-off in the protocol and never reaches a string, so the
 /// span is 1 to 127 and both ends of a [`StrikeDirection`] are really reached.
-fn strike_position_in_velocity(vel: u8) -> f32 {
-    (f32::from(vel.max(1)) - 1.0) / 126.0
+fn strike_position_in_velocity(vel: u16) -> f32 {
+    (velocity_from_midi(vel).max(1.0) - 1.0) / 126.0
 }
 
 /// What one velocity does to the *direction* of the strike vector: a scale on
@@ -501,7 +503,7 @@ impl StrikeMix {
         share_tilt: 0.0,
     };
 
-    fn at(direction: &StrikeDirection, vel: u8) -> StrikeMix {
+    fn at(direction: &StrikeDirection, vel: u16) -> StrikeMix {
         let t = strike_position_in_velocity(vel);
         let db = direction.vh_db_at_pp + (direction.vh_db_at_ff - direction.vh_db_at_pp) * t;
         StrikeMix {
@@ -1370,7 +1372,7 @@ pub struct PianoString {
     /// Velocity the mode gains currently hold the mixture for. Nominal until
     /// something strikes the key, which is what a sympathetically driven string
     /// keeps.
-    velocity: u8,
+    velocity: u16,
     damper: f32,
 }
 
@@ -1593,7 +1595,7 @@ impl PianoString {
             partials,
             strings: n,
             una_corda: false,
-            velocity: NOMINAL_STRIKE_VELOCITY,
+            velocity: u16::from(NOMINAL_STRIKE_VELOCITY),
             damper: 0.0,
         };
         // The banks were pushed with the fitted direction's gains, which is what
@@ -1687,7 +1689,7 @@ impl PianoString {
     }
 
     /// The velocity the mode mixture currently stands at.
-    pub fn strike_velocity(&self) -> u8 {
+    pub fn strike_velocity(&self) -> u16 {
         self.velocity
     }
 
@@ -1712,7 +1714,7 @@ impl PianoString {
     ///
     /// A preset with no `[voicing.strike_direction]` ignores the velocity
     /// entirely and this is the table swap it was.
-    pub fn set_strike(&mut self, una_corda: bool, vel: u8) {
+    pub fn set_strike(&mut self, una_corda: bool, vel: u16) {
         if self.direction.is_none() {
             self.velocity = vel;
             if una_corda == self.una_corda {
@@ -1899,7 +1901,7 @@ mod tests {
     /// and returns `blocks` blocks of its output. Using the hammer rather than a
     /// unit impulse keeps the signal at the level the culling thresholds and the
     /// rest of the instrument are calibrated for.
-    fn strike(key: u8, vel: u8, blocks: usize) -> Vec<f32> {
+    fn strike(key: u8, vel: u16, blocks: usize) -> Vec<f32> {
         let preset = preset();
         let mut string = PianoString::new(
             preset.string_params(key),
@@ -2464,7 +2466,7 @@ mod tests {
         let mut previous_mix = 0.0f32;
         let mut previous_depth = 0.0f64;
         let mut depths = Vec::new();
-        for (step, vel) in [1u8, 40, 64, 90, 127].into_iter().enumerate() {
+        for (step, vel) in [1u16, 40, 64, 90, 127].into_iter().enumerate() {
             s.set_strike(false, vel);
             assert_eq!(s.strike_velocity(), vel);
             let modes = s.partial_modes(1);
@@ -2562,7 +2564,7 @@ mod tests {
             &voiced.voicing,
             voiced.partial_shaping(KEY),
         );
-        for vel in [1u8, 40, 90, 127] {
+        for vel in [1u16, 40, 90, 127] {
             for una in [false, true] {
                 s.set_strike(una, vel);
                 let mut want = PianoString::new(

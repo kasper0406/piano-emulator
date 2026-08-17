@@ -309,7 +309,7 @@ fn check_engine(
     let render = |_: ()| -> (Vec<f32>, Vec<f32>) {
         let events = [RenderEvent::new(
             PREROLL as f32 / SAMPLE_RATE as f32,
-            Event::NoteOn { key, vel: VELOCITY },
+            Event::NoteOn { key, vel: u16::from(VELOCITY) },
         )];
         let (mut l, mut r) =
             render_to_buffer(preset, &events, TOTAL_FRAMES as f32 / SAMPLE_RATE as f32);

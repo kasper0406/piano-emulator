@@ -30,7 +30,7 @@ fn write_wav(path: &Path, l: &[f32], r: &[f32]) {
 }
 
 fn render_held(preset: &Preset, key: u8, vel: u8, dur: f32) -> (Vec<f32>, Vec<f32>) {
-    let events = vec![RenderEvent::new(START, Event::NoteOn { key, vel })];
+    let events = vec![RenderEvent::new(START, Event::NoteOn { key, vel: u16::from(vel) })];
     render_to_buffer(preset, &events, dur)
 }
 

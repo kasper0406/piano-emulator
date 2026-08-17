@@ -471,7 +471,9 @@ mod tests {
     /// Peak magnitude of `y` in a window — a cheap envelope reading, accurate
     /// to well under 1 % as long as the window spans several periods.
     fn envelope(y: &[f32], start: usize, len: usize) -> f32 {
-        y[start..start + len].iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        y[start..start + len]
+            .iter()
+            .fold(0.0f32, |m, v| m.max(v.abs()))
     }
 
     #[test]
@@ -659,5 +661,3 @@ mod tests {
         }
     }
 }
-
-

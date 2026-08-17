@@ -60,7 +60,7 @@ const BURST_WINDOW_S: f32 = 0.25;
 const BURST_DRAWS: u64 = 8;
 
 /// Velocity of the strike every mechanism level is quoted against.
-const REFERENCE_VELOCITY: u8 = 90;
+const REFERENCE_VELOCITY: u16 = 90;
 
 /// The key a *pedal* event's level is quoted against. The pedal recordings
 /// belong to no key, and the tuner measures them against the sampled key

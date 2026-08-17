@@ -44,7 +44,7 @@ fn db(x: f32) -> f32 {
 fn strike(preset: &Preset, keys: &[u8], vel: u8, seconds: f32) -> (f32, f32, usize) {
     let events: Vec<RenderEvent> = keys
         .iter()
-        .map(|&key| RenderEvent::new(0.0, Event::NoteOn { key, vel }))
+        .map(|&key| RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(vel) }))
         .collect();
     let (l, r) = render_to_buffer(preset, &events, seconds);
     let mono = l
@@ -86,7 +86,7 @@ fn dense_playing() -> Vec<RenderEvent> {
         let key = 21 + (state >> 16) as u8 % 88;
         let vel = 20 + (state >> 8) as u8 % 107;
         let t = i as f32 * 0.024;
-        events.push(RenderEvent::new(t, Event::NoteOn { key, vel }));
+        events.push(RenderEvent::new(t, Event::NoteOn { key, vel: u16::from(vel) }));
         events.push(RenderEvent::new(t + 0.35, Event::NoteOff { key, vel: 64 }));
         if i % 100 == 0 {
             let pedal = if (i / 100) % 2 == 0 { 1.0 } else { 0.0 };

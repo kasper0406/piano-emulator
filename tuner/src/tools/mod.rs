@@ -2,9 +2,9 @@
 //!
 //! Everything here is a **subcommand**: an operational tool that is run again
 //! whenever the instrument moves — the preset factory (`fit`, `sympathetic`,
-//! `tail`, `noise`, alongside `survey`, which is old enough to still live in
+//! `tail`, `noise`, `mics`, alongside `survey`, which is old enough to still live in
 //! `main.rs`), the standing boards that write a document into `renders/`
-//! (`bench`, `compass`, `melody`, `chain`), and the audits that print
+//! (`bench`, `compass`, `melody`, `chain`, `stereo`), and the audits that print
 //! (`score`, `brilliance`, `residuals`) or render (`ab`).
 //!
 //! They are modules of the **binary** target and not of the library, which is
@@ -24,8 +24,10 @@ pub mod chain;
 pub mod compass;
 pub mod fit;
 pub mod melody;
+pub mod mics;
 pub mod noise;
 pub mod residuals;
 pub mod score;
+pub mod stereo;
 pub mod sympathetic;
 pub mod tail;

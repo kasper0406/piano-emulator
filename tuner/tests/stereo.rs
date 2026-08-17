@@ -1,0 +1,917 @@
+//! The stereo gate: the engine's interchannel image against the recording's.
+//!
+//! `DECISIONS.md` 313-317 is the chain experiment, and its largest measured
+//! result is the one nothing on any scoreboard could see. `chain::stereo_signature`
+//! read the recording's two channels and found **+0.945 correlation at lag zero
+//! below 125 Hz**, falling to about nothing through the mid and treble, with a
+//! peak |r| of 0.57-0.65 everywhere at lags of −0.23 to +1.98 ms. That is a
+//! spaced pair of microphones — an AKG pair about 12 cm above the strings — two
+//! capsules well inside a wavelength of each other in the bass seeing one
+//! wavefront, and seeing the same sound about 60 % coherent a fraction of a
+//! millisecond apart above it. The engine is **inverted in every band**:
+//! −0.577 in the bass, where `soundboard`'s FDN sends two orthogonal-sign taps
+//! to the two channels, rising to +0.964 at 6-12 kHz, which is what
+//! `soundboard::pan_for_key` is — one mono voice scaled into two channels, a
+//! pan-pot. Every metric in `REALISM.md` is computed on the mono sum and is
+//! blind to all of it.
+//!
+//! Item 317 (a) is the instruction: **give the loss a stereo term first**,
+//! because a stage built to fix something nothing scores is a stage nobody can
+//! regress. This file is that term with a bar under it.
+//!
+//! # This gate is green, and the shape of how it got there is the record
+//!
+//! It is the pattern `tests/melody.rs` established and `DECISIONS.md` 298 and
+//! 330 both used: a gate written from a measurement, failing on the instrument
+//! as it stands, and then closed by a mechanism rather than by a tolerance.
+//! Four milestones, and each one is visible in a different set of bands.
+//!
+//! **All six red** when the gate was written (`DECISIONS.md` 346-350): the
+//! numbers in the paragraph above, with the engine on the wrong side of zero in
+//! every band and a bass peak |r| railing at −4.03 ms, which is what "the FDN
+//! decorrelates at no particular delay" looks like.
+//!
+//! **Two red** once `PHYSICS.md` §8 was built and then fitted — `[voicing.mics]`,
+//! two virtual capsules over the string band with a per-source delay and gain
+//! and a frequency-dependent coherence on the board's diffuse field
+//! (`DECISIONS.md` 351-358), with its five numbers inverted out of the
+//! recording's own interchannel delays rather than swept (359-367). That
+//! **inverted the inversion**: 63-125 Hz went −0.577 → +0.961 against the
+//! recording's +0.953, and 6-12 kHz +0.912 → +0.089 against +0.050.
+//!
+//! **None red at the window this file was reading, and three red at the window
+//! it should have been reading**, with the board's **mode-controlled band**
+//! (`DECISIONS.md` 368-377). What was left was 125-500 Hz, and item 357 was
+//! right that no two-point geometry could close it: the recording reads +0.953 below 125 Hz
+//! and −0.115 one octave above, and `sin(kd)/kd`, a pure interchannel delay, or
+//! any mixture of them cannot fall from +0.95 through zero across one octave.
+//! What closed it was measuring the recording at a resolution that shows a
+//! *shape* instead of six numbers (`piano-tuner mics --stage profile`): its
+//! sixth-octave interchannel correlation is `+0.94` at 127 Hz, `+0.07` at 160
+//! and **`−0.53` at 180**, holds negative through 254, and is inside ±0.2 of
+//! zero everywhere above 500 — three regimes of a *plate*, not one curve of a
+//! microphone pair, and repeated to within 0.1 by the same keys' other velocity
+//! layer. `soundboard::ModalLobe` is those three regimes, and
+//! `the_capsule_pair_without_the_mode_controlled_band_fails_in_the_middle`
+//! below is the control that says which two bands it is carrying.
+//!
+//! **None red, at a window that opens where the note does** (`DECISIONS.md`
+//! 378-379). The milestone above was measured through a window that began
+//! **96 samples after the strike**: this file asked for 0.05 s of preroll,
+//! which is 2400 samples, and the engine's block is 128, so the note began at
+//! 2304 and the window at 2400. Two milliseconds of every note were outside it
+//! and it opened in the middle of a signal — and the verdict turned on that.
+//! Struck at the head of a block the same instrument read `+0.936 / +0.204 /
+//! +0.218` in the first three bands against the recording's `+0.953 / −0.115 /
+//! −0.226`, which is **three red**, not none. Item 378 is the window and the
+//! control that licenses it; item 379 is what the honest window then showed,
+//! which is that the mode-controlled band was built out of the wrong signal.
+//! It band-limited the *difference* of the board's two decorrelated taps and
+//! scaled it up, and a difference cannot be a nodal line — two capsules
+//! straddling one hear the same field with opposite signs — nor can it act
+//! during the strike, because the FDN's shortest line is 149 samples and its
+//! difference is exactly zero for the first 3.1 ms of every note. Measured in
+//! 10 ms frames, C5's first frame read `+9.9 dB` mid over side in 125-250 Hz
+//! where the recording's reads `−1.6 dB`. `soundboard::ModalLobe` now adds an
+//! anti-phase copy of the **sum**, on the direct path as well as the board's,
+//! and `[voicing.mics]` was refitted at the aligned window by
+//! `piano-tuner mics --stage band` — a stage that moves the band and the two
+//! trims together, because since the change they build one side signal and are
+//! no longer separable.
+//!
+//! It is still **not** a room: §9's reverberant field is refused by measurement
+//! in item 315 and stays out of scope. What was added is a property of the
+//! board — where its modes begin to put a nodal line between two capsules 12 cm
+//! apart, and where modal overlap stops there being a sign to see.
+//!
+//! # Where the window starts, and why that is not a free parameter
+//!
+//! Every render this file scores puts the strike on the **first sample** of the
+//! window: `PREROLL` is `realism::STEREO_PREROLL_SAMPLES`, a whole number of
+//! engine blocks, asserted at compile time here and in `tools::mics`, with a
+//! run-time assertion that nothing sounds before it. Two things go wrong
+//! otherwise and only one of them is obvious. A window that opens *inside* a
+//! note opens with a step, and a step is broadband — that alone took the
+//! engine's 6-12 kHz column from readable on 15 of these keys to readable on
+//! 29. And a window that opens *after* the strike is missing the strike, which
+//! in 125-500 Hz is most of what a treble key has here.
+//! `the_recordings_image_does_not_move_when_the_window_does` is the control:
+//! the *recording* is unmoved by the same three placements, which is what
+//! licenses reading it from an onset detector while the engine is read from the
+//! strike itself — and it prints the engine's own figure beside it, which is
+//! not the same number and is item 379's open half.
+//!
+//! Writing the gate before the mechanism is the order `DECISIONS.md` 317 (a)
+//! asks for: a stage built to fix something nothing scores is a stage nobody
+//! can regress.
+//!
+//! # The material, and where the bar comes from
+//!
+//! The 30 keys the Salamander library actually **recorded** (`DECISIONS.md`
+//! 328), struck alone at velocity 90. Solo notes rather than the scoreboard's
+//! phrases, for two reasons: a phrase is a mixture of keys and the geometry
+//! this is about is per-key, and a recorded key has a **second recording of
+//! itself** — its neighbouring velocity layer — which is what the floor is made
+//! of. Transposed keys are not used at all: a resampled take keeps its mic
+//! image, so its correlation is a real measurement, but its *velocity layers*
+//! are two transpositions of one take rather than two takes, and a floor built
+//! from those would be a measurement of the resampler (the same argument item
+//! 328 makes about `match` and item 331 makes about the melody's bar).
+//!
+//! The score per band is `|engine r@0 − reference r@0|` on the medians over the
+//! keys, and the bar is `max(floor, scatter/sqrt(n)) · realism::STEREO_ALLOWANCE`
+//! — the same median taken on the *second take*, against the precision with
+//! which 30 keys pin a median that moves by `scatter` across them. Both are the
+//! recording disagreeing with itself; neither is anything the engine did. The
+//! pooled `scatter` is deliberately **not** the bar: a recording's r@0 moves
+//! across the compass because the keys sit in different places relative to the
+//! microphones, and that motion is a thing the engine is meant to reproduce
+//! rather than to be excused from. The per-key distance is reported beside the
+//! pooled one, so a model that fixes a band's median without fixing its image
+//! is visible as such.
+
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use piano_emulator::preset::Preset;
+use piano_emulator::render::{render_to_buffer, RenderEvent};
+use piano_emulator::types::{Event, BLOCK};
+use piano_tuner::audio::Audio;
+use piano_tuner::cache;
+use piano_tuner::realism::{
+    self, RecordedKeys, StereoColumn, StereoImage, StereoItem, VelocityLayers,
+};
+use piano_tuner::sampler::{Sampler, SamplerEvent, TimedEvent, SAMPLER_VERSION};
+use piano_tuner::{SampleLibrary, SAMPLE_RATE};
+
+/// The velocity every key is struck at: the middle layer, the one the fits, the
+/// compass and the motion columns all use.
+const VELOCITY: u8 = 90;
+
+/// Seconds of note the image is read over. Long enough that the bass bands hold
+/// several cycles of the lowest key's fundamental and short enough that the top
+/// octave has not decayed into the recording's noise.
+const RENDER_S: f64 = 3.0;
+
+/// Silence before the strike, in samples: [`realism::STEREO_PREROLL_SAMPLES`],
+/// which carries the whole argument for why this is a whole number of blocks
+/// and what it cost when it was not.
+const PREROLL: usize = realism::STEREO_PREROLL_SAMPLES;
+
+/// The window has to begin **at** the strike, and an event takes effect at the
+/// head of the block that contains it, so a preroll that is not a whole number
+/// of blocks starts the window inside the note. Checked here rather than
+/// trusted: it is one `const` away from being wrong again.
+const _: () = assert!(
+    PREROLL % BLOCK == 0,
+    "the preroll must be a whole number of engine blocks or the window starts inside the note"
+);
+
+/// The same number in seconds, for the event list.
+const PREROLL_S: f64 = PREROLL as f64 / SAMPLE_RATE as f64;
+
+fn repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+fn sfz() -> Option<PathBuf> {
+    let path = repo()
+        .join("data/salamander")
+        .join("SalamanderGrandPiano-V3+20200602.sfz");
+    path.exists().then_some(path)
+}
+
+fn shipped_preset() -> Preset {
+    Preset::load(&repo().join("presets/salamander-c5.toml")).expect("the measured preset loads")
+}
+
+// ---------------------------------------------------------------------------
+// Rendering one key, three ways
+// ---------------------------------------------------------------------------
+
+fn render_engine(preset: &Preset, key: u8) -> Audio {
+    let events = [RenderEvent::new(
+        PREROLL_S as f32,
+        Event::NoteOn {
+            key,
+            vel: u16::from(VELOCITY),
+        },
+    )];
+    let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + RENDER_S) as f32);
+    assert_eq!(
+        events[0].frame(),
+        PREROLL,
+        "the strike must land on the first sample of the window"
+    );
+    assert!(
+        left[..PREROLL].iter().all(|&x| x == 0.0),
+        "there is sound before the strike, so the window does not start at it"
+    );
+    Audio::new(
+        SAMPLE_RATE,
+        vec![left[PREROLL..].to_vec(), right[PREROLL..].to_vec()],
+    )
+    .expect("the engine renders stereo")
+}
+
+/// The recording of the same note at some velocity, trimmed to its own onset so
+/// that both sides read the same part of the note, and cached to disk the way
+/// every other reference render in this repository is: it is a function of the
+/// sampler, the library and the key, none of which move when the engine does.
+fn render_reference(sfz: &Path, key: u8, velocity: u8) -> Audio {
+    let mut print = cache::Fingerprint::new();
+    print
+        .str("tests/stereo/reference")
+        .u64(u64::from(SAMPLER_VERSION))
+        .file(sfz)
+        .expect("the sfz is readable")
+        .u64(u64::from(SAMPLE_RATE))
+        .u64(u64::from(key))
+        .u64(u64::from(velocity))
+        .f64(RENDER_S);
+    let dir = cache::reference_dir(&repo().join("data/salamander"));
+    let path = dir.join(format!(
+        "stereo-key{key:03}-v{velocity:03}-{}.wav",
+        print.hex()
+    ));
+    cache::audio(&path, || {
+        let mut sampler = Sampler::new(sfz)?;
+        let events = [TimedEvent::new(
+            0.0,
+            SamplerEvent::NoteOn { key, vel: velocity },
+        )];
+        let rendered = sampler.render(&events, RENDER_S + 0.2)?;
+        let mono = rendered.mono();
+        let onset = piano_tuner::detect_onset(&mono, f64::from(SAMPLE_RATE));
+        let skip = (onset * f64::from(SAMPLE_RATE)).round() as usize;
+        let frames = (RENDER_S * f64::from(SAMPLE_RATE)) as usize;
+        let channels: Vec<Vec<f32>> = rendered
+            .channels
+            .iter()
+            .map(|c| {
+                (0..frames)
+                    .map(|n| c.get(skip + n).copied().unwrap_or(0.0))
+                    .collect()
+            })
+            .collect();
+        Audio::new(SAMPLE_RATE, channels)
+    })
+    .expect("the recording of a key the library recorded")
+}
+
+/// The same signal made mono and put back into two channels: a **pan-pot of the
+/// recording**, which is the engine's own construction applied to the piano's
+/// own sound. Its correlation is +1 in every band by construction.
+fn pan_potted(audio: &Audio) -> Audio {
+    let mono = audio.mono();
+    Audio::new(audio.sample_rate, vec![mono.clone(), mono]).expect("two channels")
+}
+
+// ---------------------------------------------------------------------------
+// The measurement, once for the whole file
+// ---------------------------------------------------------------------------
+
+struct Measured {
+    /// One item per recorded key: engine, recording, and the recording's other
+    /// velocity layer.
+    items: Vec<StereoItem>,
+    /// The same items with the *recording* on the engine's side: the control
+    /// that says the columns do not red out on a signal that is right.
+    itself: Vec<StereoItem>,
+    /// The same items with a **pan-potted copy of the recording** on the
+    /// engine's side: the control that says the columns catch the defect they
+    /// name, on the real material, with the engine out of the picture.
+    panned: Vec<StereoItem>,
+    /// The shipped preset with `[voicing.mics.modal]` deleted — the instrument
+    /// as `DECISIONS.md` 359-367 left it, a capsule pair and nothing else.
+    /// The control under the whole of 369-372.
+    without_modal: Vec<StereoItem>,
+}
+
+/// The recording's side of the comparison: one row per recorded key, the take
+/// at [`VELOCITY`] and the take at the neighbouring layer, both as images.
+///
+/// It is a function of the library alone, so it is measured once for the whole
+/// file and every engine the file renders is scored against the same numbers.
+struct Reference {
+    key: u8,
+    label: String,
+    reference: StereoImage,
+    alternate: StereoImage,
+    /// The recording's own mono sum put back into two channels: the pan-pot
+    /// control's engine side.
+    panned: StereoImage,
+}
+
+fn references() -> Option<&'static Vec<Reference>> {
+    static ONCE: OnceLock<Option<Vec<Reference>>> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let sfz = sfz()?;
+        let library = SampleLibrary::from_sfz(&sfz).expect("the library reads");
+        let recorded = RecordedKeys::from_library(&library).expect("the library records keys");
+        let layers = VelocityLayers::from_library(&library).expect("it has velocity layers");
+        let other = layers.alternate(VELOCITY);
+        assert_ne!(
+            other, VELOCITY,
+            "the floor needs a second layer to be a second recording"
+        );
+        let image = |a: &Audio| realism::stereo_image_of(a).expect("two channels");
+        Some(
+            recorded
+                .keys()
+                .iter()
+                .map(|&key| {
+                    let reference = render_reference(&sfz, key, VELOCITY);
+                    let alternate = render_reference(&sfz, key, other);
+                    Reference {
+                        key,
+                        label: realism::note_name(key),
+                        panned: image(&pan_potted(&reference)),
+                        reference: image(&reference),
+                        alternate: image(&alternate),
+                    }
+                })
+                .collect(),
+        )
+    })
+    .as_ref()
+}
+
+/// Scores one preset's renders against [`references`].
+fn score(preset: &Preset) -> Vec<StereoItem> {
+    references()
+        .expect("a library")
+        .iter()
+        .map(|r| StereoItem {
+            label: r.label.clone(),
+            engine: realism::stereo_image_of(&render_engine(preset, r.key)).expect("two channels"),
+            reference: r.reference.clone(),
+            alternate: r.alternate.clone(),
+        })
+        .collect()
+}
+
+fn measured() -> Option<&'static Measured> {
+    static ONCE: OnceLock<Option<Measured>> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let rows = references()?;
+        let preset = shipped_preset();
+        let items = score(&preset);
+        let side = |pick: fn(&Reference) -> &StereoImage| -> Vec<StereoItem> {
+            rows.iter()
+                .map(|r| StereoItem {
+                    label: r.label.clone(),
+                    engine: pick(r).clone(),
+                    reference: r.reference.clone(),
+                    alternate: r.alternate.clone(),
+                })
+                .collect()
+        };
+        let mut bare = preset.clone();
+        bare.voicing.mics = bare.voicing.mics.map(|m| piano_emulator::preset::MicVoicing {
+            modal: None,
+            ..m
+        });
+        Some(Measured {
+            items,
+            itself: side(|r| &r.reference),
+            panned: side(|r| &r.panned),
+            without_modal: score(&bare),
+        })
+    })
+    .as_ref()
+}
+
+/// **A sweep instrument, not a gate.** Renders the gate's material through one
+/// or more `[voicing.mics]` settings and prints the columns for each.
+///
+/// ```text
+/// MIC_SWEEP='0.12,0.30,0.70,1.0,1.0; 0.20,0.20,0.70,1.2,1.5' \
+///   cargo test --release -p piano-tuner --test stereo -- --ignored --nocapture mic_geometry
+/// ```
+///
+/// The fields are `spacing_m, height_m, span_m, width, diffuse_coherence` and,
+/// optionally, the mode-controlled band's `lo_hz, hi_hz, lift`;
+/// the empty string scores the shipped preset as it stands. It is `#[ignore]`d
+/// because it asserts nothing — the gate above is what asserts.
+#[test]
+#[ignore]
+fn mic_geometry_sweep() {
+    if references().is_none() {
+        eprintln!("no data/salamander in this tree; skipping the sweep");
+        return;
+    }
+    let spec = std::env::var("MIC_SWEEP").unwrap_or_default();
+    for setting in spec.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let n: Vec<f32> = setting
+            .split(',')
+            .map(|f| f.trim().parse().expect("five numbers"))
+            .collect();
+        assert!(
+            n.len() == 5 || n.len() == 8,
+            "spacing,height,span,width,coherence[,modal lo_hz,hi_hz,lift]"
+        );
+        let mut preset = shipped_preset();
+        preset.voicing.mics = Some(piano_emulator::preset::MicVoicing {
+            spacing_m: n[0],
+            height_m: n[1],
+            span_m: n[2],
+            width: n[3],
+            diffuse_coherence: n[4],
+            modal: (n.len() == 8).then(|| piano_emulator::preset::ModalBand {
+                lo_hz: n[5],
+                hi_hz: n[6],
+                lift: n[7],
+            }),
+        });
+        preset.validate().expect("a legal geometry");
+        let columns = realism::stereo_columns(&score(&preset));
+        let reds = columns.iter().filter(|c| !c.pass).count();
+        println!(
+            "\n=== mics {setting} — {reds} of {} bands red{}",
+            columns.len(),
+            report("engine against the recording", &columns)
+        );
+    }
+    if spec.is_empty() {
+        let columns = realism::stereo_columns(&score(&shipped_preset()));
+        let reds = columns.iter().filter(|c| !c.pass).count();
+        println!(
+            "\n=== shipped preset — {reds} of {} bands red{}",
+            columns.len(),
+            report("engine against the recording", &columns)
+        );
+    }
+}
+
+fn report(what: &str, columns: &[StereoColumn]) -> String {
+    format!(
+        "\nSTEREO columns on {} recorded keys at velocity {VELOCITY} ({what}):\n{}",
+        columns.first().map_or(0, |c| c.items),
+        realism::stereo_report(columns)
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The gate
+// ---------------------------------------------------------------------------
+
+/// **The gate of `DECISIONS.md` 346-379, and the standing record of item 314.**
+///
+/// Per band, the engine's lag-zero interchannel correlation against the
+/// recording's, over the keys the library recorded, against a bar made of the
+/// recording's own disagreement with itself.
+///
+/// It failed in every band when it was written — in the bass because the
+/// board's two output taps were anti-phase where the recording's two capsules
+/// see one wavefront, in the treble because a pan-pot correlates at +1 where a
+/// spaced pair does not correlate at all, and in the middle because the board
+/// was one radiator where the recording shows a mode-controlled plate. All
+/// three are now mechanisms in `soundboard`, and the module header says which
+/// milestone closed which bands.
+#[test]
+fn the_engines_stereo_image_is_the_recordings_in_every_band() {
+    let Some(m) = measured() else {
+        eprintln!("no data/salamander in this tree; skipping the stereo gate");
+        return;
+    };
+    let columns = realism::stereo_columns(&m.items);
+    let red: Vec<&StereoColumn> = columns.iter().filter(|c| !c.pass).collect();
+    let mut lines = String::new();
+    for c in &red {
+        let _ = write!(
+            lines,
+            "\n  {:>8}: engine {:+.3} where the recording reads {:+.3} — |err| {:.3} \
+against a bar of {:.3} (floor {:.3}, scatter {:.3}, x{:.2}), worst key {} at {:.3}",
+            c.name,
+            c.engine_r0,
+            c.reference_r0,
+            c.error,
+            c.bar,
+            c.floor,
+            c.scatter,
+            realism::STEREO_ALLOWANCE,
+            c.worst.as_ref().map(|w| w.0.as_str()).unwrap_or("?"),
+            c.worst.as_ref().map(|w| w.1).unwrap_or(f64::NAN),
+        );
+    }
+    assert!(
+        red.is_empty(),
+        "{} of {} bands are outside what the recording says about itself.{lines}\n{}",
+        red.len(),
+        columns.len(),
+        report("engine against the recording", &columns)
+    );
+}
+
+/// **The mono-sum gate, and the neutrality gate, in one render.**
+///
+/// The microphone pair is written as *mid plus side* and replaces only the
+/// side, so the mono fold-down of the new image is the mono fold-down of the
+/// pan-pot — for every source, every pan and every geometry
+/// (`soundboard::Mics`, and `soundboard::tests::
+/// the_microphone_pair_leaves_the_mono_sum_exactly_where_the_pan_pot_put_it`
+/// asserts it on the board directly). This is the same claim end to end, on the
+/// shipped preset's own demo, in the bands the scoreboard reads: **every mono
+/// board in this repository is a function of `(L + R)/2`, and if that signal
+/// does not move, none of them can.**
+///
+/// The bar is 0.5 dB band-wise, which is the milestone's stated discipline;
+/// what it measures is 0.000 dB, because the only thing between the two sums is
+/// `f32` rounding.
+///
+/// The second half is `DECISIONS.md` 103's contract: the *same* preset with
+/// `[voicing.mics]` deleted renders the pan-pot bit for bit. Not "within a
+/// tolerance" — the identical samples, which is what "absent means the old
+/// model" has to mean.
+#[test]
+fn the_mono_fold_down_and_the_preset_without_the_section_are_both_unmoved() {
+    use piano_emulator::render::{demo_sequence, DEMO_DURATION_S};
+
+    let with = shipped_preset();
+    let mics = with
+        .voicing
+        .mics
+        .expect("the shipped preset is the one with a microphone pair");
+    let mut without = with.clone();
+    without.voicing.mics = None;
+
+    let demo = demo_sequence();
+    let (wl, wr) = render_to_buffer(&with, &demo, DEMO_DURATION_S);
+    let (bl, br) = render_to_buffer(&without, &demo, DEMO_DURATION_S);
+    assert!(wl.iter().any(|v| v.abs() > 0.1), "the demo made no sound");
+
+    // (a) The image did move — otherwise the rest of this proves nothing.
+    let moved = wl
+        .iter()
+        .zip(&bl)
+        .map(|(a, b)| f64::from(a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        moved > 1.0e-3,
+        "the microphone pair changed the left channel by {moved:e}: it is not doing anything"
+    );
+
+    // (b) ... and the mono sum did not, band by band. `stereo_image` reports
+    // each band's share of the whole signal's energy, so the band's own level
+    // is that share times the signal's energy, and the two are compared in dB.
+    let mono = |l: &[f32], r: &[f32]| -> (StereoImage, f64) {
+        let m: Vec<f32> = l.iter().zip(r).map(|(&a, &b)| 0.5 * (a + b)).collect();
+        let energy: f64 = m.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+        let image = realism::stereo_image(&m, &m, f64::from(SAMPLE_RATE)).expect("an image");
+        (image, 10.0 * energy.log10())
+    };
+    let (wi, we) = mono(&wl, &wr);
+    let (bi, be) = mono(&bl, &br);
+    let mut worst: f64 = 0.0;
+    let mut lines = String::new();
+    for (b, &(name, _, _)) in realism::STEREO_BANDS.iter().enumerate() {
+        let (a, c) = (wi.bands[b], bi.bands[b]);
+        let delta = (a.level_db + we) - (c.level_db + be);
+        worst = worst.max(delta.abs());
+        let _ = write!(lines, "\n  {name:>8}: {:+.4} dB", delta);
+    }
+    let broadband = we - be;
+    // Printed, not only asserted: the milestone's discipline is 0.5 dB and what
+    // this reads is `f32` rounding, and the difference between those two is
+    // only visible if the number is on the page.
+    println!(
+        "the mono fold-down of the shipped demo, with the microphone pair and the \
+board's mode-controlled band against the pan-pot: {worst:.4} dB worst band, \
+{broadband:+.4} dB broadband{lines}"
+    );
+    assert!(
+        worst < 0.5 && broadband.abs() < 0.5,
+        "the mono fold-down moved by {worst:.4} dB band-wise ({broadband:+.4} dB broadband) \
+         with mics {mics:?}{lines}"
+    );
+    // It is not merely inside the bar, it is rounding: state the number the
+    // gate actually reads so a regression that spends the whole 0.5 dB is
+    // visible as a change rather than as a pass.
+    assert!(
+        worst < 0.01,
+        "the mono fold-down moved by {worst:.4} dB band-wise, which is more than \
+         `f32` rounding{lines}"
+    );
+
+    // (c) The neutrality contract: the same preset without the section is the
+    // pan-pot, sample for sample.
+    let (nl, nr) = render_to_buffer(&without, &demo, DEMO_DURATION_S);
+    assert_eq!(nl, bl, "left channel is not reproducible");
+    assert_eq!(nr, br, "right channel is not reproducible");
+}
+
+/// Where the window is allowed to start, in samples past the strike, for the
+/// two controls below.
+///
+/// Ninety-six samples is exactly the misalignment `DECISIONS.md` 378 found in
+/// this file — a 0.05 s preroll against a 128-sample block — and thirty-two is
+/// what a 0.03 s or 0.11 s one gives, so these are the three placements the
+/// gate has actually been read at rather than three round numbers.
+const WINDOW_SHIFTS: [usize; 3] = [0, 32, 96];
+
+/// The image of the same signal read from `shift` samples in, with the step at
+/// the window's edge faded out over the shift.
+///
+/// The fade is not cosmetic and it is the difference between measuring a signal
+/// and measuring a window: a window that opens in the middle of a note opens
+/// with a step, and a step is broadband. Without it the engine's 6-12 kHz band
+/// goes from readable on 15 of these keys to readable on 29 purely by moving
+/// the window 2 ms, and A0's band sits 16 dB higher than it does when the
+/// window opens in silence. With it, that column comes back to within a
+/// decibel or two of where the aligned window has it, which is what says the
+/// difference was the edge. What is left after the fade is *content* — the
+/// first two milliseconds of the note, which is the half of this that is real.
+///
+/// Every shift reads a window of the same *length* — the signal less the widest
+/// shift — so what moves between them is where the window is and nothing else.
+fn image_from(audio: &Audio, shift: usize) -> StereoImage {
+    let widest = WINDOW_SHIFTS.iter().copied().max().unwrap_or(0);
+    let faded = |c: &Vec<f32>| -> Vec<f32> {
+        let mut v: Vec<f32> = c[shift..c.len() - widest + shift].to_vec();
+        for (i, x) in v.iter_mut().take(shift).enumerate() {
+            *x *= 0.5 - 0.5 * (std::f32::consts::PI * i as f32 / shift as f32).cos();
+        }
+        v
+    };
+    realism::stereo_image(
+        &faded(&audio.channels[0]),
+        &faded(&audio.channels[1]),
+        f64::from(SAMPLE_RATE),
+    )
+    .expect("two channels")
+}
+
+/// Median over the keys of one band's `r0`, for the items that are readable in
+/// that band at every one of [`WINDOW_SHIFTS`].
+fn shift_medians(images: &[Vec<StereoImage>], band: usize) -> Vec<f64> {
+    (0..WINDOW_SHIFTS.len())
+        .map(|s| {
+            let mut v: Vec<f64> = images
+                .iter()
+                .filter(|row| row.iter().all(|im| im.bands[band].readable()))
+                .map(|row| row[s].bands[band].r0)
+                .collect();
+            v.sort_by(f64::total_cmp);
+            if v.is_empty() {
+                f64::NAN
+            } else if v.len() % 2 == 1 {
+                v[v.len() / 2]
+            } else {
+                0.5 * (v[v.len() / 2 - 1] + v[v.len() / 2])
+            }
+        })
+        .collect()
+}
+
+/// **The control under the pinned window** (`DECISIONS.md` 378).
+///
+/// The engine's window starts at the strike because the strike is a sample the
+/// renderer chose; the recording's starts where `detect_onset` says the note
+/// begins, which is an *estimate* with a few samples of slop in it. Comparing
+/// one against the other is only legitimate if the recording's image does not
+/// depend on that slop — so this asserts it does not, over three times the
+/// misalignment that made the finding.
+///
+/// It also prints the engine's own figure beside it, because they are not the
+/// same number and the difference is the open half of item 379: the recording's
+/// 125-500 Hz is a field that is still there two milliseconds later, and the
+/// engine's is largely a strike.
+#[test]
+fn the_recordings_image_does_not_move_when_the_window_does() {
+    let Some(rows) = references() else {
+        eprintln!("no data/salamander in this tree; skipping the window control");
+        return;
+    };
+    let sfz = sfz().expect("a library");
+    let reference: Vec<Vec<StereoImage>> = rows
+        .iter()
+        .map(|r| {
+            let audio = render_reference(&sfz, r.key, VELOCITY);
+            WINDOW_SHIFTS.iter().map(|&s| image_from(&audio, s)).collect()
+        })
+        .collect();
+    let preset = shipped_preset();
+    let engine: Vec<Vec<StereoImage>> = rows
+        .iter()
+        .map(|r| {
+            let audio = render_engine(&preset, r.key);
+            WINDOW_SHIFTS.iter().map(|&s| image_from(&audio, s)).collect()
+        })
+        .collect();
+
+    let columns = realism::stereo_columns(&measured().expect("a library").items);
+    let mut lines = String::new();
+    let mut worst: Vec<String> = Vec::new();
+    for (b, c) in columns.iter().enumerate() {
+        let (rm, em) = (shift_medians(&reference, b), shift_medians(&engine, b));
+        let swing = |v: &[f64]| -> f64 {
+            v.iter().copied().fold(f64::MIN, f64::max) - v.iter().copied().fold(f64::MAX, f64::min)
+        };
+        let _ = write!(
+            lines,
+            "\n  {:>8}: recording {} (swing {:.3}, bar {:.3}) — engine {} (swing {:.3})",
+            c.name,
+            rm.iter().map(|v| format!("{v:+.3}")).collect::<Vec<_>>().join(" "),
+            swing(&rm),
+            c.bar,
+            em.iter().map(|v| format!("{v:+.3}")).collect::<Vec<_>>().join(" "),
+            swing(&em),
+        );
+        if rm.iter().all(|v| v.is_finite()) && swing(&rm) > c.bar {
+            worst.push(format!("{} by {:.3} against {:.3}", c.name, swing(&rm), c.bar));
+        }
+    }
+    println!(
+        "the image against where the window starts, at {WINDOW_SHIFTS:?} samples past the \
+strike, over {} recorded keys at velocity {VELOCITY}:{lines}",
+        rows.len()
+    );
+    assert!(
+        worst.is_empty(),
+        "the recording's own image moves with the window in {}: {}{lines}",
+        worst.len(),
+        worst.join("; ")
+    );
+}
+
+/// The control that says the bar is passable and the columns do not simply red
+/// out: the *recording itself* on the engine's side of the comparison. Every
+/// band must pass, and it is not a tautology — the floor and the scatter are
+/// measured on other signals, so a bar of zero anywhere would fail this.
+#[test]
+fn the_recording_passes_its_own_bar_in_every_band() {
+    let Some(m) = measured() else {
+        eprintln!("no data/salamander in this tree; skipping the stereo control");
+        return;
+    };
+    let columns = realism::stereo_columns(&m.itself);
+    for c in &columns {
+        assert!(
+            c.items > 0,
+            "{} was readable on no key at all{}",
+            c.name,
+            report("the recording against itself", &columns)
+        );
+        assert!(
+            c.bar > 0.0 && c.bar.is_finite(),
+            "{}: a bar of {:.4} is not a bar{}",
+            c.name,
+            c.bar,
+            report("the recording against itself", &columns)
+        );
+        assert!(
+            c.pass,
+            "{}: the recording fails its own bar, {:.4} against {:.4}{}",
+            c.name,
+            c.error,
+            c.bar,
+            report("the recording against itself", &columns)
+        );
+    }
+}
+
+/// The control that says the gate catches the thing it names, with the engine
+/// out of the picture entirely: the **recording's own mono sum, put back into
+/// two channels**. That is precisely `soundboard::pan_for_key`'s construction
+/// applied to the piano's own sound — same spectrum, same envelope, same
+/// everything the mono metrics measure, and a stereo image that is +1 in every
+/// band.
+///
+/// What it asserts is the shape of the finding rather than a blanket failure:
+/// the **bass is where a pan-pot is nearly right**, because the recording reads
+/// +0.945 there and one wavefront is one wavefront, and every band *above* it is
+/// where the microphone spacing lives and where a pan-pot cannot be right. So
+/// the bands from 125 Hz up must go red on a signal that is the recording in
+/// every other respect. A gate that only fails is not a gate either.
+#[test]
+fn a_pan_potted_copy_of_the_recording_fails_above_the_bass() {
+    let Some(m) = measured() else {
+        eprintln!("no data/salamander in this tree; skipping the pan-pot control");
+        return;
+    };
+    let columns = realism::stereo_columns(&m.panned);
+    let text = report("a pan-potted copy of the recording", &columns);
+    for c in &columns {
+        if c.items == 0 {
+            continue;
+        }
+        assert!(
+            c.engine_r0 > 0.99,
+            "{}: a pan-pot must read +1 at lag zero, read {:+.4}{}",
+            c.name,
+            c.engine_r0,
+            text
+        );
+    }
+    // The bass is the band where a pan-pot is nearly right — the recording is
+    // +0.945 there and one wavefront is one wavefront. Everything above it is
+    // where the mic spacing lives, and that is what must fail.
+    let above_bass: Vec<&StereoColumn> = columns
+        .iter()
+        .filter(|c| c.items > 0 && c.lo_hz >= 125.0)
+        .collect();
+    assert!(
+        !above_bass.is_empty(),
+        "no band above the bass was readable{text}"
+    );
+    for c in &above_bass {
+        assert!(
+            !c.pass,
+            "{}: a pan-pot of the recording must not pass, {:.4} against {:.4}{}",
+            c.name, c.error, c.bar, text
+        );
+    }
+}
+
+/// **The control under `PHYSICS.md` §8's third regime**: the same preset with
+/// `[voicing.mics.modal]` deleted, which is the instrument `DECISIONS.md` 367
+/// shipped — a fitted pair of virtual capsules and nothing else.
+///
+/// It must fail, and it must fail *in 125-500 Hz specifically*, because that
+/// is what item 357 predicted from the model and item 362 measured: a
+/// two-point geometry cannot fall from `+0.95` below 125 Hz to `-0.115` one
+/// octave up, and the pair that fits the recording's delays (0.11 m) is five
+/// times narrower than the one its mid-band coherence would need (0.6-0.7 m).
+/// Everything *outside* those two bands must still pass, because the pair was
+/// already right there and the mode-controlled band is not allowed to have
+/// bought its two bands by spending the other four.
+#[test]
+fn the_capsule_pair_without_the_mode_controlled_band_fails_in_the_middle() {
+    let Some(m) = measured() else {
+        eprintln!("no data/salamander in this tree; skipping the modal-band control");
+        return;
+    };
+    let columns = realism::stereo_columns(&m.without_modal);
+    let text = report("the capsule pair with no mode-controlled band", &columns);
+    let middle: Vec<&StereoColumn> = columns
+        .iter()
+        .filter(|c| c.items > 0 && c.lo_hz >= 125.0 && c.hi_hz <= 500.0)
+        .collect();
+    assert_eq!(
+        middle.len(),
+        2,
+        "the two bands the control is about must both be readable{text}"
+    );
+    for c in &middle {
+        assert!(
+            !c.pass,
+            "{}: without the mode-controlled band this must be red, {:.4} against {:.4}{}",
+            c.name, c.error, c.bar, text
+        );
+        // And red on the *positive* side: the defect is a band that stays
+        // correlated where the recording goes anti-phase, not a band that
+        // misses by an arbitrary amount.
+        assert!(
+            c.engine_r0 > c.reference_r0,
+            "{}: the pair alone reads {:+.3} under the recording's {:+.3} — that is not \
+             the finding this control exists for{}",
+            c.name,
+            c.engine_r0,
+            c.reference_r0,
+            text
+        );
+    }
+    for c in columns
+        .iter()
+        .filter(|c| c.items > 0 && (c.hi_hz <= 125.0 || c.lo_hz >= 500.0))
+    {
+        assert!(
+            c.pass,
+            "{}: the pair alone already passed here, so the mode-controlled band must \
+             not be what carries it, {:.4} against {:.4}{}",
+            c.name, c.error, c.bar, text
+        );
+    }
+}
+
+/// The band a key's fundamental is read in, asserted on the shipped library's
+/// own recorded keys rather than on a table of constants: this is what
+/// `COMPASS.md`'s stereo line quotes per key, and the clamp at the bottom
+/// (A0-B1 are under the lowest band) is a decision worth pinning.
+#[test]
+fn every_recorded_key_lands_in_a_band_the_note_actually_fills() {
+    let Some(sfz) = sfz() else {
+        eprintln!("no data/salamander in this tree; skipping");
+        return;
+    };
+    let library = SampleLibrary::from_sfz(&sfz).expect("the library reads");
+    let recorded = RecordedKeys::from_library(&library).expect("the library records keys");
+    let preset = shipped_preset();
+    for &key in recorded.keys() {
+        let f0 = f64::from(preset.string_params(key).partial_freq(1));
+        let band = StereoImage::band_for(f0);
+        let (_, lo, hi) = realism::STEREO_BANDS[band];
+        assert!(
+            f0 < hi,
+            "{} at {f0:.1} Hz is not under the top of its band",
+            realism::note_name(key)
+        );
+        assert!(
+            f0 >= lo || band == 0,
+            "{} at {f0:.1} Hz fell out of the bottom of a band that is not the lowest",
+            realism::note_name(key)
+        );
+    }
+}

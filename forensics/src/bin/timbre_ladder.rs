@@ -153,8 +153,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let preset_path = args
         .next()
         .unwrap_or_else(|| "presets/salamander-c5.toml".into());
-    let cache = PathBuf::from(args.next().unwrap_or_else(|| "data/cache/salamander".into()));
-    let out = PathBuf::from(args.next().unwrap_or_else(|| "renders/timbre-ladder".into()));
+    let cache = PathBuf::from(
+        args.next()
+            .unwrap_or_else(|| "data/cache/salamander".into()),
+    );
+    let out = PathBuf::from(
+        args.next()
+            .unwrap_or_else(|| "renders/timbre-ladder".into()),
+    );
 
     let library = SampleLibrary::from_sfz(root.join("SalamanderGrandPiano-V3+20200602.sfz"))?;
     let preset = EnginePreset::load(Path::new(&preset_path))?;
@@ -207,7 +213,11 @@ impl KeyReport {
             self.layer,
             self.partials,
             self.roughness_db,
-            if self.fitted_comb { "fitted " } else { "preset " },
+            if self.fitted_comb {
+                "fitted "
+            } else {
+                "preset "
+            },
             self.residual_db,
             self.first_frame_ms,
         )
@@ -256,17 +266,15 @@ fn render_key(
     let partials: Vec<Partial> = partials
         .into_iter()
         .zip(balance)
-        .map(|(p, (gl, gr))| Partial { gain_l: gl, gain_r: gr, ..p })
+        .map(|(p, (gl, gr))| Partial {
+            gain_l: gl,
+            gain_r: gr,
+            ..p
+        })
         .collect();
 
     let (attack_l, attack_r) = attack_residual(
-        &source_l,
-        &source_r,
-        &freqs,
-        &locked_l,
-        &locked_r,
-        hop_n,
-        hops,
+        &source_l, &source_r, &freqs, &locked_l, &locked_r, hop_n, hops,
     );
 
     // ---- the rungs
@@ -477,8 +485,16 @@ fn build_partials(
         let tail = fit.modulated_amplitude_at(t_last);
         out.push(Partial {
             frequency_hz: fit.frequency_hz,
-            head_scale: if head > 0.0 { ln_first.exp() / head } else { 1.0 },
-            tail_scale: if tail > 0.0 { ln_last.exp() / tail } else { 1.0 },
+            head_scale: if head > 0.0 {
+                ln_first.exp() / head
+            } else {
+                1.0
+            },
+            tail_scale: if tail > 0.0 {
+                ln_last.exp() / tail
+            } else {
+                1.0
+            },
             envelope,
             glide,
             fit: *fit,
@@ -519,11 +535,7 @@ fn usable_points(track: &PartialTrack, onset: f64, start: f64) -> Envelope {
 /// with its contact taper — under a degree-2 polynomial in `ln k` fitted to the
 /// measured spectrum. Either way this is the smoothest thing the engine can
 /// produce at this note, and the ratio to it is §3's roughness.
-fn smooth_comb(
-    analysis: &NoteAnalysis,
-    preset: &EnginePreset,
-    key: u8,
-) -> Box<dyn Fn(u32) -> f64> {
+fn smooth_comb(analysis: &NoteAnalysis, preset: &EnginePreset, key: u8) -> Box<dyn Fn(u32) -> f64> {
     if let Some(strike) = analysis.strike.clone() {
         return Box::new(move |k| strike.amplitude(k));
     }
@@ -693,7 +705,10 @@ fn attack_residual(
     let end = ((RESIDUAL_S + RESIDUAL_FADE_S) * SR) as usize;
     let keep = (RESIDUAL_S * SR) as usize;
     let mut out = (vec![0.0f32; TOTAL_FRAMES], vec![0.0f32; TOTAL_FRAMES]);
-    for (channel, (source, locked)) in [(left, locked_l), (right, locked_r)].into_iter().enumerate() {
+    for (channel, (source, locked)) in [(left, locked_l), (right, locked_r)]
+        .into_iter()
+        .enumerate()
+    {
         let modelled = resynth_locked(freqs, locked, hop_n, hops, end);
         let target = if channel == 0 { &mut out.0 } else { &mut out.1 };
         for n in 0..end {
@@ -770,8 +785,7 @@ impl ModalNote {
         let voicing = &preset.voicing;
         let partials = params.partial_count();
         let radiated = radiated_damping(&params, voicing, partials);
-        let output_scale =
-            voicing.excitation_scale * params.bridge_gain * params.f0 / REFERENCE_F0;
+        let output_scale = voicing.excitation_scale * params.bridge_gain * params.f0 / REFERENCE_F0;
         let vertical_factor = voicing.vertical_decay_factor();
         let horizontal_gain = db_to_amp(voicing.horizontal_gain_db);
 
@@ -792,10 +806,7 @@ impl ModalNote {
                 let f = params.partial_freq(k) * detune;
                 let sigma =
                     params.partial_sigma(k) * vertical_factor * sigma_scale * radiated[k - 1];
-                let rough = roughness
-                    .and_then(|r| r.get(k - 1))
-                    .copied()
-                    .unwrap_or(1.0) as f32;
+                let rough = roughness.and_then(|r| r.get(k - 1)).copied().unwrap_or(1.0) as f32;
                 let g = output_scale
                     * (k as f32 * std::f32::consts::PI * params.strike_position).sin()
                     * engine_taper(k, params.contact_width)
@@ -859,7 +870,7 @@ impl ModalNote {
         while start < TOTAL_FRAMES {
             let end = (start + BLOCK).min(TOTAL_FRAMES);
             if start == PREROLL {
-                hammer.strike_midi(VELOCITY);
+                hammer.strike_midi(u16::from(VELOCITY));
             }
             if let Some(walk) = walk.as_mut() {
                 walk.advance();
@@ -1008,7 +1019,10 @@ impl Walk {
 fn render_engine(preset: &EnginePreset, key: u8) -> Stereo {
     let events = [RenderEvent::new(
         PREROLL as f32 / SAMPLE_RATE as f32,
-        Event::NoteOn { key, vel: VELOCITY },
+        Event::NoteOn {
+            key,
+            vel: u16::from(VELOCITY),
+        },
     )];
     let (left, right) = render_to_buffer(preset, &events, TOTAL_FRAMES as f32 / SAMPLE_RATE as f32);
     (fit_length(left), fit_length(right))
@@ -1140,7 +1154,11 @@ fn note_name(key: u8) -> String {
     const NAMES: [&str; 12] = [
         "C", "Cs", "D", "Ds", "E", "F", "Fs", "G", "Gs", "A", "As", "B",
     ];
-    format!("{}{}", NAMES[usize::from(key) % 12], i32::from(key) / 12 - 1)
+    format!(
+        "{}{}",
+        NAMES[usize::from(key) % 12],
+        i32::from(key) / 12 - 1
+    )
 }
 
 // ------------------------------------------------------------------ README

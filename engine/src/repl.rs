@@ -4,20 +4,21 @@
 //! becomes an [`Event`] on the SPSC queue, except `render`, which builds its
 //! own offline engine.
 
-use crate::engine::EventSender;
-use crate::midi;
+use crate::midi::{self, EventInput};
 use crate::preset::Preset;
 use crate::render::{
-    default_sequence, demo_sequence, halo_sequence, render_to_wav, RenderEvent,
-    DEFAULT_DURATION_S, DEMO_DURATION_S, HALO_DURATION_S,
+    default_sequence, demo_sequence, halo_sequence, render_to_wav, RenderEvent, DEFAULT_DURATION_S,
+    DEMO_DURATION_S, HALO_DURATION_S,
 };
-use crate::types::{Event, PedalEvent, DEFAULT_RELEASE_VELOCITY, HIGHEST_KEY, LOWEST_KEY};
+use crate::types::{
+    Event, PedalEvent, DEFAULT_RELEASE_VELOCITY, HIGHEST_KEY, LOWEST_KEY, MIDI1_MAX_VELOCITY,
+};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Velocity used when a command omits one.
-pub const DEFAULT_VELOCITY: u8 = 80;
+pub const DEFAULT_VELOCITY: u16 = 80;
 
 const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -69,14 +70,28 @@ pub fn note_name(key: u8) -> String {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    Note { key: u8, vel: u8 },
+    Note {
+        key: u8,
+        vel: u16,
+    },
     /// A key held down without a strike: the damper lifts and nothing sounds.
-    Hold { key: u8 },
-    Off { key: u8, vel: u8 },
-    Chord { keys: Vec<u8>, vel: u8 },
+    Hold {
+        key: u8,
+    },
+    Off {
+        key: u8,
+        vel: u16,
+    },
+    Chord {
+        keys: Vec<u8>,
+        vel: u16,
+    },
     Pedal(PedalEvent),
     Demo,
-    Render { path: PathBuf, source: RenderSource },
+    Render {
+        path: PathBuf,
+        source: RenderSource,
+    },
     Panic,
     Quit,
     Help,
@@ -256,9 +271,12 @@ fn note_arg(arg: Option<&&str>) -> Result<u8, String> {
     parse_note(text).ok_or_else(|| format!("'{text}' is not a note between A0 and C8"))
 }
 
-fn velocity_arg(arg: &str) -> Result<u8, String> {
+fn velocity_arg(arg: &str) -> Result<u16, String> {
     match arg.parse::<u16>() {
-        Ok(v) if (1..=127).contains(&v) => Ok(v as u8),
+        // The REPL stays in the legacy lane of `types::velocity_from_midi`:
+        // typing `n C4 90` is the same note it has always been, and the fine
+        // lane is where a controller's extra bits arrive, not the keyboard.
+        Ok(v) if (1..=MIDI1_MAX_VELOCITY).contains(&v) => Ok(v),
         _ => Err(format!("'{arg}' is not a velocity between 1 and 127")),
     }
 }
@@ -274,7 +292,11 @@ fn bool_arg(arg: &str) -> Result<bool, String> {
 /// Reads commands from stdin until `quit` or EOF. Returns when the user is
 /// done. `preset` is the one the live engine was built from, so an offline
 /// render started here sounds like what is coming out of the speakers.
-pub fn run(mut sender: EventSender, preset: &Preset) -> io::Result<()> {
+///
+/// `input` is shared rather than owned: with `--midi-in` running, a hardware
+/// keyboard is writing to the same queue from Core MIDI's thread, and the two
+/// simply merge (`midi::EventInput`).
+pub fn run(input: &EventInput, preset: &Preset) -> io::Result<()> {
     println!("piano-emulator — physical model piano");
     println!("{}", help_text());
 
@@ -290,7 +312,7 @@ pub fn run(mut sender: EventSender, preset: &Preset) -> io::Result<()> {
         }
         match parse_command(&line) {
             Ok(Command::Quit) => return Ok(()),
-            Ok(command) => execute(command, &mut sender, preset),
+            Ok(command) => execute(command, input, preset),
             Err(message) => {
                 println!("{message}");
                 println!("type 'help' for the command list");
@@ -299,7 +321,7 @@ pub fn run(mut sender: EventSender, preset: &Preset) -> io::Result<()> {
     }
 }
 
-fn execute(command: Command, sender: &mut EventSender, preset: &Preset) {
+fn execute(command: Command, sender: &EventInput, preset: &Preset) {
     match command {
         Command::Nothing | Command::Quit => {}
         Command::Help => println!("{}", help_text()),
@@ -346,7 +368,7 @@ fn execute(command: Command, sender: &mut EventSender, preset: &Preset) {
 
 /// Plays a timed sequence in real time by sleeping between events. The engine
 /// keeps rendering on the audio thread throughout.
-fn play_live(events: &[RenderEvent], sender: &mut EventSender) {
+fn play_live(events: &[RenderEvent], sender: &EventInput) {
     let start = Instant::now();
     for scheduled in events {
         let due = Duration::from_secs_f32(scheduled.time_s.max(0.0));
@@ -357,7 +379,7 @@ fn play_live(events: &[RenderEvent], sender: &mut EventSender) {
     }
 }
 
-fn send(sender: &mut EventSender, event: Event) {
+fn send(sender: &EventInput, event: Event) {
     if !sender.send(event) {
         println!("event queue full, dropped {event:?}");
     }
@@ -432,7 +454,10 @@ mod tests {
         assert!(parse_command("hold C3 90").is_err());
         assert!(parse_command("hold X9").is_err());
 
-        assert_eq!(parse_command("off C4 20"), Ok(Command::Off { key: 60, vel: 20 }));
+        assert_eq!(
+            parse_command("off C4 20"),
+            Ok(Command::Off { key: 60, vel: 20 })
+        );
         assert_eq!(
             parse_command("off C4 127"),
             Ok(Command::Off { key: 60, vel: 127 })

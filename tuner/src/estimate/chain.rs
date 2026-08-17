@@ -134,13 +134,17 @@ pub const EQ_TAPS: usize = 4096;
 /// Band edges, log-spaced: `EQ_BANDS + 1` of them.
 pub fn band_edges() -> Vec<f64> {
     let ratio = (EQ_F_MAX / EQ_F_MIN).powf(1.0 / EQ_BANDS as f64);
-    (0..=EQ_BANDS).map(|i| EQ_F_MIN * ratio.powi(i as i32)).collect()
+    (0..=EQ_BANDS)
+        .map(|i| EQ_F_MIN * ratio.powi(i as i32))
+        .collect()
 }
 
 /// Geometric centre of each band.
 pub fn band_centres() -> Vec<f64> {
     let edges = band_edges();
-    (0..EQ_BANDS).map(|i| (edges[i] * edges[i + 1]).sqrt()).collect()
+    (0..EQ_BANDS)
+        .map(|i| (edges[i] * edges[i + 1]).sqrt())
+        .collect()
 }
 
 /// Power per band of a bin-power spectrum (DC first, non-negative half).
@@ -190,7 +194,9 @@ pub struct EqFit {
 impl EqFit {
     /// The curve as a filter.
     pub fn eq(&self) -> ChainEq {
-        ChainEq { gains_db: self.smooth_db.clone() }
+        ChainEq {
+            gains_db: self.smooth_db.clone(),
+        }
     }
 }
 
@@ -266,7 +272,9 @@ pub fn fit_eq(items: &[EqSample]) -> EqFit {
     // are exactly where a note has least energy: three readings at 15 kHz were
     // continued into a −19 dB shelf that nothing measured. Flat is the only
     // thing an unread band licenses.
-    let first = (0..EQ_BANDS).find(|&b| counts[b] >= MIN_BAND_ITEMS).unwrap_or(0);
+    let first = (0..EQ_BANDS)
+        .find(|&b| counts[b] >= MIN_BAND_ITEMS)
+        .unwrap_or(0);
     let last = (0..EQ_BANDS)
         .rev()
         .find(|&b| counts[b] >= MIN_BAND_ITEMS)
@@ -374,7 +382,11 @@ pub fn curve_agreement(a: &[f64], b: &[f64]) -> (f64, f64) {
         sxx += x * x;
         syy += y * y;
     }
-    let r = if sxx > 0.0 && syy > 0.0 { sxy / (sxx * syy).sqrt() } else { f64::NAN };
+    let r = if sxx > 0.0 && syy > 0.0 {
+        sxy / (sxx * syy).sqrt()
+    } else {
+        f64::NAN
+    };
     (mean_abs, r)
 }
 
@@ -388,7 +400,9 @@ pub struct ChainEq {
 impl ChainEq {
     /// A flat chain: the null the collapse table is measured against.
     pub fn flat() -> ChainEq {
-        ChainEq { gains_db: vec![0.0; EQ_BANDS] }
+        ChainEq {
+            gains_db: vec![0.0; EQ_BANDS],
+        }
     }
 
     pub fn from_db(gains_db: Vec<f64>) -> Result<ChainEq> {
@@ -450,7 +464,9 @@ impl ChainEq {
         let h = self.impulse_response(EQ_TAPS, sample_rate);
         let full = convolve(x, &h);
         let delay = h.len() / 2;
-        (0..x.len()).map(|i| full.get(i + delay).copied().unwrap_or(0.0)).collect()
+        (0..x.len())
+            .map(|i| full.get(i + delay).copied().unwrap_or(0.0))
+            .collect()
     }
 
     /// Filter every channel of a render.
@@ -458,7 +474,11 @@ impl ChainEq {
         let sr = f64::from(audio.sample_rate);
         Audio {
             sample_rate: audio.sample_rate,
-            channels: audio.channels.iter().map(|c| self.apply_mono(c, sr)).collect(),
+            channels: audio
+                .channels
+                .iter()
+                .map(|c| self.apply_mono(c, sr))
+                .collect(),
         }
     }
 }
@@ -485,7 +505,10 @@ pub fn convolve(x: &[f32], h: &[f32]) -> Vec<f32> {
     }
     inverse.process(&mut a);
     let scale = 1.0 / n as f32;
-    a.into_iter().take(x.len() + h.len() - 1).map(|c| c.re * scale).collect()
+    a.into_iter()
+        .take(x.len() + h.len() - 1)
+        .map(|c| c.re * scale)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -499,8 +522,14 @@ pub fn convolve(x: &[f32], h: &[f32]) -> Vec<f32> {
 pub const MAX_LAG_S: f64 = 0.005;
 
 /// The octave bands the stereo signature and the tail decay are read in.
-pub const SPATIAL_BANDS: [(f64, f64); 6] =
-    [(63.0, 125.0), (125.0, 250.0), (250.0, 500.0), (500.0, 2000.0), (2000.0, 6000.0), (6000.0, 12000.0)];
+pub const SPATIAL_BANDS: [(f64, f64); 6] = [
+    (63.0, 125.0),
+    (125.0, 250.0),
+    (250.0, 500.0),
+    (500.0, 2000.0),
+    (2000.0, 6000.0),
+    (6000.0, 12000.0),
+];
 
 /// One band's interchannel behaviour.
 #[derive(Clone, Copy, Debug)]
@@ -509,7 +538,11 @@ pub struct BandCoherence {
     pub hi_hz: f64,
     /// Largest normalised cross-correlation over the searched lags.
     pub peak_r: f64,
-    /// Where it happened, in milliseconds; positive means left leads.
+    /// Where it happened, in milliseconds; positive means the **right** channel
+    /// leads, because the correlation is `Σ_t L[t+τ]·R[t]` and a delayed right
+    /// channel peaks at negative `τ`. Pinned by
+    /// `a_pan_pot_correlates_at_one_and_a_delayed_pair_does_not`, which reads
+    /// −2.00 ms for a right channel delayed by 2 ms.
     pub lag_ms: f64,
     /// The value at lag zero, which is what a pan-pot gives.
     pub zero_r: f64,
@@ -533,7 +566,9 @@ fn spectrum(signal: &[f32], n: usize, planner: &mut FftPlanner<f32>) -> Vec<Comp
 
 fn masked(spec: &[Complex32], sample_rate: f64, band: Option<(f64, f64)>) -> Vec<Complex32> {
     let n = spec.len();
-    let Some((lo, hi)) = band else { return spec.to_vec() };
+    let Some((lo, hi)) = band else {
+        return spec.to_vec();
+    };
     let bin = |hz: f64| (hz * n as f64 / sample_rate).round() as usize;
     let (blo, bhi) = (bin(lo).max(1), bin(hi).min(n / 2));
     let mut out = vec![Complex32::new(0.0, 0.0); n];
@@ -552,18 +587,26 @@ fn coherence(
     planner: &mut FftPlanner<f32>,
 ) -> BandCoherence {
     let n = left.len();
-    let (a, b) = (masked(left, sample_rate, band), masked(right, sample_rate, band));
+    let (a, b) = (
+        masked(left, sample_rate, band),
+        masked(right, sample_rate, band),
+    );
     // Parseval gives each side's energy without a second inverse transform.
     let ea: f64 = a.iter().map(|c| f64::from(c.norm_sqr())).sum::<f64>() / n as f64;
     let eb: f64 = b.iter().map(|c| f64::from(c.norm_sqr())).sum::<f64>() / n as f64;
-    let mut cross: Vec<Complex32> =
-        a.iter().zip(b.iter()).map(|(x, y)| *x * y.conj()).collect();
+    let mut cross: Vec<Complex32> = a.iter().zip(b.iter()).map(|(x, y)| *x * y.conj()).collect();
     let inverse = planner.plan_fft_inverse(n);
     inverse.process(&mut cross);
     let norm = (ea * eb).sqrt().max(1e-30);
-    let max_lag = ((MAX_LAG_S * sample_rate).round() as usize).min(n / 4).max(1);
+    let max_lag = ((MAX_LAG_S * sample_rate).round() as usize)
+        .min(n / 4)
+        .max(1);
     let value = |lag: isize| -> f64 {
-        let idx = if lag >= 0 { lag as usize } else { n - (-lag) as usize };
+        let idx = if lag >= 0 {
+            lag as usize
+        } else {
+            n - (-lag) as usize
+        };
         f64::from(cross[idx].re) / n as f64 / norm
     };
     let zero_r = value(0);
@@ -592,7 +635,9 @@ fn coherence(
 /// preset can carry.
 pub fn stereo_signature(left: &[f32], right: &[f32], sample_rate: f64) -> Result<StereoSignature> {
     if left.is_empty() || right.is_empty() {
-        return Err(Error::Config("a stereo signature needs two channels".into()));
+        return Err(Error::Config(
+            "a stereo signature needs two channels".into(),
+        ));
     }
     let n = (left.len().max(right.len()) * 2).next_power_of_two();
     let mut planner = FftPlanner::<f32>::new();
@@ -603,7 +648,10 @@ pub fn stereo_signature(left: &[f32], right: &[f32], sample_rate: f64) -> Result
         .iter()
         .map(|&band| coherence(&a, &b, sample_rate, Some(band), &mut planner))
         .collect();
-    Ok(StereoSignature { broadband, per_band })
+    Ok(StereoSignature {
+        broadband,
+        per_band,
+    })
 }
 
 /// A Schroeder backward integration in dB, normalised to 0 at the start.
@@ -644,7 +692,10 @@ pub fn schroeder_db(mono: &[f32]) -> Vec<f64> {
         cumulative[i] = cumulative[i + 1] + power[i];
     }
     let total = cumulative[0].max(1e-30);
-    cumulative[..end].iter().map(|&c| 10.0 * (c / total).max(1e-30).log10()).collect()
+    cumulative[..end]
+        .iter()
+        .map(|&c| 10.0 * (c / total).max(1e-30).log10())
+        .collect()
 }
 
 /// How far over its own floor a signal must stand for [`schroeder_db`] to keep
@@ -686,8 +737,11 @@ pub fn energy_decay(mono: &[f32], sample_rate: f64) -> EnergyDecay {
         .map(|&(lo, hi)| {
             let mut band = masked(&spec, sample_rate, Some((lo, hi)));
             inverse.process(&mut band);
-            let filtered: Vec<f32> =
-                band.iter().take(mono.len()).map(|c| c.re / n as f32).collect();
+            let filtered: Vec<f32> = band
+                .iter()
+                .take(mono.len())
+                .map(|c| c.re / n as f32)
+                .collect();
             let curve = schroeder_db(&filtered);
             (lo, hi, decay_time(&curve, sample_rate, -5.0, -25.0))
         })
@@ -853,8 +907,7 @@ impl RoomStage {
             let target = 10f64.powf(self.tail_level_db / 10.0);
             for (ch, out) in channels.iter_mut().enumerate() {
                 let mut draw = Draw::for_key(ch as u8, self.seed);
-                let noise: Vec<f32> =
-                    (0..n).map(|_| draw.normal() as f32).collect();
+                let noise: Vec<f32> = (0..n).map(|_| draw.normal() as f32).collect();
                 let mut planner = FftPlanner::<f32>::new();
                 let size = (n * 2).next_power_of_two();
                 let spec = spectrum(&noise, size, &mut planner);
@@ -896,7 +949,10 @@ impl RoomStage {
                 full.into_iter().take(x.len()).collect()
             })
             .collect();
-        Audio { sample_rate: audio.sample_rate, channels }
+        Audio {
+            sample_rate: audio.sample_rate,
+            channels,
+        }
     }
 }
 
@@ -929,7 +985,10 @@ mod tests {
         let n = signal.len().next_power_of_two();
         let mut planner = FftPlanner::<f32>::new();
         let spec = spectrum(signal, n, &mut planner);
-        let power: Vec<f64> = spec[..=n / 2].iter().map(|c| f64::from(c.norm_sqr())).collect();
+        let power: Vec<f64> = spec[..=n / 2]
+            .iter()
+            .map(|c| f64::from(c.norm_sqr()))
+            .collect();
         band_powers(&power, sample_rate)
     }
 
@@ -953,7 +1012,9 @@ mod tests {
             .iter()
             .map(|&f| 6.0 * (-((f.ln() - 3000f64.ln()).powi(2)) / (2.0 * 0.5f64.powi(2))).exp())
             .collect();
-        let jagged: Vec<f64> = (0..EQ_BANDS).map(|i| if i % 2 == 0 { 6.0 } else { -6.0 }).collect();
+        let jagged: Vec<f64> = (0..EQ_BANDS)
+            .map(|i| if i % 2 == 0 { 6.0 } else { -6.0 })
+            .collect();
         let mut draw = Draw::for_key(4, 5);
         let scatter: Vec<f64> = (0..EQ_BANDS).map(|_| draw.normal() * 6.0).collect();
         let a = cepstral_smooth(&smooth_in, CEPSTRAL_ORDER);
@@ -965,12 +1026,19 @@ mod tests {
             .map(|(x, y)| (x - y).abs())
             .fold(0.0f64, f64::max);
         let rms = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
-        assert!(err_a < 1.0, "a smooth bump should survive, worst error {err_a:.2} dB");
+        assert!(
+            err_a < 1.0,
+            "a smooth bump should survive, worst error {err_a:.2} dB"
+        );
         // A comb at the band grid's own Nyquist is the worst case for a
         // truncated DCT and is not removed outright: 6 dB of comb leaves under
         // 2, which is 10 dB of power. Band-to-band scatter — what a partial
         // series actually looks like on this grid — is left near nothing.
-        assert!(rms(&b) < 2.0, "a band-to-band comb should be cut hard, {:.2} dB rms", rms(&b));
+        assert!(
+            rms(&b) < 2.0,
+            "a band-to-band comb should be cut hard, {:.2} dB rms",
+            rms(&b)
+        );
         // Keeping `order` of `n` coefficients keeps `order / n` of a white
         // input's variance, so `sqrt(12 / 40) = 0.55` is the theoretical figure
         // and the test is that the implementation is at it rather than past it.
@@ -988,7 +1056,9 @@ mod tests {
         let centres = band_centres();
         let target: Vec<f64> = centres
             .iter()
-            .map(|&f| 6.0 * (-((f.ln() - 4000f64.ln()).powi(2)) / (2.0 * 0.6f64.powi(2))).exp() - 2.0)
+            .map(|&f| {
+                6.0 * (-((f.ln() - 4000f64.ln()).powi(2)) / (2.0 * 0.6f64.powi(2))).exp() - 2.0
+            })
             .collect();
         let eq = ChainEq::from_db(cepstral_smooth(&target, CEPSTRAL_ORDER)).expect("40 bands");
         let x = white(1 << 16, 7);
@@ -1001,7 +1071,10 @@ mod tests {
             let moved = 10.0 * (by[b] / bx[b]).log10();
             worst = worst.max((moved - eq.gains_db[b]).abs());
         }
-        assert!(worst < 1.0, "the filter should realise its own curve, worst {worst:.2} dB");
+        assert!(
+            worst < 1.0,
+            "the filter should realise its own curve, worst {worst:.2} dB"
+        );
     }
 
     #[test]
@@ -1045,7 +1118,12 @@ mod tests {
                     .zip(truth.iter())
                     .map(|(&e, &g)| e * 10f64.powf(g / 10.0))
                     .collect();
-                EqSample { engine, reference, key: 21 + i as u8, velocity: 90 }
+                EqSample {
+                    engine,
+                    reference,
+                    key: 21 + i as u8,
+                    velocity: 90,
+                }
             })
             .collect();
         let fit = fit_eq(&items);
@@ -1055,7 +1133,10 @@ mod tests {
             .zip(truth.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f64, f64::max);
-        assert!(worst < 0.6, "the fit should return the transfer, worst {worst:.2} dB");
+        assert!(
+            worst < 0.6,
+            "the fit should return the transfer, worst {worst:.2} dB"
+        );
     }
 
     #[test]
@@ -1065,10 +1146,16 @@ mod tests {
         let mut draw = Draw::for_key(5, 13);
         let base: Vec<EqSample> = (0..16)
             .map(|i| {
-                let engine: Vec<f64> =
-                    (0..EQ_BANDS).map(|_| 10f64.powf(draw.normal() * 0.5)).collect();
+                let engine: Vec<f64> = (0..EQ_BANDS)
+                    .map(|_| 10f64.powf(draw.normal() * 0.5))
+                    .collect();
                 let reference: Vec<f64> = engine.iter().map(|&e| e * 2.0).collect();
-                EqSample { engine, reference, key: 30 + i as u8, velocity: 90 }
+                EqSample {
+                    engine,
+                    reference,
+                    key: 30 + i as u8,
+                    velocity: 90,
+                }
             })
             .collect();
         let quiet: Vec<EqSample> = base
@@ -1083,9 +1170,15 @@ mod tests {
         let a = fit_eq(&base);
         let b = fit_eq(&quiet);
         let (mean_abs, _) = curve_agreement(&a.smooth_db, &b.smooth_db);
-        assert!(mean_abs < 1e-6, "a level offset moved the curve by {mean_abs:.4} dB");
+        assert!(
+            mean_abs < 1e-6,
+            "a level offset moved the curve by {mean_abs:.4} dB"
+        );
         let flat = a.smooth_db.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        assert!(flat < 1e-6, "a pure gain should fit a flat curve, {flat:.4} dB");
+        assert!(
+            flat < 1e-6,
+            "a pure gain should fit a flat curve, {flat:.4} dB"
+        );
     }
 
     #[test]
@@ -1109,7 +1202,12 @@ mod tests {
                     .enumerate()
                     .map(|(b, &e)| e * 10f64.powf((b as f64 - 18.0) * 0.4 / 10.0))
                     .collect();
-                EqSample { engine, reference, key: 21 + i as u8, velocity: 90 }
+                EqSample {
+                    engine,
+                    reference,
+                    key: 21 + i as u8,
+                    velocity: 90,
+                }
             })
             .collect();
         let fit = fit_eq(&items);
@@ -1123,7 +1221,10 @@ mod tests {
         // And the read range still carries the transfer it was given: +0.4 dB
         // per band, which is 9.6 dB across the 24 bands that were read.
         let span = fit.smooth_db[30] - fit.smooth_db[6];
-        assert!((span - 9.6).abs() < 1.5, "the read range should keep its slope, {span:.2} dB");
+        assert!(
+            (span - 9.6).abs() < 1.5,
+            "the read range should keep its slope, {span:.2} dB"
+        );
     }
 
     #[test]
@@ -1136,7 +1237,10 @@ mod tests {
         }
         let filled = fill_holes(&curve);
         assert!(filled.iter().all(|v| v.is_finite()));
-        assert!((filled[15] - 15.0).abs() < 1e-9, "a straight line should be interpolated");
+        assert!(
+            (filled[15] - 15.0).abs() < 1e-9,
+            "a straight line should be interpolated"
+        );
     }
 
     #[test]
@@ -1154,7 +1258,10 @@ mod tests {
         let mut shifted = vec![0.0f32; x.len()];
         shifted[delay..].copy_from_slice(&x[..x.len() - delay]);
         let sig = stereo_signature(&x, &shifted, sr).expect("two channels");
-        assert!(sig.broadband.zero_r.abs() < 0.2, "a 2 ms shift decorrelates at lag zero");
+        assert!(
+            sig.broadband.zero_r.abs() < 0.2,
+            "a 2 ms shift decorrelates at lag zero"
+        );
         assert!(
             (sig.broadband.lag_ms + 2.0).abs() < 0.1,
             "and peaks at the shift, read {:.2} ms",
@@ -1187,18 +1294,33 @@ mod tests {
         let sr = 48_000.0;
         let room = RoomStage {
             reflections: vec![
-                Reflection { delay_s: 0.011, gain_db: -9.0, side: -0.4 },
-                Reflection { delay_s: 0.019, gain_db: -12.0, side: 0.5 },
+                Reflection {
+                    delay_s: 0.011,
+                    gain_db: -9.0,
+                    side: -0.4,
+                },
+                Reflection {
+                    delay_s: 0.019,
+                    gain_db: -12.0,
+                    side: 0.5,
+                },
             ],
             tail_onset_s: 0.025,
             tail_level_db: -8.0,
-            tail_t60: vec![(250.0, 500.0, 0.5), (500.0, 2000.0, 0.45), (2000.0, 6000.0, 0.3)],
+            tail_t60: vec![
+                (250.0, 500.0, 0.5),
+                (500.0, 2000.0, 0.45),
+                (2000.0, 6000.0, 0.3),
+            ],
             reflection_lowpass_hz: 6_000.0,
             seed: 4,
         };
         let ir = room.impulse_response(sr);
         assert_eq!(ir.len(), 2);
-        assert!((ir[0][0] - 1.0).abs() < 0.05, "the direct sound is the first sample");
+        assert!(
+            (ir[0][0] - 1.0).abs() < 0.05,
+            "the direct sound is the first sample"
+        );
         let x = white(1 << 15, 17);
         let audio = Audio::new(48_000, vec![x.clone(), x.clone()]).expect("stereo");
         let out = room.apply(&audio);
@@ -1237,7 +1359,9 @@ mod tests {
 
     #[test]
     fn two_curves_that_agree_read_as_agreeing() {
-        let a: Vec<f64> = (0..EQ_BANDS).map(|i| (i as f64 / 10.0).sin() * 3.0).collect();
+        let a: Vec<f64> = (0..EQ_BANDS)
+            .map(|i| (i as f64 / 10.0).sin() * 3.0)
+            .collect();
         let b: Vec<f64> = a.iter().map(|v| v + 0.2).collect();
         let (mean_abs, r) = curve_agreement(&a, &b);
         assert!((mean_abs - 0.2).abs() < 1e-9);

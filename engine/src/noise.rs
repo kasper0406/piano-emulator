@@ -108,8 +108,7 @@ pub const NOMINAL_PEDAL_DRIVE: f32 = 1.0;
 /// therefore every level in `[noise]` — is quoted against. So a `[noise.strike]`
 /// level of −20 dB means −20 dB under the note it is part of, at the velocity
 /// that note was measured at.
-pub const NOMINAL_STRIKE_DRIVE: f32 =
-    crate::preset::NOMINAL_STRIKE_VELOCITY as f32 / 127.0;
+pub const NOMINAL_STRIKE_DRIVE: f32 = crate::preset::NOMINAL_STRIKE_VELOCITY as f32 / 127.0;
 
 /// Seed for the event on `key` at `frame`.
 ///
@@ -797,7 +796,10 @@ mod tests {
             shapes.pedal_down,
             shapes.pedal_up,
         ] {
-            assert_eq!(shape.limit, action_limit, "an action event moved its ceiling");
+            assert_eq!(
+                shape.limit, action_limit,
+                "an action event moved its ceiling"
+            );
         }
         assert_ne!(shapes.strike.limit, action_limit);
         assert_eq!(
@@ -869,7 +871,14 @@ mod tests {
         // Averaged over seeds: the peak of one realization of a noise band is
         // itself a random number, and that scatter is the feature.
         let mean: f32 = (0..8)
-            .map(|i| amp_to_db(peak(&render_seeded(&model, NOMINAL_STRIKE_DRIVE, 0.3, seed_of(60, i * 4096)))))
+            .map(|i| {
+                amp_to_db(peak(&render_seeded(
+                    &model,
+                    NOMINAL_STRIKE_DRIVE,
+                    0.3,
+                    seed_of(60, i * 4096),
+                )))
+            })
             .sum::<f32>()
             / 8.0;
         let re_strike = mean - amp_to_db(reference);
@@ -894,7 +903,10 @@ mod tests {
     #[test]
     fn a_silent_strike_level_never_starts_a_burst() {
         let preset = Preset::default();
-        assert_eq!(preset.noise.strike.level_db[0].db, crate::preset::SILENT_LEVEL_DB);
+        assert_eq!(
+            preset.noise.strike.level_db[0].db,
+            crate::preset::SILENT_LEVEL_DB
+        );
         let shapes = NoiseShapes::new(&preset.noise);
         let calibration = MechanismCalibration::new(&preset, &shapes);
         let model = EventModel::from_levels(
@@ -912,7 +924,10 @@ mod tests {
         assert!(!burst.is_active(), "a -200 dB strike started a burst");
         let mut out = [1.0f32; BLOCK];
         burst.add(&mut out);
-        assert!(out.iter().all(|&x| x == 1.0), "a silent strike wrote samples");
+        assert!(
+            out.iter().all(|&x| x == 1.0),
+            "a silent strike wrote samples"
+        );
     }
 
     /// Release velocity has to reach the level, or the key-off thump would be

@@ -1,4 +1,21 @@
-//! Standard MIDI file replay.
+//! MIDI in: a standard file replayed offline, and a keyboard played live.
+//!
+//! Three pieces, and they share one set of rules about what a message means:
+//!
+//! - this module, the **file** reader ([`parse`], [`load`]);
+//! - [`ump`], the **wire format** — Universal MIDI Packets and MIDI 1.0 bytes,
+//!   with no platform in it;
+//! - [`live`], **Core MIDI** (macOS only), which turns a hardware keyboard into
+//!   the same [`Event`]s the file reader produces.
+//!
+//! [`EventInput`] is where they meet the audio thread. The engine's queue is
+//! single-producer, and live playing has more than one producer — the REPL on
+//! the terminal thread, Core MIDI's own callback thread, and the pedal slew's
+//! ticker — so the producer end is owned by one mutex that only those threads
+//! ever touch. The audio thread holds the *consumer* and never locks anything,
+//! which is what keeps `DECISIONS.md` 55's contract exactly as it was.
+//!
+//! # Standard MIDI file replay
 //!
 //! A `.mid` file is turned into the same timed [`RenderEvent`] list the built-in
 //! demo uses, so replay goes through the engine's ordinary event path and comes
@@ -28,11 +45,54 @@
 //! Everything else — program changes, aftertouch, pitch bend, lyrics — is
 //! ignored: the engine has no use for it.
 
+#[cfg(target_os = "macos")]
+pub mod live;
+pub mod ump;
+
+use crate::engine::EventSender;
 use crate::render::RenderEvent;
 use crate::types::{Event, PedalEvent, DEFAULT_RELEASE_VELOCITY, HIGHEST_KEY, LOWEST_KEY};
 use midly::{MetaMessage, MidiMessage, Smf, Timing, TrackEventKind};
 use std::fmt;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+/// The one way into the engine's event queue, shared by every live producer.
+///
+/// The queue itself is unchanged — a pre-allocated SPSC ring, popped by the
+/// audio thread, never locked from there. What this adds is the *producer*
+/// side: `rtrb`'s producer is single-threaded by construction, and live play
+/// has three threads that want it (the REPL, Core MIDI's receive callback, and
+/// the sustain-pedal slew's ticker). A mutex on the producer end serialises
+/// exactly those three and nothing else. The audio thread's contract does not
+/// change and cannot be starved by it: it holds the consumer, and no lock the
+/// audio thread takes exists.
+///
+/// A [`send`](EventInput::send) that returns `false` found the queue full.
+/// Nothing retries: the queue holds far more events than a keyboard can
+/// produce between two audio callbacks, so a full queue means the audio thread
+/// has stopped, and dropping is better than blocking a MIDI callback.
+#[derive(Clone)]
+pub struct EventInput {
+    sender: Arc<Mutex<EventSender>>,
+}
+
+impl EventInput {
+    pub fn new(sender: EventSender) -> EventInput {
+        EventInput {
+            sender: Arc::new(Mutex::new(sender)),
+        }
+    }
+
+    /// Queues one event. False if the queue was full or a producer panicked
+    /// while holding the lock; either way the event is dropped, not retried.
+    pub fn send(&self, event: Event) -> bool {
+        match self.sender.lock() {
+            Ok(mut sender) => sender.send(event),
+            Err(_) => false,
+        }
+    }
+}
 
 /// MIDI controller numbers for the three pedals.
 const CC_SUSTAIN: u8 = 64;
@@ -131,7 +191,10 @@ fn translate(message: MidiMessage) -> Option<Event> {
         MidiMessage::NoteOn { key, vel } if vel.as_int() > 0 => {
             playable(key.as_int()).map(|key| Event::NoteOn {
                 key,
-                vel: vel.as_int(),
+                // A file is MIDI 1.0 by construction, so its velocities stay in
+                // the legacy lane of `types::velocity_from_midi` — the number
+                // in the file is the number in the event, as it always was.
+                vel: u16::from(vel.as_int()),
             })
         }
         MidiMessage::NoteOff { key, vel } => playable(key.as_int()).map(|key| Event::NoteOff {
@@ -140,7 +203,7 @@ fn translate(message: MidiMessage) -> Option<Event> {
             // not "released infinitely slowly".
             vel: match vel.as_int() {
                 0 => DEFAULT_RELEASE_VELOCITY,
-                v => v,
+                v => u16::from(v),
             },
         }),
         MidiMessage::NoteOn { key, .. } => playable(key.as_int()).map(|key| Event::NoteOff {
@@ -387,7 +450,7 @@ mod tests {
         event(0, &[0x80, 62, 0], &mut track); // keyboard has no measurement
         event(0, &[0x90, 64, 100], &mut track);
         event(0, &[0x90, 64, 0], &mut track); // note off written as velocity 0
-        // Quiet enough to miss escapement: the damper lifts, nothing sounds.
+                                              // Quiet enough to miss escapement: the damper lifts, nothing sounds.
         event(0, &[0x90, 65, 2], &mut track);
 
         let p = parse(&smf(DIVISION, &track)).expect("parses");
@@ -443,5 +506,42 @@ mod tests {
         };
         assert_eq!(energy(0.0, 0.49), 0.0, "sound before the first note on");
         assert!(energy(0.5, 1.0) > 1e-6, "the note never sounded");
+    }
+
+    /// The REPL and a keyboard are two producers and one queue, and the merge
+    /// is the whole of what makes `--midi-in` coexist with the terminal. Two
+    /// threads push at once; every event arrives, in one piece, and the audio
+    /// thread's side of the ring is untouched by either of them.
+    #[test]
+    fn two_producers_share_one_queue_without_losing_an_event() {
+        use crate::engine::Engine;
+        use crate::types::BLOCK;
+
+        let (mut engine, sender) = Engine::new(&Preset::default());
+        let input = EventInput::new(sender);
+        // Sixteen keys from each producer, interleaved by the scheduler.
+        let keys: Vec<u8> = (60..68).collect();
+        let threads: Vec<_> = [0u8, 1]
+            .into_iter()
+            .map(|half| {
+                let input = input.clone();
+                let keys = keys.clone();
+                std::thread::spawn(move || {
+                    for key in keys {
+                        assert!(input.send(Event::NoteOn {
+                            key: key + half * 8,
+                            vel: 80,
+                        }));
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("a producer panicked");
+        }
+
+        let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
+        engine.process(&mut l, &mut r);
+        assert_eq!(engine.active_voices(), 16, "an event was lost in the merge");
     }
 }

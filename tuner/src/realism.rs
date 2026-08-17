@@ -63,12 +63,28 @@
 //! * **B2 `velocity coherence`** ([`B2_GATE`]) — the column with the physics in
 //!   it, and the only one of the four that anything in this repository can move.
 //!
-//! ## What the numbers are not
+//! ## The stereo columns, and what this header used to say
 //!
-//! Every metric is computed on the **mono** sum. The engine places keys in the
+//! The five metrics above and columns A and B are all computed on the **mono**
+//! sum, and this header used to give the reason: the engine places keys in the
 //! stereo field by its own rule and a recording carries the microphone pair it
-//! was made with; a stereo distance would mostly measure that disagreement,
-//! which no preset parameter in scope can fix.
+//! was made with, so a stereo distance would mostly measure that disagreement.
+//! That was true and it was the wrong conclusion. `DECISIONS.md` 314 measured
+//! the disagreement and it is the **largest single difference in the chain
+//! experiment**: the recording's channels are +0.945 correlated below 125 Hz
+//! and near zero above, the engine's are −0.577 in the bass and +0.964 in the
+//! treble — exactly inverted, in every band — and nothing on the scoreboard
+//! could see it. A difference nothing scores is a difference nothing can
+//! regress, so item 317 (a) asks for the loss to get a stereo term *before* the
+//! two-microphone geometry of `PHYSICS.md` §8 is built.
+//!
+//! [`stereo_image`] is that term: per band, the interchannel correlation at lag
+//! zero, the peak |r| over ±5 ms and where it sits, and a mid/side energy
+//! ratio. [`stereo_columns`] scores it the way everything else here is scored,
+//! against a floor made of the reference disagreeing with itself. These columns
+//! are marked **STEREO** wherever they are printed, because every other number
+//! in this module is a mono sum and mixing the two would be a lie about what
+//! moved.
 //!
 //! Every metric assumes the two signals are **level-matched and aligned**.
 //! [`level_match`] does the first (whole-phrase RMS, both scaled to a common
@@ -270,12 +286,22 @@ impl MelBank {
     /// [`MEL_BANDS`] rows carry the level at their own frequency at every
     /// resolution — several low rows then repeat the same bin, which is an
     /// honest statement that the short window cannot separate them.
-    pub fn new(bands: usize, fft_size: usize, sample_rate: f64, f_min: f64, f_max: f64) -> Result<Self> {
+    pub fn new(
+        bands: usize,
+        fft_size: usize,
+        sample_rate: f64,
+        f_min: f64,
+        f_max: f64,
+    ) -> Result<Self> {
         if bands < 2 {
-            return Err(Error::Config(format!("{bands} mel bands is not a filterbank")));
+            return Err(Error::Config(format!(
+                "{bands} mel bands is not a filterbank"
+            )));
         }
         if fft_size < 4 || fft_size % 2 != 0 {
-            return Err(Error::Config(format!("fft size {fft_size} cannot be a mel bank")));
+            return Err(Error::Config(format!(
+                "fft size {fft_size} cannot be a mel bank"
+            )));
         }
         if !(f_min >= 0.0 && f_max > f_min && f_max <= sample_rate / 2.0) {
             return Err(Error::Config(format!(
@@ -515,8 +541,24 @@ pub fn log_mel_diff(
     hop: usize,
     bands: usize,
 ) -> Result<MelDiff> {
-    let a = mel_spectrogram(engine, sample_rate, window, hop, bands, MEL_F_MIN, MEL_F_MAX)?;
-    let b = mel_spectrogram(reference, sample_rate, window, hop, bands, MEL_F_MIN, MEL_F_MAX)?;
+    let a = mel_spectrogram(
+        engine,
+        sample_rate,
+        window,
+        hop,
+        bands,
+        MEL_F_MIN,
+        MEL_F_MAX,
+    )?;
+    let b = mel_spectrogram(
+        reference,
+        sample_rate,
+        window,
+        hop,
+        bands,
+        MEL_F_MIN,
+        MEL_F_MAX,
+    )?;
     let n = a.frames.len().min(b.frames.len());
     if n == 0 {
         return Err(Error::Config("no frames in common".into()));
@@ -535,7 +577,11 @@ pub fn log_mel_diff(
     let mut per_frame = vec![0.0f64; n];
     for (t, frame) in per_frame.iter_mut().enumerate() {
         let mut frame_sum = 0.0;
-        for (k, (band, signed)) in per_band.iter_mut().zip(signed_per_band.iter_mut()).enumerate() {
+        for (k, (band, signed)) in per_band
+            .iter_mut()
+            .zip(signed_per_band.iter_mut())
+            .enumerate()
+        {
             let d = db(a.frames[t][k]) - db(b.frames[t][k]);
             *band += d.abs();
             *signed += d;
@@ -559,7 +605,7 @@ pub fn log_mel_diff(
         signed_per_band,
         centres_hz: a.centres_hz.clone(),
         times_s: (0..n).map(|t| a.frame_time_s(t)).collect(),
-        })
+    })
 }
 
 /// `TUNING.md`'s stage-2 spectral loss: the mean over three resolutions of the
@@ -696,7 +742,9 @@ fn modulation_spectrum(signal: &[f32], sample_rate: f64) -> Result<ModulationSpe
     // honest answer for a band nothing audible is happening in.
     let global_peak = spec.peak_db();
     if !global_peak.is_finite() {
-        return Err(Error::Config("a silent signal has no modulation spectrum".into()));
+        return Err(Error::Config(
+            "a silent signal has no modulation spectrum".into(),
+        ));
     }
     let floor = global_peak + MODULATION_LEVEL_FLOOR_DB;
 
@@ -747,7 +795,17 @@ fn modulation_spectrum(signal: &[f32], sample_rate: f64) -> Result<ModulationSpe
             }
             row.push((sum / count as f64).sqrt());
         }
-        out.push(row.iter().map(|&m| if m > 0.0 { 20.0 * m.log10() } else { f64::NEG_INFINITY }).collect());
+        out.push(
+            row.iter()
+                .map(|&m| {
+                    if m > 0.0 {
+                        20.0 * m.log10()
+                    } else {
+                        f64::NEG_INFINITY
+                    }
+                })
+                .collect(),
+        );
     }
     Ok((out, spec.centres_hz, mod_centres))
 }
@@ -814,7 +872,13 @@ pub fn detect_onsets(signal: &[f32], sample_rate: f64) -> Result<Vec<f64>> {
         return Ok(Vec::new());
     }
     let floor = spec.peak_db() + MEL_FLOOR_DB;
-    let db = |e: f64| if e > 0.0 { (10.0 * e.log10()).max(floor) } else { floor };
+    let db = |e: f64| {
+        if e > 0.0 {
+            (10.0 * e.log10()).max(floor)
+        } else {
+            floor
+        }
+    };
 
     let mut flux = vec![0.0f64; n];
     for (t, slot) in flux.iter_mut().enumerate().skip(1) {
@@ -852,7 +916,10 @@ pub fn detect_onsets(signal: &[f32], sample_rate: f64) -> Result<Vec<f64>> {
         let whi = (t + half).min(n - 1);
         let window_slice = &flux[wlo..=whi];
         let mean = window_slice.iter().sum::<f64>() / window_slice.len() as f64;
-        let var = window_slice.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>()
+        let var = window_slice
+            .iter()
+            .map(|&x| (x - mean) * (x - mean))
+            .sum::<f64>()
             / window_slice.len() as f64;
         if flux[t] < mean + 0.6 * var.sqrt() {
             continue;
@@ -885,7 +952,10 @@ fn refine_onset(signal: &[f32], sample_rate: f64, frame_start: usize) -> f64 {
     for c in 0..cells {
         let s = start + c * step;
         let e = (s + step).min(end);
-        let mean: f64 = signal[s..e].iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>()
+        let mean: f64 = signal[s..e]
+            .iter()
+            .map(|&x| f64::from(x) * f64::from(x))
+            .sum::<f64>()
             / (e - s).max(1) as f64;
         level.push(mean.sqrt());
     }
@@ -1029,7 +1099,10 @@ pub fn attack_rise_s(signal: &[f32], sample_rate: f64, onset_s: f64) -> Option<f
         .map(|c| {
             let s = start + c * step;
             let e = (s + step).min(end);
-            signal[s..e].iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>()
+            signal[s..e]
+                .iter()
+                .map(|&x| f64::from(x) * f64::from(x))
+                .sum::<f64>()
                 / (e - s) as f64
         })
         .collect();
@@ -1119,10 +1192,13 @@ pub fn attack_tonality_delta(
         )
     };
     let n = deltas.len() as f64;
-    let worst = deltas
-        .iter()
-        .cloned()
-        .fold((0.0f64, 0.0f64), |acc, x| if x.1.abs() > acc.1.abs() { x } else { acc });
+    let worst = deltas.iter().cloned().fold((0.0f64, 0.0f64), |acc, x| {
+        if x.1.abs() > acc.1.abs() {
+            x
+        } else {
+            acc
+        }
+    });
     AttackDelta {
         onsets: deltas.len(),
         mean_signed_db: deltas.iter().map(|d| d.1).sum::<f64>() / n,
@@ -1163,7 +1239,9 @@ impl BandCorrelation {
 fn band_envelope(signal: &[f32], sample_rate: f64, lo_hz: f64, hi_hz: f64) -> Result<Vec<f64>> {
     let config = StftConfig::new(ENVELOPE_WINDOW, ENVELOPE_HOP, ENVELOPE_WINDOW)?;
     if config.frame_count(signal.len()) == 0 {
-        return Err(Error::Config("signal shorter than the envelope window".into()));
+        return Err(Error::Config(
+            "signal shorter than the envelope window".into(),
+        ));
     }
     let stft = Stft::new(config)?;
     let bin_hz = sample_rate / ENVELOPE_WINDOW as f64;
@@ -1179,10 +1257,20 @@ fn band_envelope(signal: &[f32], sample_rate: f64, lo_hz: f64, hi_hz: f64) -> Re
         out.push(sum);
     });
     let peak = out.iter().cloned().fold(0.0f64, f64::max);
-    let floor = if peak > 0.0 { 10.0 * peak.log10() - 60.0 } else { 0.0 };
+    let floor = if peak > 0.0 {
+        10.0 * peak.log10() - 60.0
+    } else {
+        0.0
+    };
     Ok(out
         .into_iter()
-        .map(|e| if e > 0.0 { (10.0 * e.log10()).max(floor) } else { floor })
+        .map(|e| {
+            if e > 0.0 {
+                (10.0 * e.log10()).max(floor)
+            } else {
+                floor
+            }
+        })
         .collect())
 }
 
@@ -1334,10 +1422,13 @@ pub fn release_tail_delta(
         };
     }
     let n = deltas.len() as f64;
-    let worst = deltas
-        .iter()
-        .cloned()
-        .fold((0.0f64, 0.0f64), |acc, x| if x.1.abs() > acc.1.abs() { x } else { acc });
+    let worst = deltas.iter().cloned().fold((0.0f64, 0.0f64), |acc, x| {
+        if x.1.abs() > acc.1.abs() {
+            x
+        } else {
+            acc
+        }
+    });
     ReleaseDelta {
         windows: deltas.len(),
         mean_signed_db: deltas.iter().map(|d| d.1).sum::<f64>() / n,
@@ -1355,7 +1446,12 @@ pub fn rms(signal: &[f32]) -> f64 {
     if signal.is_empty() {
         return 0.0;
     }
-    (signal.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / signal.len() as f64).sqrt()
+    (signal
+        .iter()
+        .map(|&x| f64::from(x) * f64::from(x))
+        .sum::<f64>()
+        / signal.len() as f64)
+        .sqrt()
 }
 
 fn scale(audio: &Audio, gain: f32) -> Audio {
@@ -1389,7 +1485,9 @@ fn peak(audio: &Audio) -> f32 {
 pub fn level_match(a: &Audio, b: &Audio) -> Result<(Audio, Audio)> {
     let (ra, rb) = (rms(&a.mono()), rms(&b.mono()));
     if ra <= 0.0 || rb <= 0.0 {
-        return Err(Error::Config("a silent render cannot be level-matched".into()));
+        return Err(Error::Config(
+            "a silent render cannot be level-matched".into(),
+        ));
     }
     let mut a = scale(a, (f64::from(TARGET_RMS) / ra) as f32);
     let mut b = scale(b, (f64::from(TARGET_RMS) / rb) as f32);
@@ -1658,7 +1756,11 @@ pub fn note_name(key: u8) -> String {
     const NAMES: [&str; 12] = [
         "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     ];
-    format!("{}{}", NAMES[usize::from(key) % 12], i32::from(key) / 12 - 1)
+    format!(
+        "{}{}",
+        NAMES[usize::from(key) % 12],
+        i32::from(key) / 12 - 1
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1699,7 +1801,9 @@ impl VelocityLayers {
 
     /// Index of the band a velocity falls in.
     pub fn band_of(&self, vel: u8) -> Option<usize> {
-        self.bands.iter().position(|&(lo, hi)| vel >= lo && vel <= hi)
+        self.bands
+            .iter()
+            .position(|&(lo, hi)| vel >= lo && vel <= hi)
     }
 
     /// A velocity in the band *next to* the one `vel` is in — one louder where
@@ -1715,7 +1819,11 @@ impl VelocityLayers {
         let Some(i) = self.band_of(vel) else {
             return vel;
         };
-        let j = if i + 1 < self.bands.len() { i + 1 } else { i.saturating_sub(1) };
+        let j = if i + 1 < self.bands.len() {
+            i + 1
+        } else {
+            i.saturating_sub(1)
+        };
         let (lo, hi) = self.bands[j];
         (((u16::from(lo) + u16::from(hi)) / 2) as u8).max(1)
     }
@@ -1728,7 +1836,10 @@ impl VelocityLayers {
             .map(|e| match e.event {
                 SamplerEvent::NoteOn { key, vel } => TimedEvent::new(
                     e.time_s,
-                    SamplerEvent::NoteOn { key, vel: self.alternate(vel) },
+                    SamplerEvent::NoteOn {
+                        key,
+                        vel: self.alternate(vel),
+                    },
                 ),
                 _ => *e,
             })
@@ -1943,37 +2054,37 @@ pub fn alberti_fast() -> Phrase {
 /// asks whether any one of its notes is textured unlike the rest. That question
 /// is only about *this* phrase if the two lists cannot drift apart.
 pub const ODE_MELODY: [(f64, u8, f64); 30] = [
-        (0.0, 64, 1.0),
-        (1.0, 64, 1.0),
-        (2.0, 65, 1.0),
-        (3.0, 67, 1.0),
-        (4.0, 67, 1.0),
-        (5.0, 65, 1.0),
-        (6.0, 64, 1.0),
-        (7.0, 62, 1.0),
-        (8.0, 60, 1.0),
-        (9.0, 60, 1.0),
-        (10.0, 62, 1.0),
-        (11.0, 64, 1.0),
-        (12.0, 64, 1.5),
-        (13.5, 62, 0.5),
-        (14.0, 62, 2.0),
-        (16.0, 64, 1.0),
-        (17.0, 64, 1.0),
-        (18.0, 65, 1.0),
-        (19.0, 67, 1.0),
-        (20.0, 67, 1.0),
-        (21.0, 65, 1.0),
-        (22.0, 64, 1.0),
-        (23.0, 62, 1.0),
-        (24.0, 60, 1.0),
-        (25.0, 60, 1.0),
-        (26.0, 62, 1.0),
-        (27.0, 64, 1.0),
-        (28.0, 62, 1.5),
-        (29.5, 60, 0.5),
-        (30.0, 60, 3.0),
-    ];
+    (0.0, 64, 1.0),
+    (1.0, 64, 1.0),
+    (2.0, 65, 1.0),
+    (3.0, 67, 1.0),
+    (4.0, 67, 1.0),
+    (5.0, 65, 1.0),
+    (6.0, 64, 1.0),
+    (7.0, 62, 1.0),
+    (8.0, 60, 1.0),
+    (9.0, 60, 1.0),
+    (10.0, 62, 1.0),
+    (11.0, 64, 1.0),
+    (12.0, 64, 1.5),
+    (13.5, 62, 0.5),
+    (14.0, 62, 2.0),
+    (16.0, 64, 1.0),
+    (17.0, 64, 1.0),
+    (18.0, 65, 1.0),
+    (19.0, 67, 1.0),
+    (20.0, 67, 1.0),
+    (21.0, 65, 1.0),
+    (22.0, 64, 1.0),
+    (23.0, 62, 1.0),
+    (24.0, 60, 1.0),
+    (25.0, 60, 1.0),
+    (26.0, 62, 1.0),
+    (27.0, 64, 1.0),
+    (28.0, 62, 1.5),
+    (29.5, 60, 0.5),
+    (30.0, 60, 3.0),
+];
 
 /// Seconds per beat in [`excerpt`] and in the soprano line taken out of it.
 pub const ODE_BEAT: f64 = 0.5;
@@ -2026,7 +2137,13 @@ pub fn excerpt() -> Phrase {
         sustain(&mut events, t + 0.10, true);
     }
     for (at, key, len) in melody {
-        note(&mut events, start + at * beat, key, ODE_MELODY_VEL, (len * beat - 0.05).max(0.08));
+        note(
+            &mut events,
+            start + at * beat,
+            key,
+            ODE_MELODY_VEL,
+            (len * beat - 0.05).max(0.08),
+        );
     }
     sustain(&mut events, start + 34.0 * beat, false);
     Phrase {
@@ -2224,7 +2341,9 @@ pub fn motion_columns(cells: &[MotionCell]) -> MotionColumns {
                 values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
                     - values.iter().copied().fold(f64::INFINITY, f64::min)
             };
-            engine_cents.push(spread(group.iter().map(|(e, _)| floor(e.band_cents)).collect()));
+            engine_cents.push(spread(
+                group.iter().map(|(e, _)| floor(e.band_cents)).collect(),
+            ));
             reference_cents.push(spread(
                 group.iter().map(|(_, r)| floor(r.band_cents)).collect(),
             ));
@@ -2267,6 +2386,700 @@ pub fn motion_columns(cells: &[MotionCell]) -> MotionColumns {
         cells: counted,
         velocity_cells: engine_cents.len(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The stereo columns: the one difference every metric above is blind to
+// ---------------------------------------------------------------------------
+
+//
+// `DECISIONS.md` 314 measured the engine's stereo image against the
+// recording's and found the largest single difference in the whole chain
+// experiment — and the only one no column of `REALISM.md` could see, because
+// every metric above is computed on the mono sum. The recording's two channels
+// are **+0.945 correlated below 125 Hz** and fall to about zero through the
+// mid and treble, with a peak |r| of 0.57-0.65 at lags of −0.23 to +1.98 ms:
+// that is a spaced pair of microphones, two capsules well inside a wavelength
+// of each other in the bass seeing one wavefront and seeing the same sound
+// about 60 % coherent at a sub-millisecond delay above it. The engine is
+// **exactly inverted** — a soundboard FDN whose two output taps carry opposite
+// signs decorrelates the bass to −0.577, and `soundboard::pan_for_key` scales
+// one mono voice into two channels, which is +0.964 at lag zero in the treble.
+//
+// Item 317 (a) is the instruction this section answers: *give the loss a
+// stereo term first*, because a stage built to fix something nothing scores is
+// a stage nobody can regress. Nothing here is a room — `PHYSICS.md` §9 is
+// refused by measurement in item 315 and stays out of scope. This measures the
+// **presentation**: an instrument and the pair of microphones in front of it,
+// §8's subject, which is what the interchannel table actually points at.
+
+/// The six bands the stereo image is read in.
+///
+/// `estimate::chain::SPATIAL_BANDS` exactly, so every number here is
+/// comparable to the table item 314 published. Four of the six are octaves and
+/// two are not — 500 Hz-2 kHz spans two and 2-6 kHz a little over one and a
+/// half — because the useful statistic up there is a *register* and not a
+/// band: above 2 kHz a piano note has forty partials in one octave and the
+/// correlation of any one of them is the correlation of its own beating.
+pub const STEREO_BANDS: [(&str, f64, f64); 6] = [
+    ("63-125", 63.0, 125.0),
+    ("125-250", 125.0, 250.0),
+    ("250-500", 250.0, 500.0),
+    ("500-2k", 500.0, 2_000.0),
+    ("2k-6k", 2_000.0, 6_000.0),
+    ("6k-12k", 6_000.0, 12_000.0),
+];
+
+/// Silence before the strike in a single-key stereo render, in **samples**.
+///
+/// Where the window a stereo image is read over *starts* is not a free choice,
+/// and the first version of this measurement made it one: it asked for 0.05 s
+/// of preroll, which is 2400 samples, which is not a whole number of the
+/// engine's 128-sample blocks. An event takes effect at the head of the block
+/// that contains it (`piano_emulator::render`), so the note began at sample
+/// 2304 and the window began at 2400 — **96 samples, two milliseconds, into a
+/// note that was supposed to start at its first sample**. `DECISIONS.md` 378 is
+/// what that cost, and it is two separate errors rather than one:
+///
+/// * A window that starts *inside* a note starts with a **step**, and a step is
+///   broadband. Measured on the shipped preset, the engine's 6-12 kHz band went
+///   from readable on 15 of the 30 recorded keys to readable on 29 and its
+///   median `r0` from −0.08 to +0.30 — an entire column made of the window's
+///   own edge. Fading that edge over the same 96 samples puts the band back
+///   where the aligned window has it (A0: −56.3 dB with the step, −66.9 dB
+///   faded, −72.1 dB aligned), which is the proof that it is the edge.
+/// * A window that starts *after* the strike is **missing the strike**, and in
+///   the engine's 125-500 Hz the strike is most of what a treble key has: the
+///   two bands' medians over the same thirty keys flip from `+0.204/+0.218` to
+///   `−0.221/−0.169` between the aligned window and the misaligned one. Fading
+///   the edge does *not* undo that, so it is content and not splatter.
+///
+/// The recording is unmoved by the same thing — its two mid bands read
+/// `−0.115/−0.226` aligned and `−0.105/−0.223` 96 samples in — which is what
+/// licenses reading it from an onset *detector* while the engine is read from
+/// the strike itself.
+///
+/// So the strike goes on the first sample of the window, and since the engine
+/// can only start a note at the head of a block, the preroll is a whole number
+/// of blocks: **3840 = 30 × 128**, 80 ms, long enough that an onset is never at
+/// sample zero. The callers that render this material — `tuner/tests/stereo.rs`
+/// and `tools::mics` — assert the block alignment at compile time.
+pub const STEREO_PREROLL_SAMPLES: usize = 3_840;
+
+/// Widest lag the interchannel correlation is searched over, seconds.
+///
+/// Five milliseconds is 1.7 m of air: wider than any mic pair and wider than
+/// the first reflection off a lid, and narrow enough that a piano partial's own
+/// period does not turn the search into a periodicity measurement above 200 Hz.
+pub const STEREO_MAX_LAG_S: f64 = 0.005;
+
+/// How far under the whole signal's energy a band may sit and still be read,
+/// in dB.
+///
+/// A correlation is a ratio of two energies, and in a band that holds none it
+/// is a ratio of two noise floors. A0's 6-12 kHz band is such a band; so is
+/// C8's 63-125 Hz. Reading them would put the arithmetic of silence into the
+/// median. The band is dropped from *every* signal of a comparison when it is
+/// unreadable in any one of them, so the three sides are always the same set.
+pub const STEREO_BAND_FLOOR_DB: f64 = -60.0;
+
+/// Ceiling on the reported mid/side ratio, dB.
+///
+/// The engine before this milestone can produce two channels that differ by a
+/// gain alone, whose side energy is exactly zero and whose ratio is therefore
+/// infinite. A median of infinities is an infinity and a table of them says
+/// nothing, so the ratio is clamped: ±60 dB is a side signal a millionth of the
+/// mid's energy, which is past any microphone pair and past any recording.
+pub const STEREO_MS_CLAMP_DB: f64 = 60.0;
+
+/// How much further than the reference's own disagreement with itself the
+/// engine is allowed to go before a stereo column fails.
+///
+/// `estimate::melody::ALLOWANCE`'s number and `estimate::melody`'s argument for
+/// it: a bar set at exactly the reference's own scatter fails half of a
+/// perfect instrument, and a quarter more is the smallest margin that does not.
+pub const STEREO_ALLOWANCE: f64 = 1.25;
+
+/// What two channels do in one band.
+#[derive(Clone, Copy, Debug)]
+pub struct StereoBand {
+    pub name: &'static str,
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    /// Normalised interchannel correlation at lag zero. This is the number a
+    /// pan-pot pins at +1 and item 314 found inverted; it is signed, so an
+    /// anti-correlated pair reads negative rather than merely small.
+    pub r0: f64,
+    /// The correlation at the lag of largest |r| over ±[`STEREO_MAX_LAG_S`],
+    /// signed. A spaced pair shows a peak well away from zero lag; a pan-pot
+    /// cannot.
+    pub peak_r: f64,
+    /// Where that peak is, in milliseconds.
+    ///
+    /// The correlation is `c[τ] = Σ_t L[t+τ]·R[t]`, so a right channel that is
+    /// the left one delayed peaks at **negative** τ: positive `lag_ms` means
+    /// the *right* channel leads and the source is nearer the right capsule.
+    /// (`estimate::chain`'s own test pins this — a 2 ms delay into the right
+    /// channel reads −2.00 ms — and the sentence its field carried said the
+    /// opposite.)
+    pub lag_ms: f64,
+    /// `10·log10` of mid energy over side energy in this band, mid `(L+R)/2`
+    /// and side `(L−R)/2`, clamped to ±[`STEREO_MS_CLAMP_DB`]. The same fact
+    /// as `r0` in energy terms for a level-balanced pair, and *not* the same
+    /// fact when the two channels differ in level, which is what makes it worth
+    /// printing beside it.
+    pub mid_side_db: f64,
+    /// This band's share of the whole signal's energy, dB. Zero or negative;
+    /// see [`STEREO_BAND_FLOOR_DB`].
+    pub level_db: f64,
+}
+
+impl StereoBand {
+    /// Is there enough in this band to make a ratio of two energies mean
+    /// anything?
+    pub fn readable(&self) -> bool {
+        self.level_db.is_finite() && self.level_db > STEREO_BAND_FLOOR_DB && self.r0.is_finite()
+    }
+}
+
+/// One signal's whole stereo image.
+#[derive(Clone, Debug)]
+pub struct StereoImage {
+    pub broadband: StereoBand,
+    pub bands: Vec<StereoBand>,
+}
+
+impl StereoImage {
+    /// The band a frequency falls in, clamped at both ends.
+    ///
+    /// Clamped rather than optional because the caller that needs this is the
+    /// compass, which asks for "the band of this key's fundamental" for all 88
+    /// keys — and A0's 27.5 Hz is under the lowest band's 63 Hz. What it gets
+    /// there is the band its *second* partial is in, which is the lowest band
+    /// the material supports, and the report says so.
+    pub fn band_for(hz: f64) -> usize {
+        STEREO_BANDS
+            .iter()
+            .position(|&(_, _, hi)| hz < hi)
+            .unwrap_or(STEREO_BANDS.len() - 1)
+    }
+
+    /// The band containing `hz`, by [`StereoImage::band_for`].
+    pub fn at(&self, hz: f64) -> StereoBand {
+        self.bands[Self::band_for(hz)]
+    }
+}
+
+fn stereo_spectrum(signal: &[f32], n: usize, planner: &mut FftPlanner<f32>) -> Vec<Complex32> {
+    let forward = planner.plan_fft_forward(n);
+    let mut buffer: Vec<Complex32> = (0..n)
+        .map(|i| Complex32::new(signal.get(i).copied().unwrap_or(0.0), 0.0))
+        .collect();
+    forward.process(&mut buffer);
+    buffer
+}
+
+/// One bin's contribution to the cross-spectrum and to the four energies.
+///
+/// The energies are accumulated over the same bins the cross-spectrum is built
+/// from rather than over a zeroed copy of the whole transform: Parseval gives
+/// the identical number for a fraction of the memory, which matters because a
+/// phrase is a million samples and there are seven bands.
+#[inline]
+fn stereo_accumulate(
+    j: usize,
+    a: &[Complex32],
+    b: &[Complex32],
+    cross: &mut [Complex32],
+    acc: &mut [f64; 4],
+) {
+    let (x, y) = (a[j], b[j]);
+    cross[j] = x * y.conj();
+    acc[0] += f64::from(x.norm_sqr());
+    acc[1] += f64::from(y.norm_sqr());
+    acc[2] += f64::from(((x + y) * 0.5).norm_sqr());
+    acc[3] += f64::from(((x - y) * 0.5).norm_sqr());
+}
+
+/// One band of the image, and the band's absolute energy so the next one can
+/// be quoted as a share of the whole.
+fn stereo_band(
+    a: &[Complex32],
+    b: &[Complex32],
+    sample_rate: f64,
+    band: Option<(&'static str, f64, f64)>,
+    total_energy: Option<f64>,
+    planner: &mut FftPlanner<f32>,
+) -> (StereoBand, f64) {
+    let n = a.len();
+    let mut cross = vec![Complex32::new(0.0, 0.0); n];
+    let mut acc = [0.0f64; 4];
+    match band {
+        None => {
+            for j in 0..n {
+                stereo_accumulate(j, a, b, &mut cross, &mut acc);
+            }
+        }
+        Some((_, lo, hi)) => {
+            let bin = |hz: f64| (hz * n as f64 / sample_rate).round() as usize;
+            let (blo, bhi) = (bin(lo).max(1), bin(hi).min(n / 2));
+            if bhi >= blo {
+                for j in blo..=bhi {
+                    stereo_accumulate(j, a, b, &mut cross, &mut acc);
+                    // The negative-frequency twin, which carries the same
+                    // energy and is what makes the inverse transform real.
+                    if n - j != j {
+                        stereo_accumulate(n - j, a, b, &mut cross, &mut acc);
+                    }
+                }
+            }
+        }
+    }
+    let scale = 1.0 / n as f64;
+    let (ea, eb, em, es) = (
+        acc[0] * scale,
+        acc[1] * scale,
+        acc[2] * scale,
+        acc[3] * scale,
+    );
+    let (name, lo, hi) = band.unwrap_or(("broadband", 0.0, sample_rate / 2.0));
+    let energy = ea + eb;
+    let level_db = 10.0 * (energy / total_energy.unwrap_or(energy).max(1e-300)).log10();
+    if ea <= 0.0 || eb <= 0.0 {
+        return (
+            StereoBand {
+                name,
+                lo_hz: lo,
+                hi_hz: hi,
+                r0: f64::NAN,
+                peak_r: f64::NAN,
+                lag_ms: f64::NAN,
+                mid_side_db: f64::NAN,
+                level_db: f64::NEG_INFINITY,
+            },
+            energy,
+        );
+    }
+    let inverse = planner.plan_fft_inverse(n);
+    inverse.process(&mut cross);
+    let norm = (ea * eb).sqrt();
+    let value = |lag: isize| -> f64 {
+        let idx = if lag >= 0 {
+            lag as usize
+        } else {
+            n - (-lag) as usize
+        };
+        f64::from(cross[idx].re) * scale / norm
+    };
+    let max_lag = ((STEREO_MAX_LAG_S * sample_rate).round() as usize)
+        .min(n / 4)
+        .max(1);
+    let mut best = (0isize, f64::NEG_INFINITY);
+    for lag in -(max_lag as isize)..=(max_lag as isize) {
+        let v = value(lag).abs();
+        if v > best.1 {
+            best = (lag, v);
+        }
+    }
+    (
+        StereoBand {
+            name,
+            lo_hz: lo,
+            hi_hz: hi,
+            r0: value(0),
+            peak_r: value(best.0),
+            lag_ms: best.0 as f64 / sample_rate * 1000.0,
+            mid_side_db: (10.0 * (em / es.max(1e-300)).log10())
+                .clamp(-STEREO_MS_CLAMP_DB, STEREO_MS_CLAMP_DB),
+            level_db,
+        },
+        energy,
+    )
+}
+
+/// The interchannel image of one signal: broadband and per [`STEREO_BANDS`].
+///
+/// Correlation is normalised per channel, so it is invariant to what
+/// [`level_match`] does and to any per-channel gain; the mid/side ratio is not,
+/// and is the column that sees a level imbalance.
+pub fn stereo_image(left: &[f32], right: &[f32], sample_rate: f64) -> Result<StereoImage> {
+    if left.is_empty() || right.is_empty() {
+        return Err(Error::Config("a stereo image needs two channels".into()));
+    }
+    // Twice the signal, rounded up: a circular correlation of a padded pair is
+    // the linear one over every lag the search looks at.
+    let n = (left.len().max(right.len()) * 2).next_power_of_two();
+    let mut planner = FftPlanner::<f32>::new();
+    let a = stereo_spectrum(left, n, &mut planner);
+    let b = stereo_spectrum(right, n, &mut planner);
+    let (broadband, total) = stereo_band(&a, &b, sample_rate, None, None, &mut planner);
+    let bands = STEREO_BANDS
+        .iter()
+        .map(|&band| stereo_band(&a, &b, sample_rate, Some(band), Some(total), &mut planner).0)
+        .collect();
+    Ok(StereoImage { broadband, bands })
+}
+
+/// [`stereo_image`] of an [`Audio`]'s first two channels.
+pub fn stereo_image_of(audio: &Audio) -> Result<StereoImage> {
+    if audio.channel_count() < 2 {
+        return Err(Error::Config("a stereo image needs two channels".into()));
+    }
+    stereo_image(
+        &audio.channels[0],
+        &audio.channels[1],
+        f64::from(audio.sample_rate),
+    )
+}
+
+/// One narrow band of the interchannel *profile*: the same two numbers
+/// [`StereoBand`] carries, at a resolution fine enough to see a shape rather
+/// than six values.
+///
+/// `STEREO_BANDS` is deliberately coarse — it is `estimate::chain`'s own band
+/// set, chosen so that the scoreboard's columns are comparable with item 314.
+/// Six numbers are enough to *score* an image and not enough to *model* one:
+/// `DECISIONS.md` 357 named the 125-500 Hz shortfall and said the missing thing
+/// was "measured directivity", and a measured directivity is a curve. This is
+/// that curve's sample.
+#[derive(Clone, Copy, Debug)]
+pub struct StereoProfilePoint {
+    /// Geometric centre of the band, Hz.
+    pub hz: f64,
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    /// Lag-zero interchannel correlation over this band alone.
+    pub r0: f64,
+    /// `10 log10` of the mid energy over the side energy, unclamped.
+    ///
+    /// This is the number the model is built on rather than `r0`, and the
+    /// reason is an identity: when the mid and the side are uncorrelated —
+    /// which is what a *difference* carried by an independent field means —
+    /// `r0 = (M − S)/(M + S)` exactly. So a mid/side ratio is a coherence, and
+    /// a filter that sets the ratio sets the coherence.
+    pub mid_side_db: f64,
+    /// The band's share of the whole signal's energy, dB.
+    pub level_db: f64,
+}
+
+/// Resolution of [`stereo_profile`], bands per octave.
+///
+/// Sixth-octave: fine enough that the recording's 125-500 Hz dip is a dozen
+/// points rather than two, coarse enough that one 3 s note holds hundreds of
+/// bins in every band down to 40 Hz.
+pub const STEREO_PROFILE_PER_OCTAVE: usize = 6;
+
+/// The band the profile starts and stops at, Hz. Below 40 Hz no key in the
+/// library has a fundamental and the recording's own noise floor takes over;
+/// above 16 kHz the library's own content stops.
+pub const STEREO_PROFILE_RANGE_HZ: (f64, f64) = (40.0, 16_000.0);
+
+/// The interchannel image of one signal as a *curve*: sixth-octave bands from
+/// 40 Hz to 16 kHz.
+///
+/// Same arithmetic as [`stereo_image`] — one FFT pair, the cross-spectrum and
+/// the four energies accumulated over each band's own bins — with the band list
+/// generated rather than tabulated, and without the ±5 ms lag search, which is
+/// meaningless in a sixth-octave band (one band of a periodic signal correlates
+/// with itself at every period).
+pub fn stereo_profile(left: &[f32], right: &[f32], sample_rate: f64) -> Result<Vec<StereoProfilePoint>> {
+    if left.is_empty() || right.is_empty() {
+        return Err(Error::Config("a stereo profile needs two channels".into()));
+    }
+    let n = (left.len().max(right.len())).next_power_of_two();
+    let mut planner = FftPlanner::<f32>::new();
+    let a = stereo_spectrum(left, n, &mut planner);
+    let b = stereo_spectrum(right, n, &mut planner);
+    let ratio = 2.0f64.powf(1.0 / STEREO_PROFILE_PER_OCTAVE as f64);
+    let half = ratio.sqrt();
+    let bin = |hz: f64| (hz * n as f64 / sample_rate).round() as usize;
+    let mut total = 0.0f64;
+    for (x, y) in a.iter().zip(&b) {
+        total += f64::from(x.norm_sqr()) + f64::from(y.norm_sqr());
+    }
+    total /= n as f64;
+    let mut points = Vec::new();
+    let mut hz = STEREO_PROFILE_RANGE_HZ.0;
+    while hz <= STEREO_PROFILE_RANGE_HZ.1 {
+        let (lo, hi) = (hz / half, hz * half);
+        let (blo, bhi) = (bin(lo).max(1), bin(hi).min(n / 2));
+        if bhi >= blo {
+            let mut acc = [0.0f64; 4];
+            for j in blo..=bhi {
+                let (x, y) = (a[j], b[j]);
+                acc[0] += f64::from(x.norm_sqr());
+                acc[1] += f64::from(y.norm_sqr());
+                acc[2] += f64::from(((x + y) * 0.5).norm_sqr());
+                acc[3] += f64::from(((x - y) * 0.5).norm_sqr());
+                // The negative-frequency twin carries the same energy; the
+                // real part of the cross-spectrum needs both.
+                let (u, v) = (a[n - j], b[n - j]);
+                acc[0] += f64::from(u.norm_sqr());
+                acc[1] += f64::from(v.norm_sqr());
+                acc[2] += f64::from(((u + v) * 0.5).norm_sqr());
+                acc[3] += f64::from(((u - v) * 0.5).norm_sqr());
+            }
+            let scale = 1.0 / n as f64;
+            let (ea, eb) = (acc[0] * scale, acc[1] * scale);
+            let (em, es) = (acc[2] * scale, acc[3] * scale);
+            // The zero-lag cross-energy *is* `M − S`: expand `(L±R)/2` and the
+            // like terms cancel, leaving `<L,R>`. So no inverse transform is
+            // needed for `r0`, and it is normalised by the same geometric mean
+            // [`stereo_band`] uses so the two agree where the bands coincide.
+            let r0 = if ea > 0.0 && eb > 0.0 {
+                (em - es) / (ea * eb).sqrt()
+            } else {
+                f64::NAN
+            };
+            points.push(StereoProfilePoint {
+                hz,
+                lo_hz: lo,
+                hi_hz: hi,
+                r0,
+                mid_side_db: 10.0 * (em / es.max(1e-300)).log10(),
+                level_db: 10.0 * ((ea + eb) / total.max(1e-300)).log10(),
+            });
+        }
+        hz *= ratio;
+    }
+    Ok(points)
+}
+
+/// [`stereo_profile`] of an [`Audio`]'s first two channels.
+pub fn stereo_profile_of(audio: &Audio) -> Result<Vec<StereoProfilePoint>> {
+    if audio.channel_count() < 2 {
+        return Err(Error::Config("a stereo profile needs two channels".into()));
+    }
+    stereo_profile(
+        &audio.channels[0],
+        &audio.channels[1],
+        f64::from(audio.sample_rate),
+    )
+}
+
+/// One thing — a phrase, or a key — measured three ways.
+///
+/// `alternate` is the floor's other half and it is what makes the column
+/// readable: a *second recording of the same piano playing the same music*,
+/// which for a phrase is the neighbouring velocity layer ([`VelocityLayers`])
+/// and for a single key is that key's other layer. Whatever the reference and
+/// its alternate disagree about, the engine is not asked to agree about.
+#[derive(Clone, Debug)]
+pub struct StereoItem {
+    pub label: String,
+    pub engine: StereoImage,
+    pub reference: StereoImage,
+    pub alternate: StereoImage,
+}
+
+/// One band of the stereo scoreboard, pooled over the items.
+#[derive(Clone, Debug)]
+pub struct StereoColumn {
+    pub band: usize,
+    pub name: &'static str,
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    /// Median over the items of each side's `r0`.
+    pub engine_r0: f64,
+    pub reference_r0: f64,
+    pub alternate_r0: f64,
+    /// Median |peak r| and the median lag it sits at, both sides.
+    pub engine_peak_r: f64,
+    pub reference_peak_r: f64,
+    pub engine_lag_ms: f64,
+    pub reference_lag_ms: f64,
+    /// Median mid/side ratio, both sides.
+    pub engine_mid_side_db: f64,
+    pub reference_mid_side_db: f64,
+    /// **The score**: |engine r0 − reference r0|, both medians. What this band
+    /// of the image *is*, engine against recording.
+    pub error: f64,
+    /// **The floor**: the identical statistic between the reference and its
+    /// alternate take — two recordings of one piano, reduced the same way.
+    pub floor: f64,
+    /// Robust sigma (1.4826·MAD) of the reference's own per-item `r0`: how much
+    /// this band's correlation moves across the material at all. Not a bar on
+    /// its own — a real instrument is *supposed* to move across the compass,
+    /// and being excused from a motion the recording makes is not a floor.
+    pub scatter: f64,
+    /// `scatter / sqrt(items)`: how well the material pins the reference's own
+    /// median. This is the term that says how precisely the question can be
+    /// asked at all.
+    pub uncertainty: f64,
+    /// `max(floor, uncertainty) · STEREO_ALLOWANCE`.
+    pub bar: f64,
+    /// The stricter statement, reported and **not gated**: the median over
+    /// items of the per-item |engine r0 − reference r0|, beside the same median
+    /// between the reference and its alternate take. A band whose median is
+    /// right key by key has the same value here as in [`StereoColumn::error`];
+    /// a band that is right on average and wrong at every key does not. This is
+    /// what `PHYSICS.md` §8's *per-key* delay and gain would have to close, and
+    /// the column exists so that closing the median alone cannot be mistaken
+    /// for closing the image.
+    pub per_key_error: f64,
+    pub per_key_floor: f64,
+    pub pass: bool,
+    /// Items that were readable in all three signals.
+    pub items: usize,
+    /// The item furthest off, and by how much.
+    pub worst: Option<(String, f64)>,
+}
+
+fn stereo_median(values: &[f64]) -> f64 {
+    crate::numeric::median(values).unwrap_or(f64::NAN)
+}
+
+/// Robust sigma: `1.4826 · MAD`, the same estimator the compass scores with.
+fn stereo_sigma(values: &[f64]) -> f64 {
+    let centre = stereo_median(values);
+    let spread: Vec<f64> = values.iter().map(|v| (v - centre).abs()).collect();
+    1.4826 * stereo_median(&spread)
+}
+
+/// The stereo scoreboard: one row per band, engine against reference, with the
+/// reference's own disagreement with itself beside it.
+///
+/// **The score is a median against a median.** Per band, the engine's r@0
+/// pooled over the items against the reference's, pooled the same way. The bar
+/// is `max(floor, uncertainty) · `[`STEREO_ALLOWANCE`], and both of its terms
+/// are the reference disagreeing with itself: `floor` is the same median taken
+/// on a *second recording* of the same material — the neighbouring velocity
+/// layer — and `uncertainty` is `scatter / sqrt(n)`, how well n items pin a
+/// median that moves by `scatter` across them. Nothing in the bar is a function
+/// of the engine, which is the property that makes it a bar rather than a
+/// description: a threshold fitted to what the engine happens to do cannot be
+/// failed.
+///
+/// **Why the pooled scatter is not itself the bar**, though the melody gate's
+/// population term is the analogous thing: a recording's r@0 moves across the
+/// compass because the keys are in different places relative to the
+/// microphones, and that motion is a fact the engine is meant to *reproduce*,
+/// not to be excused from. Using it as the bar would let a band pass at +0.71
+/// where the recording reads 0.00, purely because the recording's own keys
+/// scatter by 0.45 about that zero. It enters as `sqrt(n)` smaller instead —
+/// the precision of the question, not a licence to miss it — and the per-key
+/// distance is reported beside the pooled one so that a model which fixes the
+/// median without fixing the image is visible as such.
+pub fn stereo_columns(items: &[StereoItem]) -> Vec<StereoColumn> {
+    STEREO_BANDS
+        .iter()
+        .enumerate()
+        .map(|(b, &(name, lo, hi))| {
+            let readable: Vec<&StereoItem> = items
+                .iter()
+                .filter(|it| {
+                    it.engine.bands[b].readable()
+                        && it.reference.bands[b].readable()
+                        && it.alternate.bands[b].readable()
+                })
+                .collect();
+            let pick = |f: fn(&StereoBand) -> f64, side: fn(&StereoItem) -> &StereoImage| {
+                readable
+                    .iter()
+                    .map(|it| f(&side(it).bands[b]))
+                    .collect::<Vec<f64>>()
+            };
+            fn engine(it: &StereoItem) -> &StereoImage {
+                &it.engine
+            }
+            fn reference(it: &StereoItem) -> &StereoImage {
+                &it.reference
+            }
+            fn alternate(it: &StereoItem) -> &StereoImage {
+                &it.alternate
+            }
+            let e_r0 = pick(|x| x.r0, engine);
+            let r_r0 = pick(|x| x.r0, reference);
+            let a_r0 = pick(|x| x.r0, alternate);
+            let errors: Vec<f64> = e_r0.iter().zip(&r_r0).map(|(e, r)| (e - r).abs()).collect();
+            let floors: Vec<f64> = a_r0.iter().zip(&r_r0).map(|(a, r)| (a - r).abs()).collect();
+            let (median_e, median_r, median_a) = (
+                stereo_median(&e_r0),
+                stereo_median(&r_r0),
+                stereo_median(&a_r0),
+            );
+            let error = (median_e - median_r).abs();
+            let floor = (median_a - median_r).abs();
+            let scatter = stereo_sigma(&r_r0);
+            let uncertainty = if readable.is_empty() {
+                f64::NAN
+            } else {
+                scatter / (readable.len() as f64).sqrt()
+            };
+            let bar = floor.max(uncertainty) * STEREO_ALLOWANCE;
+            let worst = errors
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, &d)| (readable[i].label.clone(), d));
+            StereoColumn {
+                band: b,
+                name,
+                lo_hz: lo,
+                hi_hz: hi,
+                engine_r0: median_e,
+                reference_r0: median_r,
+                alternate_r0: median_a,
+                engine_peak_r: stereo_median(&pick(|x| x.peak_r.abs(), engine)),
+                reference_peak_r: stereo_median(&pick(|x| x.peak_r.abs(), reference)),
+                engine_lag_ms: stereo_median(&pick(|x| x.lag_ms, engine)),
+                reference_lag_ms: stereo_median(&pick(|x| x.lag_ms, reference)),
+                engine_mid_side_db: stereo_median(&pick(|x| x.mid_side_db, engine)),
+                reference_mid_side_db: stereo_median(&pick(|x| x.mid_side_db, reference)),
+                error,
+                floor,
+                scatter,
+                uncertainty,
+                bar,
+                per_key_error: stereo_median(&errors),
+                per_key_floor: stereo_median(&floors),
+                pass: error.is_finite() && bar.is_finite() && error <= bar,
+                items: readable.len(),
+                worst,
+            }
+        })
+        .collect()
+}
+
+/// The stereo table, as `REALISM.md` prints it and as the gate prints itself
+/// when it fails. One writer so the scoreboard and the gate never disagree.
+pub fn stereo_report(columns: &[StereoColumn]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "| band | engine r@0 | reference r@0 | \\|err\\| | bar | floor | scatter | per-item \\|err\\| / floor | \
+engine peak \\|r\\| @ lag | reference peak \\|r\\| @ lag | engine M/S | reference M/S | n |"
+    );
+    let _ = writeln!(
+        s,
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    );
+    for c in columns {
+        let _ = writeln!(
+            s,
+            "| `{}` | {:+.3} | {:+.3} | {:.3} | {:.3}{} | {:.3} | {:.3} | {:.3} / {:.3} | \
+{:.3} @ {:+.2} ms | {:.3} @ {:+.2} ms | {:+.1} dB | {:+.1} dB | {} |",
+            c.name,
+            c.engine_r0,
+            c.reference_r0,
+            c.error,
+            c.bar,
+            if c.pass { "" } else { " **RED**" },
+            c.floor,
+            c.scatter,
+            c.per_key_error,
+            c.per_key_floor,
+            c.engine_peak_r,
+            c.engine_lag_ms,
+            c.reference_peak_r,
+            c.reference_lag_ms,
+            c.engine_mid_side_db,
+            c.reference_mid_side_db,
+            c.items
+        );
+    }
+    s
 }
 
 #[cfg(test)]
@@ -2343,12 +3156,17 @@ mod tests {
     #[test]
     fn a_tone_lands_in_the_band_that_contains_it() {
         let signal = sine(1000.0, 0.5, SR, 48_000);
-        let spec = mel_spectrogram(&signal, SR, 4096, 1024, MEL_BANDS, MEL_F_MIN, MEL_F_MAX).unwrap();
+        let spec =
+            mel_spectrogram(&signal, SR, 4096, 1024, MEL_BANDS, MEL_F_MIN, MEL_F_MAX).unwrap();
         let mid = spec.frames.len() / 2;
-        let (best, _) = spec.frames[mid]
-            .iter()
-            .enumerate()
-            .fold((0usize, 0.0f64), |acc, (i, &e)| if e > acc.1 { (i, e) } else { acc });
+        let (best, _) =
+            spec.frames[mid]
+                .iter()
+                .enumerate()
+                .fold(
+                    (0usize, 0.0f64),
+                    |acc, (i, &e)| if e > acc.1 { (i, e) } else { acc },
+                );
         let centre = spec.centres_hz[best];
         assert!(
             (centre - 1000.0).abs() < 120.0,
@@ -2385,13 +3203,19 @@ mod tests {
             let (late, early): (Vec<f32>, Vec<f32>) = if shift_ms >= 0.0 {
                 // `late` starts with silence, so it lags.
                 (
-                    std::iter::repeat(0.0).take(shift).chain(x.iter().copied()).collect(),
+                    std::iter::repeat(0.0)
+                        .take(shift)
+                        .chain(x.iter().copied())
+                        .collect(),
                     x.clone(),
                 )
             } else {
                 (
                     x.clone(),
-                    std::iter::repeat(0.0).take(shift).chain(x.iter().copied()).collect(),
+                    std::iter::repeat(0.0)
+                        .take(shift)
+                        .chain(x.iter().copied())
+                        .collect(),
                 )
             };
             let lag = envelope_lag_s(&late, &early, SR, 0.05).unwrap();
@@ -2428,7 +3252,11 @@ mod tests {
         for &extra_db in &[-40.0, -20.0, -10.0, 0.0f64] {
             let amp = 10.0f64.powf(extra_db / 20.0);
             let added = sine(3_000.0, amp * 0.2, SR, base.len());
-            let perturbed: Vec<f32> = base.iter().zip(added.iter()).map(|(&a, &b)| a + b).collect();
+            let perturbed: Vec<f32> = base
+                .iter()
+                .zip(added.iter())
+                .map(|(&a, &b)| a + b)
+                .collect();
             let d = multi_res_log_mel_distance(&perturbed, &base, SR).unwrap();
             assert!(
                 d.mean > previous,
@@ -2444,7 +3272,11 @@ mod tests {
     fn the_worst_band_is_the_one_that_was_changed() {
         let base = plucks(220.0, 0.5, 1.5, 4.0, SR);
         let added = sine(3_000.0, 0.15, SR, base.len());
-        let perturbed: Vec<f32> = base.iter().zip(added.iter()).map(|(&a, &b)| a + b).collect();
+        let perturbed: Vec<f32> = base
+            .iter()
+            .zip(added.iter())
+            .map(|(&a, &b)| a + b)
+            .collect();
         let d = log_mel_diff(&perturbed, &base, SR, 4096, 1024, MEL_BANDS).unwrap();
         let (hz, db) = d.worst_band();
         assert!((hz - 3_000.0).abs() < 400.0, "worst band at {hz} Hz");
@@ -2604,14 +3436,22 @@ mod tests {
         assert!((slow - 0.020).abs() < 0.003, "{slow} s");
 
         let d = attack_tonality_delta(&instant, &ramped, SR, &[0.0]);
-        assert!(d.rise_s.0 < 0.003 && (d.rise_s.1 - 0.020).abs() < 0.003, "{:?}", d.rise_s);
+        assert!(
+            d.rise_s.0 < 0.003 && (d.rise_s.1 - 0.020).abs() < 0.003,
+            "{:?}",
+            d.rise_s
+        );
     }
 
     #[test]
     fn the_band_correlation_falls_when_one_register_moves_differently() {
         let bass = plucks(80.0, 0.7, 1.2, 4.0, SR);
         let treble = plucks(3_000.0, 0.5, 0.6, 4.0, SR);
-        let together: Vec<f32> = bass.iter().zip(treble.iter()).map(|(&a, &b)| a + b).collect();
+        let together: Vec<f32> = bass
+            .iter()
+            .zip(treble.iter())
+            .map(|(&a, &b)| a + b)
+            .collect();
         // Same bass, treble struck on a different grid.
         let other_treble = plucks(3_000.0, 0.23, 0.6, 4.0, SR);
         let scrambled: Vec<f32> = bass
@@ -2640,7 +3480,11 @@ mod tests {
         }
         let d = release_tail_delta(&loud, &quiet, SR, &[1.0], &[0.0]);
         assert_eq!(d.windows, 1);
-        assert!((d.mean_signed_db - 6.02).abs() < 0.05, "{}", d.mean_signed_db);
+        assert!(
+            (d.mean_signed_db - 6.02).abs() < 0.05,
+            "{}",
+            d.mean_signed_db
+        );
         // A note-on inside the window disqualifies it.
         let blocked = release_tail_delta(&loud, &quiet, SR, &[1.0], &[0.0, 1.3]);
         assert_eq!(blocked.windows, 0);
@@ -2662,7 +3506,12 @@ mod tests {
                 phrase.name,
                 phrase.duration_s
             );
-            assert!(phrase.note_count() >= 8, "{} has {} notes", phrase.name, phrase.note_count());
+            assert!(
+                phrase.note_count() >= 8,
+                "{} has {} notes",
+                phrase.name,
+                phrase.note_count()
+            );
 
             let mut held: Vec<u8> = Vec::new();
             let mut ordered = phrase.events.clone();
@@ -2684,7 +3533,11 @@ mod tests {
                     }
                     SamplerEvent::NoteOff { key, .. } => {
                         let at = held.iter().position(|&k| k == key);
-                        assert!(at.is_some(), "{}: key {key} released without a strike", phrase.name);
+                        assert!(
+                            at.is_some(),
+                            "{}: key {key} released without a strike",
+                            phrase.name
+                        );
                         held.remove(at.unwrap());
                     }
                     SamplerEvent::Sustain(v) => {
@@ -2692,7 +3545,10 @@ mod tests {
                         // reads CC 64 as a switch. Only the stops are used.
                         assert!(v == 0.0 || v == 1.0, "{}: half pedal {v}", phrase.name);
                     }
-                    other => panic!("{}: {other:?} is not comparable between the two players", phrase.name),
+                    other => panic!(
+                        "{}: {other:?} is not comparable between the two players",
+                        phrase.name
+                    ),
                 }
             }
             assert!(held.is_empty(), "{}: {held:?} never released", phrase.name);
@@ -2703,7 +3559,11 @@ mod tests {
     fn the_pedalled_phrases_are_the_ones_that_use_the_pedal() {
         let pedalled: Vec<&str> = phrase_set()
             .iter()
-            .filter(|p| p.events.iter().any(|e| matches!(e.event, SamplerEvent::Sustain(_))))
+            .filter(|p| {
+                p.events
+                    .iter()
+                    .any(|e| matches!(e.event, SamplerEvent::Sustain(_)))
+            })
             .map(|p| p.name)
             .collect();
         assert_eq!(pedalled, vec!["chords_pedal", "excerpt"]);
@@ -2716,7 +3576,10 @@ mod tests {
         let offs = phrase.note_off_times();
         let clean = offs
             .iter()
-            .filter(|&&t| !ons.iter().any(|&on| on > t - 0.02 && on < t + RELEASE_WINDOW_S))
+            .filter(|&&t| {
+                !ons.iter()
+                    .any(|&on| on > t - 0.02 && on < t + RELEASE_WINDOW_S)
+            })
             .count();
         assert_eq!(clean, offs.len(), "{clean} clean of {}", offs.len());
     }
@@ -2729,7 +3592,9 @@ mod tests {
         for vel in 1..=127u8 {
             let alt = layers.alternate(vel);
             match (layers.band_of(vel), layers.band_of(alt)) {
-                (Some(a), Some(b)) => assert_ne!(a, b, "velocity {vel} -> {alt} stayed in band {a}"),
+                (Some(a), Some(b)) => {
+                    assert_ne!(a, b, "velocity {vel} -> {alt} stayed in band {a}")
+                }
                 (None, _) => assert_eq!(alt, vel, "an unmapped velocity must be left alone"),
                 (Some(_), None) => panic!("velocity {vel} -> {alt}, which is in no layer"),
             }
@@ -2798,7 +3663,10 @@ mod tests {
     #[test]
     fn the_register_a_bar_is_measured_in_is_the_recorded_keys_of_that_register() {
         let keys = minor_thirds();
-        assert_eq!(keys.in_range(51, 76), vec![51, 54, 57, 60, 63, 66, 69, 72, 75]);
+        assert_eq!(
+            keys.in_range(51, 76),
+            vec![51, 54, 57, 60, 63, 66, 69, 72, 75]
+        );
         assert!(keys.in_range(61, 62).is_empty());
     }
 
@@ -2823,7 +3691,10 @@ mod tests {
         for (a, b) in phrase.events.iter().zip(shifted.iter()) {
             assert_eq!(a.time_s, b.time_s);
             match (a.event, b.event) {
-                (SamplerEvent::NoteOn { key: k1, vel: v1 }, SamplerEvent::NoteOn { key: k2, vel: v2 }) => {
+                (
+                    SamplerEvent::NoteOn { key: k1, vel: v1 },
+                    SamplerEvent::NoteOn { key: k2, vel: v2 },
+                ) => {
                     assert_eq!(k1, k2);
                     assert_ne!(v1, v2);
                 }
@@ -2834,7 +3705,13 @@ mod tests {
 
     // ---- Columns A and B -------------------------------------------------
 
-    fn cell(key: u8, k: u32, velocity: u8, engine: (f64, f64, f64), reference: (f64, f64, f64)) -> MotionCell {
+    fn cell(
+        key: u8,
+        k: u32,
+        velocity: u8,
+        engine: (f64, f64, f64),
+        reference: (f64, f64, f64),
+    ) -> MotionCell {
         let motion = |(band, placement, depth): (f64, f64, f64)| Motion {
             mean_hz: 440.0,
             peak_db: 40.0,
@@ -2873,7 +3750,11 @@ mod tests {
         let columns = motion_columns(&cells);
         assert_eq!(columns.cells, 16);
         assert_eq!(columns.velocity_cells, 16);
-        assert!((columns.if_mismatch - 1.0).abs() < 1e-12, "{}", columns.if_mismatch);
+        assert!(
+            (columns.if_mismatch - 1.0).abs() < 1e-12,
+            "{}",
+            columns.if_mismatch
+        );
         assert!((columns.if_placement - 1.0).abs() < 1e-12);
         assert!(columns.beat_depth_error_db < 1e-12);
         assert!((columns.velocity_coherence - 1.0).abs() < 1e-12);
@@ -2910,7 +3791,11 @@ mod tests {
         let still = motion_columns(&[cell(60, 1, 90, (0.1, 0.5, 3.0), (3.0, 0.5, 3.0))]);
         let spiky = motion_columns(&[cell(60, 1, 90, (3.0, 0.5, 3.0), (0.1, 0.5, 3.0))]);
         assert!((still.if_mismatch - spiky.if_mismatch).abs() < 1e-12);
-        assert!((still.if_mismatch - 30.0).abs() < 1e-9, "{}", still.if_mismatch);
+        assert!(
+            (still.if_mismatch - 30.0).abs() < 1e-9,
+            "{}",
+            still.if_mismatch
+        );
         assert!(!still.passes());
     }
 
@@ -2931,7 +3816,11 @@ mod tests {
             }
         }
         let columns = motion_columns(&cells);
-        assert!(columns.velocity_coherence < 1e-12, "{}", columns.velocity_coherence);
+        assert!(
+            columns.velocity_coherence < 1e-12,
+            "{}",
+            columns.velocity_coherence
+        );
         assert!(columns.spread_cents.0 < 1e-12 && columns.spread_cents.1 > 1.0);
         assert!(!columns.passes());
     }
@@ -2946,6 +3835,424 @@ mod tests {
         assert!(columns.if_mismatch.is_nan());
     }
 
+    // -----------------------------------------------------------------------
+    // The stereo columns
+    // -----------------------------------------------------------------------
+
+    /// Pink-ish broadband noise, so every band of the image has something in it.
+    fn stereo_noise(n: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let mut lp = 0.0f64;
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let u = ((state >> 32) as f64 / (1u64 << 31) as f64) - 1.0;
+                // One pole of integration lifts the bass so the 63-125 Hz band
+                // clears the level floor; the raw white part keeps the treble.
+                lp = 0.98 * lp + 0.02 * u;
+                (0.5 * u + 6.0 * lp) as f32
+            })
+            .collect()
+    }
+
+    /// [`stereo_profile`] and [`stereo_image`] are one measurement at two
+    /// resolutions, so they have to agree: the profile's points inside a
+    /// scoreboard band, weighted by their own energy, are that band's `r0`.
+    ///
+    /// Not a tautology — the two take different transform lengths, different
+    /// bin sets and different normalisations, and the profile skips the lag
+    /// search entirely because it computes the zero-lag value in closed form
+    /// (`M - S` *is* the cross-energy). If that shortcut were wrong this is
+    /// where it would show.
+    #[test]
+    fn the_profile_and_the_six_bands_are_one_measurement_at_two_resolutions() {
+        let x = stereo_noise(1 << 16, 23);
+        // A delayed, partly independent right channel: something with real
+        // structure across frequency rather than a constant.
+        let other = stereo_noise(1 << 16, 24);
+        let right: Vec<f32> = (0..x.len())
+            .map(|i| 0.8 * x[i.saturating_sub(9)] + 0.4 * other[i])
+            .collect();
+        let image = stereo_image(&x, &right, SR).expect("two channels");
+        let profile = stereo_profile(&x, &right, SR).expect("two channels");
+        assert!(profile.len() > 40, "a sixth-octave profile is a curve");
+        for (b, band) in image.bands.iter().enumerate() {
+            if !band.readable() {
+                continue;
+            }
+            let (mut num, mut den) = (0.0f64, 0.0f64);
+            for point in &profile {
+                if point.hz < band.lo_hz || point.hz >= band.hi_hz {
+                    continue;
+                }
+                // The point's own energy, from its level share.
+                let w = 10.0f64.powf(point.level_db / 10.0);
+                num += w * point.r0;
+                den += w;
+            }
+            if den <= 0.0 {
+                continue;
+            }
+            let pooled = num / den;
+            assert!(
+                (pooled - band.r0).abs() < 0.06,
+                "{}: the curve pools to {pooled:+.4} where the band reads {:+.4}",
+                band.name,
+                band.r0
+            );
+            assert_eq!(b, StereoImage::band_for(band.lo_hz + 1.0));
+        }
+    }
+
+    /// The profile is what makes an *anti-phase* band visible as a shape, and
+    /// the shape is the model: a side signal larger than the mid is a negative
+    /// `r0`, and the mid/side ratio and the correlation say the same thing.
+    ///
+    /// Built here rather than measured: mid and side are made independent, and
+    /// the side is band-limited and lifted. Below the band the pair is `+1`,
+    /// inside it is negative, above it is `+1` again — which is exactly the
+    /// three-regime curve `soundboard::ModalLobe` produces and the recording
+    /// has (`DECISIONS.md` 369).
+    #[test]
+    fn a_side_larger_than_the_mid_reads_as_a_negative_lobe_in_the_profile() {
+        let mid = stereo_noise(1 << 16, 31);
+        let side_source = stereo_noise(1 << 16, 32);
+        // A band-limited side — three one-poles on the lower edge and two on
+        // the upper, so the skirts do not put the lobe's own energy into the
+        // probes above and below it — at seven times the level, which is what
+        // it takes for the side to beat the mid inside a band that steep.
+        let (lo, hi) = (200.0f64, 500.0f64);
+        let coeff = |hz: f64| 1.0 - (-std::f64::consts::TAU * hz / SR).exp();
+        let (a, b) = (coeff(lo), coeff(hi));
+        let (mut low, mut high) = ([0.0f64; 3], [0.0f64; 2]);
+        let side: Vec<f32> = side_source
+            .iter()
+            .map(|&x| {
+                let mut y = f64::from(x);
+                for state in &mut low {
+                    *state += a * (y - *state);
+                    y -= *state;
+                }
+                for state in &mut high {
+                    *state += b * (y - *state);
+                    y = *state;
+                }
+                (7.0 * y) as f32
+            })
+            .collect();
+        let left: Vec<f32> = mid.iter().zip(&side).map(|(&m, &s)| m + s).collect();
+        let right: Vec<f32> = mid.iter().zip(&side).map(|(&m, &s)| m - s).collect();
+        let profile = stereo_profile(&left, &right, SR).expect("two channels");
+        let at = |hz: f64| -> StereoProfilePoint {
+            *profile
+                .iter()
+                .min_by(|p, q| {
+                    (p.hz / hz).ln().abs().total_cmp(&(q.hz / hz).ln().abs())
+                })
+                .expect("a point")
+        };
+        let (below, inside, above) = (at(63.0), at(320.0), at(4_000.0));
+        assert!(below.r0 > 0.8, "under the lobe: {:+.3}", below.r0);
+        assert!(inside.r0 < -0.3, "inside the lobe: {:+.3}", inside.r0);
+        assert!(above.r0 > 0.8, "over the lobe: {:+.3}", above.r0);
+        // `r0` and the mid/side ratio are the same statement when the two are
+        // uncorrelated, which is what makes a mid/side filter a coherence.
+        for point in [below, inside, above] {
+            let from_ratio = {
+                let ratio = 10.0f64.powf(point.mid_side_db / 10.0);
+                (ratio - 1.0) / (ratio + 1.0)
+            };
+            assert!(
+                (from_ratio - point.r0).abs() < 0.05,
+                "{:.0} Hz: r0 {:+.3} against {:+.3} from the mid/side ratio",
+                point.hz,
+                point.r0,
+                from_ratio
+            );
+        }
+    }
+
+    /// The engine's own answer before this milestone: one mono voice scaled
+    /// into two channels. Every band correlates at +1 at lag zero and the side
+    /// signal is exactly nothing — which is what [`STEREO_MS_CLAMP_DB`] is for.
+    #[test]
+    fn a_pan_pot_reads_plus_one_in_every_band_at_lag_zero() {
+        let x = stereo_noise(1 << 15, 11);
+        let right: Vec<f32> = x.iter().map(|&v| 0.6 * v).collect();
+        let image = stereo_image(&x, &right, SR).expect("two channels");
+        assert!(image.broadband.r0 > 0.999, "{:.4}", image.broadband.r0);
+        for band in &image.bands {
+            if !band.readable() {
+                continue;
+            }
+            assert!(band.r0 > 0.99, "{} read {:.4}", band.name, band.r0);
+            assert!(
+                band.lag_ms.abs() < 1e-6,
+                "{} peaked at {:.3} ms",
+                band.name,
+                band.lag_ms
+            );
+        }
+    }
+
+    /// Why the mid/side ratio is printed beside `r0` and is not the same number
+    /// twice: a pan-pot is +1 correlated whatever it does to the levels, and
+    /// the side energy it produces is a pure statement about the pan position.
+    /// Two channels that are equal are all mid and the ratio clamps; the same
+    /// pair panned to 0.6 is still +1 correlated and reads 12 dB.
+    #[test]
+    fn the_mid_side_ratio_sees_a_level_imbalance_that_the_correlation_cannot() {
+        let x = stereo_noise(1 << 15, 11);
+        let same = stereo_image(&x, &x, SR).expect("two channels");
+        assert!(same.broadband.r0 > 0.9999);
+        assert!(
+            (same.broadband.mid_side_db - STEREO_MS_CLAMP_DB).abs() < 1e-9,
+            "equal channels have no side signal at all and must clamp, read {:.1} dB",
+            same.broadband.mid_side_db
+        );
+        let panned: Vec<f32> = x.iter().map(|&v| 0.6 * v).collect();
+        let off = stereo_image(&x, &panned, SR).expect("two channels");
+        assert!(
+            off.broadband.r0 > 0.9999,
+            "still a pan-pot: {:.4}",
+            off.broadband.r0
+        );
+        // mid (1+0.6)/2, side (1-0.6)/2, so 20*log10(0.8/0.2).
+        assert!(
+            (off.broadband.mid_side_db - 12.04).abs() < 0.1,
+            "read {:.2} dB",
+            off.broadband.mid_side_db
+        );
+    }
+
+    /// The soundboard's two opposite-sign taps, in the limit: an inverted
+    /// channel is −1 at lag zero and all side. A metric that reported |r| would
+    /// call this identical to a pan-pot, which is the whole reason `r0` is
+    /// signed.
+    #[test]
+    fn an_inverted_channel_reads_minus_one_and_is_all_side() {
+        let x = stereo_noise(1 << 15, 12);
+        let right: Vec<f32> = x.iter().map(|&v| -v).collect();
+        let image = stereo_image(&x, &right, SR).expect("two channels");
+        assert!(image.broadband.r0 < -0.999, "{:.4}", image.broadband.r0);
+        assert!(
+            image.broadband.peak_r < -0.999,
+            "{:.4}",
+            image.broadband.peak_r
+        );
+        assert!(
+            image.broadband.mid_side_db < -50.0,
+            "{:.1} dB",
+            image.broadband.mid_side_db
+        );
+    }
+
+    /// A spaced pair: the same wavefront reaching two capsules a delay apart.
+    /// Lag zero says almost nothing and the peak says everything, which is the
+    /// shape item 314 measured on the recording.
+    #[test]
+    fn a_delayed_channel_shows_the_delay_as_its_peak_lag() {
+        let x = stereo_noise(1 << 15, 13);
+        let delay = 96; // 2 ms at 48 kHz
+        let mut right = vec![0.0f32; x.len()];
+        right[delay..].copy_from_slice(&x[..x.len() - delay]);
+        let image = stereo_image(&x, &right, SR).expect("two channels");
+        assert!(
+            image.broadband.r0.abs() < 0.3,
+            "a 2 ms shift must decorrelate at lag zero, read {:.3}",
+            image.broadband.r0
+        );
+        assert!(
+            (image.broadband.lag_ms + 2.0).abs() < 0.05,
+            "the peak must sit at the delay, read {:+.3} ms",
+            image.broadband.lag_ms
+        );
+        assert!(
+            image.broadband.peak_r > 0.9,
+            "and be a strong peak, read {:.3}",
+            image.broadband.peak_r
+        );
+    }
+
+    /// The spaced-pair *shape*, at the geometry item 314 is about: an AKG pair
+    /// about 12 cm apart is 0.35 ms of air, which is a fifteenth of a
+    /// wavelength at 100 Hz and three wavelengths at 10 kHz. So the bass stays
+    /// correlated and the treble does not — the recording's +0.945 below 125 Hz
+    /// falling to nothing above, out of a delay alone and no room at all.
+    #[test]
+    fn a_microphone_spacing_correlates_the_bass_and_not_the_treble() {
+        let x = stereo_noise(1 << 16, 17);
+        let delay = 17; // 0.354 ms at 48 kHz, i.e. 12 cm of air
+        let mut right = vec![0.0f32; x.len()];
+        right[delay..].copy_from_slice(&x[..x.len() - delay]);
+        let image = stereo_image(&x, &right, SR).expect("two channels");
+        let bass = image.bands[0];
+        let treble = image.bands[5];
+        assert!(
+            bass.r0 > 0.9,
+            "63-125 Hz should still be one wavefront, read {:.3}",
+            bass.r0
+        );
+        assert!(
+            treble.r0.abs() < 0.5,
+            "6-12 kHz is many wavelengths out and should not be, read {:.3}",
+            treble.r0
+        );
+        assert!(
+            image.bands[0].r0 > image.bands[3].r0,
+            "and the fall must be monotone through the bands: {:.3} then {:.3}",
+            image.bands[0].r0,
+            image.bands[3].r0
+        );
+    }
+
+    /// Independent channels: zero at lag zero, zero at the peak, and 0 dB of
+    /// mid over side.
+    #[test]
+    fn independent_channels_read_zero_and_split_their_energy_evenly() {
+        let left = stereo_noise(1 << 15, 14);
+        let right = stereo_noise(1 << 15, 15);
+        let image = stereo_image(&left, &right, SR).expect("two channels");
+        assert!(image.broadband.r0.abs() < 0.05, "{:.4}", image.broadband.r0);
+        assert!(
+            image.broadband.mid_side_db.abs() < 1.0,
+            "{:.2} dB",
+            image.broadband.mid_side_db
+        );
+    }
+
+    /// A band with nothing in it is not read at all, rather than read as the
+    /// ratio of two noise floors.
+    #[test]
+    fn a_band_with_nothing_in_it_is_not_readable() {
+        let n = 1 << 15;
+        // Windowed, because a rectangular cut of a sine leaks 50 dB of skirt
+        // into every band and the thing being tested is a band that is empty.
+        let tone: Vec<f32> = sine(1_000.0, 0.5, SR, n)
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let w = 0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos();
+                (f64::from(v) * w) as f32
+            })
+            .collect();
+        let image = stereo_image(&tone, &tone, SR).expect("two channels");
+        let voiced = StereoImage::band_for(1_000.0);
+        assert_eq!(voiced, 3, "1 kHz is the 500 Hz-2 kHz band");
+        assert!(image.bands[voiced].readable());
+        assert!(
+            !image.bands[0].readable(),
+            "63-125 Hz holds nothing and read {:.1} dB",
+            image.bands[0].level_db
+        );
+    }
+
+    /// The compass asks for "the band this key's fundamental is in", for all 88
+    /// keys, and A0 is below the lowest band.
+    #[test]
+    fn the_fundamental_band_is_clamped_at_both_ends() {
+        assert_eq!(
+            StereoImage::band_for(27.5),
+            0,
+            "A0 clamps up into 63-125 Hz"
+        );
+        assert_eq!(StereoImage::band_for(100.0), 0);
+        assert_eq!(StereoImage::band_for(261.6), 2);
+        assert_eq!(StereoImage::band_for(4_186.0), 4);
+        assert_eq!(
+            StereoImage::band_for(20_000.0),
+            5,
+            "and clamps down at the top"
+        );
+    }
+
+    /// Three pairs whose lag-zero correlation is a chosen number: a common part
+    /// and an independent part, mixed to taste. `item` seeds both draws, so
+    /// distinct items really are distinct material and the column's scatter is
+    /// a scatter rather than zero.
+    fn stereo_item(item: u64, engine: f64, reference: f64, alternate: f64) -> StereoItem {
+        let n = 1 << 15;
+        let build = |r: f64, seed: u64| {
+            let common = stereo_noise(n, 100 + item);
+            let own = stereo_noise(n, seed + 7 * item);
+            let mix = ((1.0 - r * r).max(0.0)).sqrt();
+            let right: Vec<f32> = common
+                .iter()
+                .zip(&own)
+                .map(|(&c, &o)| (r as f32) * c + (mix as f32) * o)
+                .collect();
+            stereo_image(&common, &right, SR).expect("two channels")
+        };
+        StereoItem {
+            label: format!("item{item}"),
+            engine: build(engine, 31),
+            reference: build(reference, 41),
+            alternate: build(alternate, 51),
+        }
+    }
+
+    /// The bar is made of the reference and of nothing else. Moving the engine
+    /// moves the score and must not move the bar it is scored against — the
+    /// property that separates a gate from a description.
+    #[test]
+    fn the_stereo_bar_is_built_out_of_the_reference_alone() {
+        let good: Vec<StereoItem> = (0..6).map(|i| stereo_item(i, 0.90, 0.90, 0.80)).collect();
+        let bad: Vec<StereoItem> = (0..6).map(|i| stereo_item(i, -0.60, 0.90, 0.80)).collect();
+        let a = stereo_columns(&good);
+        let b = stereo_columns(&bad);
+        for (x, y) in a.iter().zip(&b) {
+            if x.items == 0 || y.items == 0 {
+                continue;
+            }
+            assert!(
+                (x.bar - y.bar).abs() < 1e-12,
+                "{}: the bar moved {:.4} -> {:.4} when only the engine changed",
+                x.name,
+                x.bar,
+                y.bar
+            );
+            assert!((x.floor - y.floor).abs() < 1e-12);
+            assert!(
+                x.pass,
+                "{} should pass at r 0.90 against 0.90: {:?}",
+                x.name, x
+            );
+            assert!(!y.pass, "{} must fail at r −0.60 against +0.90", y.name);
+            assert!(
+                y.error > 1.0,
+                "{}: an inverted channel is 1.5 of correlation away, read {:.3}",
+                y.name,
+                y.error
+            );
+        }
+        assert!(a.iter().any(|c| c.items > 0), "some band must be readable");
+    }
+
+    /// The bar is `max(floor, scatter) · ALLOWANCE`, and the arithmetic of that
+    /// is worth pinning because it is what every red in the gate is measured
+    /// against.
+    #[test]
+    fn the_stereo_bar_takes_the_larger_of_the_two_disagreements() {
+        let items: Vec<StereoItem> = (0..3).map(|i| stereo_item(i, 0.90, 0.90, 0.80)).collect();
+        for c in stereo_columns(&items) {
+            if c.items == 0 {
+                continue;
+            }
+            assert!(
+                (c.bar - c.floor.max(c.uncertainty) * STEREO_ALLOWANCE).abs() < 1e-12,
+                "{}: {:.4} vs {:.4}",
+                c.name,
+                c.bar,
+                c.floor.max(c.uncertainty) * STEREO_ALLOWANCE
+            );
+            assert!(c.bar >= c.floor, "{}: a bar under its own floor", c.name);
+            assert!(
+                (c.uncertainty - c.scatter / (c.items as f64).sqrt()).abs() < 1e-12,
+                "{}: the uncertainty is the scatter over root n",
+                c.name
+            );
+        }
+    }
 }
-
-

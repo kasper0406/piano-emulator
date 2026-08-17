@@ -213,7 +213,7 @@ fn report(source: &str, key: u8, vel: u8, census: Option<Census>) {
 }
 
 fn render_mono(preset: &piano_emulator::preset::Preset, key: u8, vel: u8) -> Vec<f32> {
-    let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel })];
+    let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(vel) })];
     let (l, r) = render_to_buffer(preset, &events, NOTE_SECONDS);
     l.iter().zip(&r).map(|(&a, &b)| 0.5 * (a + b)).collect()
 }
@@ -600,7 +600,7 @@ fn pedal_phrase() -> Vec<RenderEvent> {
     let mut events = vec![RenderEvent::new(0.0, Event::Pedal(PedalEvent::Sustain(1.0)))];
     let mut strike = |at: f32, keys: &[u8], vel: u8, hold: f32| {
         for &key in keys {
-            events.push(RenderEvent::new(at, Event::NoteOn { key, vel }));
+            events.push(RenderEvent::new(at, Event::NoteOn { key, vel: u16::from(vel) }));
             events.push(RenderEvent::new(at + hold, Event::NoteOff { key, vel: 64 }));
         }
     };
@@ -628,7 +628,7 @@ fn dense_phrase() -> Vec<RenderEvent> {
         let key = 21 + (next() % 88) as u8;
         let vel = 20 + (next() % 108) as u8;
         let hold = 0.2 + (next() % 2300) as f32 / 1000.0;
-        events.push(RenderEvent::new(t, Event::NoteOn { key, vel }));
+        events.push(RenderEvent::new(t, Event::NoteOn { key, vel: u16::from(vel) }));
         events.push(RenderEvent::new(t + hold, Event::NoteOff { key, vel: 64 }));
         t += 0.03 + (next() % 120) as f32 / 1000.0;
     }
@@ -705,7 +705,7 @@ fn render_mono_seconds(
     vel: u8,
     seconds: f32,
 ) -> Vec<f32> {
-    let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel })];
+    let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(vel) })];
     let (l, r) = render_to_buffer(preset, &events, seconds);
     l.iter().zip(&r).map(|(&a, &b)| 0.5 * (a + b)).collect()
 }

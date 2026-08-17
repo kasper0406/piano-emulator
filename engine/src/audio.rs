@@ -31,7 +31,11 @@ impl fmt::Display for AudioError {
         match self {
             AudioError::NoOutputDevice => write!(f, "no default audio output device"),
             AudioError::UnsupportedSampleRate => {
-                write!(f, "output device does not support {} Hz", SAMPLE_RATE as u32)
+                write!(
+                    f,
+                    "output device does not support {} Hz",
+                    SAMPLE_RATE as u32
+                )
             }
             AudioError::UnsupportedFormat(fmt) => {
                 write!(f, "unsupported output sample format {fmt:?}")

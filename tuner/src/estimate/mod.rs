@@ -44,6 +44,7 @@ pub mod halo;
 pub mod hammer;
 pub mod inharmonic;
 pub mod melody;
+pub mod mics;
 pub mod motion;
 pub mod noise;
 pub mod shaping;

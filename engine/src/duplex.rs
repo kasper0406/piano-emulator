@@ -378,6 +378,9 @@ mod tests {
         assert!(bank.is_idle(), "an undamped segment never went quiet");
         out.fill(0.0);
         bank.add(&silence, None, &mut out);
-        assert!(out.iter().all(|&x| x == 0.0), "a culled segment still wrote");
+        assert!(
+            out.iter().all(|&x| x == 0.0),
+            "a culled segment still wrote"
+        );
     }
 }

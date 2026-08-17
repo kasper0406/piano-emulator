@@ -67,7 +67,8 @@ pub use resonance::ResonanceBus;
 pub use soundboard::Soundboard;
 pub use string::{PianoString, StringParams};
 pub use types::{
-    index_to_note, key_index, note_to_freq, Event, PedalEvent, BLOCK, DEFAULT_RELEASE_VELOCITY,
-    ESCAPEMENT_VELOCITY, HIGHEST_KEY, LOWEST_KEY, NUM_KEYS, SAMPLE_RATE,
+    hires_velocity, index_to_note, key_index, note_to_freq, velocity_from_midi, Event, PedalEvent,
+    BLOCK, DEFAULT_RELEASE_VELOCITY, ESCAPEMENT_VELOCITY, HIGHEST_KEY, LEGACY_VELOCITY_MAX,
+    LOWEST_KEY, MIDI1_MAX_VELOCITY, NUM_KEYS, SAMPLE_RATE, VELOCITY_STEPS,
 };
 pub use voice::Voice;

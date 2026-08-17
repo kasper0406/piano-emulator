@@ -1521,7 +1521,7 @@ fn rendered_series(preset: &Preset, key: u8) -> (f64, f64) {
         PREROLL_S as f32,
         Event::NoteOn {
             key,
-            vel: REFERENCE_VELOCITY,
+            vel: u16::from(REFERENCE_VELOCITY),
         },
     )];
     let (left, right) = render_to_buffer(&engine, &events, SERIES_RENDER_S);
@@ -1709,7 +1709,7 @@ fn render(preset: &Preset, key: u8, vel: u8, seconds: f64) -> Vec<f64> {
         .expect("the tuner's preset is the engine's");
     let events = [RenderEvent::new(
         PREROLL_S as f32,
-        Event::NoteOn { key, vel },
+        Event::NoteOn { key, vel: u16::from(vel) },
     )];
     let (left, right) = render_to_buffer(&engine, &events, (PREROLL_S + seconds) as f32);
     let skip = (PREROLL_S * SR) as usize;
@@ -1844,7 +1844,7 @@ fn rendered_spectrum(
 ) -> Option<Vec<(u32, f64)>> {
     let index = key_index(key)?;
     let engine = piano_emulator::preset::Preset::from_toml(&probe.to_toml()).ok()?;
-    let events = [RenderEvent::new(0.05, Event::NoteOn { key, vel })];
+    let events = [RenderEvent::new(0.05, Event::NoteOn { key, vel: u16::from(vel) })];
     let (left, right) = render_to_buffer(&engine, &events, SPECTRUM_RENDER_S);
     let mono: Vec<f32> = left
         .iter()

@@ -351,7 +351,7 @@ fn census(library: Option<&SampleLibrary>, before: Option<&EnginePreset>, after:
 }
 
 fn render_note(preset: &EnginePreset, key: u8, vel: u8, seconds: f32) -> Vec<f32> {
-    render_mono(preset, &[RenderEvent::new(0.0, Event::NoteOn { key, vel })], seconds)
+    render_mono(preset, &[RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(vel) })], seconds)
 }
 
 // --------------------------------------------------------------- 2. the halo
@@ -738,7 +738,7 @@ fn fuzz(after: &EnginePreset) {
             let key = 21 + (next() % 88) as u8;
             let vel = 30 + (next() % 98) as u8;
             let hold = 0.1 + (next() % 400) as f32 / 1000.0;
-            events.push(RenderEvent::new(t, Event::NoteOn { key, vel }));
+            events.push(RenderEvent::new(t, Event::NoteOn { key, vel: u16::from(vel) }));
             events.push(RenderEvent::new(t + hold, Event::NoteOff { key, vel: 64 }));
             t += 0.04 + (next() % 100) as f32 / 1000.0;
         }

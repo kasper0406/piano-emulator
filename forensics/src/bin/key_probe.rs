@@ -121,13 +121,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let signal: Vec<f64> = mono.iter().map(|&v| f64::from(v)).collect();
             let motions = realism::measure_partials(&signal, &partial_hz);
             let beats: Vec<f64> = motions.iter().flatten().map(|m| m.beat_depth_db).collect();
-            let jit: Vec<f64> = motions.iter().flatten().map(|m| m.floored_cents()).collect();
+            let jit: Vec<f64> = motions
+                .iter()
+                .flatten()
+                .map(|m| m.floored_cents())
+                .collect();
             println!(
                 "  {:<18} {:>7.2} {:>10.2} {:>8.1} {:>7.2} {:>7.2}",
                 name,
                 shape_error(&levels, &reference),
                 irregularity(&levels),
-                amp_db(realism::rms(&mono[frame(WINDOW.0)..frame(WINDOW.1).min(mono.len())])),
+                amp_db(realism::rms(
+                    &mono[frame(WINDOW.0)..frame(WINDOW.1).min(mono.len())]
+                )),
                 median(&beats),
                 median(&jit),
             );
@@ -209,7 +215,7 @@ fn render(preset: &Preset, key: u8) -> Audio {
         PREROLL_S as f32,
         Event::NoteOn {
             key,
-            vel: VELOCITY,
+            vel: u16::from(VELOCITY),
         },
     )];
     let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + RENDER_S) as f32);
@@ -228,10 +234,7 @@ fn reference_levels(
 ) -> Result<Vec<f64>, piano_tuner::Error> {
     let events = [TimedEvent::new(
         0.0,
-        SamplerEvent::NoteOn {
-            key,
-            vel: VELOCITY,
-        },
+        SamplerEvent::NoteOn { key, vel: VELOCITY },
     )];
     let rendered = sampler.render(&events, RENDER_S + 0.2)?;
     let mono = rendered.mono();
@@ -312,7 +315,11 @@ fn shape_error(engine: &[f64], reference: &[f64]) -> f64 {
 }
 
 fn irregularity(levels_db: &[f64]) -> f64 {
-    let usable: Vec<f64> = levels_db.iter().copied().filter(|d| d.is_finite()).collect();
+    let usable: Vec<f64> = levels_db
+        .iter()
+        .copied()
+        .filter(|d| d.is_finite())
+        .collect();
     if usable.len() < 2 {
         return 0.0;
     }
@@ -346,5 +353,9 @@ fn note_name(key: u8) -> String {
     const NAMES: [&str; 12] = [
         "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     ];
-    format!("{}{}", NAMES[usize::from(key) % 12], i32::from(key) / 12 - 1)
+    format!(
+        "{}{}",
+        NAMES[usize::from(key) % 12],
+        i32::from(key) / 12 - 1
+    )
 }

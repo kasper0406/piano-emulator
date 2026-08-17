@@ -133,7 +133,7 @@ pub fn without_strike(preset: &Preset) -> Preset {
 
 fn render_engine(preset: &Preset, key: u8, vel: u8) -> Vec<f32> {
     let events = [
-        RenderEvent::new(PREROLL_S as f32, Event::NoteOn { key, vel }),
+        RenderEvent::new(PREROLL_S as f32, Event::NoteOn { key, vel: u16::from(vel) }),
         RenderEvent::new(
             (PREROLL_S + HOLD_S) as f32,
             Event::NoteOff { key, vel: 64 },

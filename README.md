@@ -16,7 +16,7 @@ A physically modeled (simulated) grand piano — no samples. Every note is synth
 - **Touch** — a key pressed too gently to reach escapement lifts its damper and strikes nothing, which is how a pianist prepares sympathetic resonance without the pedal; release velocity sets how fast the damper falls.
 - **Sympathetic resonance** — undamped strings pick up energy from everything else that rings; strike-and-release with the pedal down leaves the halo behind. A preset can give the bridge its measured admittance — a mean mobility curve with the board's discrete modes on it — and the halo is then coloured by the board the strings actually share instead of being spectrally flat, while a partial that sits on one of those modes loses energy into the board faster than the smooth fitted decay law says (`radiated_share`: T60 11.3 s against 14.6 s with a flat bridge). `render out.wav halo` is a phrase written to show it. Measured honestly the treble aftersound is still 21 dB short of the instrument it was fitted to — and that gap is on the board's late field rather than on this coupling, which has 0.1 dB of authority over it even at the largest value the stability contract will certify (`DECISIONS.md` 182–184).
 - **Duplex and aliquot segments** — the lengths of string beyond the bridge and the agraffe, which have no dampers at all. A preset can give a key up to six of them, at measured frequencies rather than harmonic ratios; they are driven by that key's own bridge force and by the rest of the instrument through the bridge, and neither the key, nor the sustain pedal, nor sostenuto, nor una corda can stop them. Play a treble note staccato and the shimmer stays behind — at the top of the schema's range. At the level the *measured* table currently ships them they are 148 dB below the note and nobody can hear them; the mechanism is right and the drive is wrong — a segment is normalised to answer a **steady** drive at its own frequency, receives only an **impulsive** one, and the factor between those is `1 − r`, a part in ten thousand. Measured at the schema's own ceiling: both segments at +6 dB leave a halo 81.7 dB under their strike, which is under the level the modal culling zeroes, so *no* legal `gain_db` makes one audible. Fixing it re-decides what the field means and is a milestone of its own (`DECISIONS.md` 162, 163, 170, 260, `PHYSICS.md` §3).
-- **Soundboard** — body resonances plus a short diffuse-field reverberator, per-key stereo placement, and a master chain with a safety limiter. The two polarizations of a key can be panned apart, so a note's stereo image *moves* as the fast plane dies; a preset may set that spread per key, because one number for the whole compass overshoots the treble by three decibels and undershoots the bass by five.
+- **Soundboard** — body resonances plus a short diffuse-field reverberator, per-key stereo placement, and a master chain with a safety limiter. The two polarizations of a key can be panned apart, so a note's stereo image *moves* as the fast plane dies; a preset may set that spread per key, because one number for the whole compass overshoots the treble by three decibels and undershoots the bass by five. A preset may also state `[voicing.mics]`, a pair of virtual capsules over the string band (`PHYSICS.md` §8): each source reaches each capsule with its own delay and gain from where it sits along the bass-treble axis, and the board's diffuse field is shared between them at low frequency and orthogonal at high, which is what a spaced pair does and what a pan-pot cannot. Under it, `[voicing.mics.modal]` is the band over which the board is **mode-controlled** — where the plate's own modes put a nodal line between two capsules 12 cm apart, so that both hear the same field with opposite signs and the pair sees more *difference* than sum. It is built as an anti-phase copy of the pair's own sum, on the direct path as well as the board's, so it is there from a note's first sample rather than once the diffuse field has built (`DECISIONS.md` 379), and its `lift` is that difference-over-sum amplitude read straight off the recording. It is the one part of the image a spaced pair cannot produce at any spacing, it is what takes the recording's 125-500 Hz from +0.95 to negative across a single octave, and it is measured off the recording's own sixth-octave interchannel curve rather than asserted. The whole section is written as mid plus side and replaces only the side, so the mono fold-down is unchanged to `f32` rounding and every mono board stays comparable; absent, the pan-pot renders bit for bit what it always did. `renders/stereo/STEREO.md` is the A/B: the same two pieces of music through the pan-pot, the pair, the shipped preset and the recording, the three engine takes sharing one gain because they share a mono sum.
 
 Full 88-key polyphony with the sustain pedal down runs at roughly a third of one performance core on an M4 Pro (41.6 % on the measured preset, whose duplex segments are never damped). The engine's offline renderer and the live audio path are the same code, so everything measurable in a rendered WAV is what you hear live.
 
@@ -60,6 +60,7 @@ fit --stage <name>         stage 2, the per-note fits (see below)
 sympathetic                stage 2: duplex, halo coupling, stereo spread
 tail                       stage 2: the upper partials' decay
 noise                      stage 2: the mechanism's balance against the tone
+mics                       stage 2: the microphone pair, [voicing.mics]
 bench / compass / melody / chain
                            the standing boards, each writing its own document
                            into renders/
@@ -67,7 +68,76 @@ score / brilliance / residuals / ab
                            the audits: print, print, print, render
 ```
 
-**One of those gates is red, on purpose and by name.**
+**One of those gates is red, on purpose and by name** — and the other one, the
+stereo image, is green in `DECISIONS.md` 378-379 after being written red on
+purpose three milestones earlier.
+
+`the_engines_stereo_image_is_the_recordings_in_every_band` is the story of
+writing the measurement down first. The chain experiment measured the
+recording's two channels against the engine's and found the largest single
+difference in it sitting where no column of any board could see it — every
+metric on every board is a mono sum. The recording is **+0.95 correlated below
+125 Hz** and near zero above, which is a spaced pair of microphones; the engine
+was **−0.58 in the bass and +0.91 at 6-12 kHz**, which is a soundboard FDN with
+anti-phase taps under a pan-pot. All six bands failed. Then `PHYSICS.md` §8 —
+`[voicing.mics]`, two virtual capsules over the string band with a per-source
+delay and gain and a frequency-dependent coherence on the board's diffuse field
+(`DECISIONS.md` 351-358), with its five numbers **fitted off the recording**
+rather than swept (359-367): the spacing inverted out of the interchannel delays
+the recording carries, the height held at the 12 cm the library's readme states.
+That inverted the inversion and left **two of six** bands red, both between 125
+and 500 Hz, where item 357 argued no two-point geometry could ever follow the
+recording's fall from +0.95 to −0.12 across a single octave — and it was right.
+What closed them was measuring the recording at a resolution that shows a shape
+rather than six numbers: its **sixth-octave** interchannel correlation is +0.94
+at 127 Hz, +0.07 at 160 and **−0.53 at 180**, negative through 254, and inside
+±0.25 of zero at every point from 320 Hz to 8 kHz but one, with its other
+velocity layer repeating the whole curve to within 0.1. That is a **plate**, in three regimes — one radiator
+below its first modes, mode-controlled and *anti-phase across the capsules*
+where a nodal line falls between them, and disorganised above modal overlap —
+and `[voicing.mics.modal]` is those three regimes, two edge frequencies and a
+lift, fitted on the same two surfaces (`DECISIONS.md` 368-377).
+
+That milestone was then found to have been **read through the wrong window**
+(`DECISIONS.md` 378): the gate asked for 0.05 s of preroll, which is 2400
+samples against a 128-sample block, so every note began 96 samples before the
+window it was measured in — two milliseconds outside, and a window that opens in
+the middle of a signal opens with a step. Struck at the head of a block the same
+instrument was **three of six red**, not none. The window is now
+`realism::STEREO_PREROLL_SAMPLES`, a whole number of blocks, asserted at compile
+time everywhere this material is rendered, with the recording's own image shown
+to be unmoved by the three placements the gate has been read at — which is what
+licenses reading the recording from an onset *detector* while the engine is read
+from the strike itself. What the honest window then showed (`DECISIONS.md` 379)
+is that the mode-controlled band was built out of the wrong signal: it
+band-limited the *difference* of the board's two decorrelated taps, and a
+difference is neither a nodal line — two capsules straddling one hear the same
+field with opposite signs — nor able to act during the strike, since the
+soundboard FDN's shortest delay line is 149 samples and its difference is
+exactly zero for the first 3.1 ms of every note. Measured in 10 ms frames, C5's
+first frame read **+9.9 dB mid over side** in 125-250 Hz where the recording's
+reads −1.6 dB. The lobe now adds an anti-phase copy of the **sum**, on the
+direct path as well as the board's, which makes `lift` a plain side-over-mid
+amplitude — the recording's measured −3.5 dB mid/side ratio *is* a lift of 1.5 —
+and `[voicing.mics]` was refitted at the aligned window by `piano-tuner mics
+--stage band`, a stage that moves the band and the two trims together because
+since the change they build one side signal and are no longer separable.
+
+**All six bands now pass**, at a window that opens where the note does — the
+engine reads +0.945 / −0.057 / −0.196 / −0.032 / +0.023 / +0.068 against the
+recording's +0.953 / −0.115 / −0.226 / −0.002 / −0.012 / +0.027, a summed |err|
+of 0.203 against the 4.967 the gate was written at, and no band closer to its
+threshold than 0.89 of a bar. The two held-out velocity layers, never fitted,
+improve from 21.5 and 30.2 bars out to 2.2 and 2.8. What is *not* closed is
+stated in items 377 and 379: on a single melody line the engine's sixth-octave
+dip still sits about half an octave above the recording's, and the engine's own
+image still moves when the window does (0.38 and 0.34 in the two mid bands)
+where the recording's moves by 0.003 — which is a soundboard decay rather than
+an image, because in 125-500 Hz a treble key's engine energy is a click where
+the recording's is a field. It is deliberately **not** a room, whose absence
+`DECISIONS.md` 315 measures rather than assumes. Writing the gate before the mechanism is the order `DECISIONS.md`
+317 (a) asks for: a stage built to fix something nothing scores is a stage
+nobody can regress (`DECISIONS.md` 346-350).
 
 `a_known_duplex_comes_back_from_the_engines_own_render_of_it` fails and has
 since the unison became a coupled eigenproblem. It is not a tolerance and it is
@@ -203,7 +273,10 @@ cargo run --release -p piano-tuner -- tail \
     --passes 8 --out presets/salamander-c5.toml
 cargo run --release -p piano-tuner -- noise \
     data/salamander presets/salamander-c5.toml --out /tmp/balanced.toml
+cargo run --release -p piano-tuner -- mics \
+    data/salamander presets/salamander-c5.toml --out presets/salamander-c5.toml
 cargo run --release -p piano-tuner -- ab      # A/B renders into renders/
+cargo run --release -p piano-tuner -- stereo  # the stereo A/B into renders/stereo/
 cargo run --release -p forensics --bin verify_milestone_b -- [old-preset.toml]
 ```
 
@@ -285,7 +358,8 @@ Where a history document and `DECISIONS.md` disagree, the log wins.
 - `DISTRIBUTION.md` — the plan for turning the engine into an AUv3 plugin. **Live as engineering, moot as commerce**: the project is MIT-licensed and given away, so every pricing, licence-key and in-app-purchase clause in it is dead text and marked as such in its header.
 - `docs/history/TUNING_REPORT.md` — **history.** Phase E's measured-vs-model residuals on the Salamander recordings (2026-08-13); acted on in `DECISIONS.md` 98-133, 145-207, 237. The `residuals` subcommand still re-runs the measurements in it.
 - `docs/history/FUNDAMENTALS.md` — **history.** The physics review that convicted the free-running unison and derived the coupled one (2026-08-14); acted on in `DECISIONS.md` 223-261 and 296-302. It reviews a string model the engine no longer has.
-- `renders/realism/REALISM.md` — the standing realism scoreboard: six fixed phrases rendered from one event list through both the engine and the Salamander recordings, with `TUNING.md`'s stage-2 losses measured over each pair *and* the same measurement between two recordings of the same piano, which is the noise floor that makes the first number readable. It also carries **Columns A and B** (`docs/history/FUNDAMENTALS.md` §II.3): four per-cell measurements of how a single partial *moves* — instantaneous-frequency mismatch and placement, beat-depth error and velocity coherence — over sixteen key × partial cells at three velocities, each with a gate, because every other column on the board is a functional of energy and the artefact those were built to catch is not. All four gates pass on the measured preset (`DECISIONS.md` 253); `cargo run --release -p piano-tuner -- score` is the same four numbers with every cell printed, in seven seconds, for iterating a fit against them. Written by `cargo run --release -p piano-tuner -- bench` (needs `data/fetch_salamander.sh`); the metrics themselves live in `tuner/src/realism.rs` so the scoreboard and the loss an optimizer minimises are one piece of code.
+- `renders/realism/REALISM.md` — the standing realism scoreboard: six fixed phrases rendered from one event list through both the engine and the Salamander recordings, with `TUNING.md`'s stage-2 losses measured over each pair *and* the same measurement between two recordings of the same piano, which is the noise floor that makes the first number readable. It also carries **Columns S**, the one section of it that is *not* a mono sum: per octave band from 63 Hz to 12 kHz, the interchannel correlation at lag zero, the peak |r| over ±5 ms and the lag it sits at, and a mid/side energy ratio — engine against recording, with the recording's own take-pair disagreement beside each one as the floor (`DECISIONS.md` 346-350, 351-358, 359-367, 368-377, 378-379). And **Columns A and B** (`docs/history/FUNDAMENTALS.md` §II.3): four per-cell measurements of how a single partial *moves* — instantaneous-frequency mismatch and placement, beat-depth error and velocity coherence — over sixteen key × partial cells at three velocities, each with a gate, because every other column on the board is a functional of energy and the artefact those were built to catch is not. All four gates pass on the measured preset (`DECISIONS.md` 253); `cargo run --release -p piano-tuner -- score` is the same four numbers with every cell printed, in seven seconds, for iterating a fit against them. Written by `cargo run --release -p piano-tuner -- bench` (needs `data/fetch_salamander.sh`); the metrics themselves live in `tuner/src/realism.rs` so the scoreboard and the loss an optimizer minimises are one piece of code.
+- `renders/stereo/STEREO.md` — **the one board that is not a mono sum.** Two pieces of music, the Ode melody line alone and the pedalled chord phrase, through four things: the pan-pot the engine had before `PHYSICS.md` §8, the virtual capsule pair alone, the shipped preset with the board's mode-controlled band as well, and the Salamander recording of the same music. The three engine takes are matched to **one gain**, because they share a mono sum sample for sample — everything audible between them is side energy, which is the subject, and normalising it per take would normalise away the finding. Beside the audio it prints each take's interchannel correlation per band, its mid-over-side ratio (the statistic a fold-down loses), its peak |r| and the lag it sits at, and the sixth-octave curve those six numbers summarise. Written by `cargo run --release -p piano-tuner -- stereo` (needs `data/fetch_salamander.sh`); the gate under it is `cargo test -p piano-tuner --test stereo`.
 - **The melody gate** is the listener's own test, made permanent
   (`DECISIONS.md` 296-298, 330-331): `cargo test -p piano-tuner --test melody`
   plays the Ode to Joy melody line alone — the soprano of the `excerpt` phrase,
@@ -311,6 +385,48 @@ Where a history document and `DECISIONS.md` disagree, the log wins.
   time so a failure can be attributed to the table that causes it; it writes
   `renders/melody/MELODY.md` and the rendered lines beside it, because the
   complaint this gate exists for was made by listening to them.
+- **The stereo gate** is the loss term item 317 (a) asked for before any
+  microphone geometry was built (`DECISIONS.md` 346-350), and the surface the
+  §8 milestone is scored on (`DECISIONS.md` 351-358): `cargo test -p
+  piano-tuner --test stereo` strikes the 30 keys the library actually recorded,
+  alone at velocity 90, and compares the engine's interchannel image with the
+  recording's per octave band — correlation at lag zero, peak |r| over ±5 ms and
+  its lag, and mid over side energy. The bar per band is made of the recording
+  disagreeing with itself: the same statistic on that key's *other velocity
+  layer*, against the precision with which 30 keys pin a median, times a quarter
+  more. It was red in all six bands; with the microphone pair built and then
+  **fitted** (`piano-tuner mics`, `DECISIONS.md` 359-367) it went red in two and
+  green in four, and with the board's mode-controlled band as well
+  (`DECISIONS.md` 368-377) it went green in all six — **at a window that began
+  96 samples after the strike**, which is what `DECISIONS.md` 378 found and what
+  put three of them back in the red. The window now opens where the note does,
+  by a preroll that is a whole number of engine blocks and asserted to be one
+  wherever this material is rendered, and the band is built out of the pair's
+  own **sum** rather than the board's difference so that it exists during the
+  strike (`DECISIONS.md` 379). Refitted there, all six pass: 63-125 Hz — the
+  band the whole finding is about, where the recording reads +0.953 and repeats
+  itself to 0.007 — reads +0.945 against a bar of 0.009, and the tightest of the
+  six sits at 0.89 of its bar. The geometry is not a taste: the pair's **spacing** is inverted out of
+  the interchannel delays the recording itself carries — 0.112 m by that
+  inversion alone, 0.126 m by the render fit that never saw it, agreeing to a
+  thousandth of a millisecond of delay residual — and its **height** is the
+  12 cm the library's own readme states. `tuner/tests/mics.rs` is the
+  self-calibration: a spacing the engine is told to have, recovered from its own
+  renders to about a tenth at three spacings an octave apart — from the same
+  aligned window, because it too was reading its own window edge and read +28 %
+  at 12 cm where the aligned one reads +13 %. Four green controls come with it, because a
+  gate that can only fail is no more a gate than one that never does: the
+  recording's own image is unmoved by where the window starts, which is what
+  licenses reading it from an onset detector while the engine is read from the
+  strike; the recording put on the engine's side of the comparison passes every band; the
+  recording's own **mono sum put back into two channels** — a pan-pot of the
+  piano itself — fails every band above the bass and passes the bass, which is
+  exactly the shape of the finding; and the mono fold-down of the new image is
+  the pan-pot's own to **0.000 dB in every band**, which is what lets every
+  other board in this repository stay comparable across the change. The same
+  columns are printed on the six phrases in `REALISM.md`'s Columns S and per key
+  in `COMPASS.md`'s stereo line, where the keys on the opposite side of zero
+  from the recording went from 46 of 88 to 31.
 - **Only recorded reference notes are scored** (`DECISIONS.md` 328-329). The
   Salamander library records 30 of 88 keys, one every minor third, and plays the
   other 58 by resampling the nearest take. Those transposed notes stay in every
@@ -344,3 +460,129 @@ Holm, credited in `ATTRIBUTION.md`, in `presets/salamander-c5.toml`'s own
 this repository is the *parameters* estimated from those recordings, not the
 audio. Any future library the pipeline is pointed at has to be recorded in
 `ATTRIBUTION.md` before its numbers ship in a preset.
+
+## Live input
+
+A hardware keyboard plays this now, and so does anything else that can send
+MIDI. Two pieces, and they are independent: **live input** through Core MIDI in
+the standalone (below), and **`ffi/`**, a fifth workspace member — a `cdylib` +
+`staticlib` + `rlib` around a small C ABI — which is the whole of what
+`DISTRIBUTION.md`'s AUv3, its standalone app and its CLAP will be built on.
+`ffi/` is `M0` and `M1` of that document and nothing above them: **there is
+still no plugin and no app**. What exists there is the boundary a host plugs
+into, and a C program that proves it works.
+
+### Playing it from a keyboard
+
+```sh
+piano-emulator --midi-list          # what is plugged in
+piano-emulator --midi-in            # play from everything, REPL still live
+piano-emulator --midi-in SL88       # ... or from one source, matched by name
+```
+
+`--midi-in` connects one input port to every MIDI source (or to the ones whose
+name contains the argument, case-insensitively) and publishes a virtual
+destination called **Piano Emulator**, so a DAW, an iPad or another application
+on the same Mac can send to it without any cable. **The REPL keeps running**:
+typing `n C4 90` and playing C4 on the keyboard are two producers on the same
+queue and the engine cannot tell them apart, so you can hold the pedal from the
+terminal while playing with both hands. `Ctrl-D` or `quit` disconnects.
+
+What is read is exactly what the `.mid` reader reads — note on and off with
+release velocity, continuous CC 64, CC 66 sostenuto, CC 67 una corda, every
+channel merged into one piano — plus two things a file cannot carry:
+
+- **CC 64 is slew-limited over 15 ms.** A 7-bit sustain pedal has 128 positions
+  and no LSB partner, and this instrument's dampers are continuous, so a slow
+  pedal move would arrive as an audible staircase. The limiter turns each step
+  into a short ramp at the engine's own block rate; a full stamp still takes
+  15 ms, which is faster than any pianist's foot.
+- **MIDI 2.0, where the source sends it.** The input port is created with
+  `MIDIInputPortCreateWithProtocol(kMIDIProtocol_2_0)`, so a UMP source's
+  16-bit velocity and 32-bit CC 64 arrive at full resolution, and a MIDI 1.0
+  keyboard is up-translated by macOS itself. Both land on the same continuous
+  velocity: `Event`'s velocity is a `u16` whose values `0..=255` are a MIDI 1.0
+  velocity, exactly as before, and whose values above that are 1/512 of a MIDI
+  step. A 7-bit velocity 90 and its 16-bit spelling play the same hammer speed
+  to the bit — `engine/tests/live_midi.rs` asserts it against Core MIDI's real
+  translation, using a virtual source created inside the test.
+
+**The SL88 MK2.** The Studiologic SL mk2 is one of the four controllers
+confirmed to send UMP at all (`DISTRIBUTION.md`'s MIDI 2.0 verdict), and it is
+the keyboard this path was built for. Nothing in this repository has been run
+against one — no hardware was available — so the last mile is a manual smoke
+test, and it is short:
+
+1. `piano-emulator --midi-list`; the SL88 should appear, and if its firmware is
+   in MIDI 2.0 mode the line ends with `— MIDI 2.0`.
+2. `piano-emulator --midi-in SL88`, then play. The line it prints is the
+   *port's* protocol — 2.0 unless macOS refused it — so step 1's line is the
+   one that says whether the keyboard is really sending UMP.
+3. Play a slow crescendo of the same note, at the soft end, twenty or so
+   repetitions from as quiet as the action allows. A 7-bit controller has about
+   thirty usable velocities down there and the ramp is heard to step; a working
+   UMP one does not. That is the whole of what MIDI 2.0 buys a piano, and this
+   is where it is: expressive playing crowds into velocities 5-35.
+4. Half-pedal slowly through a held chord. The damper should open continuously,
+   with no steps.
+
+Everything above the hardware — the protocol, the translation, the velocity
+map, the pedal ramp, the merge with the REPL — is covered by the suite.
+
+### The C ABI
+
+```sh
+cargo build -p piano-emulator-ffi          # target/debug/libpiano_emulator_ffi.{dylib,a}
+cargo build --profile dist -p piano-emulator-ffi   # what gets shipped: panic = "abort"
+```
+
+The header is committed at `ffi/include/piano_emulator.h`, generated from the
+Rust by `ffi/generate-header.sh` (cbindgen) and checked against it by
+`ffi/tests/header.rs`, so the Swift of M2 cannot drift from the library it
+links. Fourteen entry points — the nine below, plus five that only answer
+questions (`pe_abi_version`, `pe_host_sample_rate`, `pe_is_bypassed`,
+`pe_max_frames`, `pe_active_voices`) — and every one of them states in the
+header **which thread it belongs on**, which is the reason the header is written
+by hand rather than exported as a flat surface:
+
+| | thread | |
+|---|---|---|
+| `pe_create` / `pe_destroy` / `pe_reset` | main | builds the instrument; allocates, and takes its time about it |
+| `pe_load_preset_toml` / `pe_save_state` / `pe_last_error` | main | a preset is parsed **and validated** here, before the audio thread sees a coefficient |
+| `pe_render` | audio | allocation-free, lock-free, syscall-free, any block length |
+| `pe_event` | audio | what a plugin uses: the host hands us MIDI *in* the render block |
+| `pe_post_event` | any one thread | what an app uses: the engine's pre-allocated SPSC queue |
+
+**Host sample rates.** The engine stays at 48 kHz forever (`DECISIONS.md` 17,
+380-381) and the rate conversion lives at the boundary, in `ffi`. At exactly
+48 kHz it is **bypassed** — `pe_render` is `Engine::process` and nothing else,
+byte-identical to what `render` writes, which is what keeps every number in
+`PHYSICS.md` describing the thing a plugin plays. At 44.1 and 96 kHz a 256-tap
+polyphase sinc runs instead: folded energy below **−104 dB**, transients moved
+by a pure delay of under one engine sample, and 0.7-1.2 % of one core against
+the engine's own 31-40 %.
+
+**The harness.** `ffi/harness/render.c` is 570 lines of C that loads a preset,
+plays a standard MIDI file through the event API and writes a WAV — the ABI
+exercised by a C compiler rather than by Rust pretending to be one:
+
+```sh
+cargo build -p piano-emulator-ffi
+ffi/harness/build.sh target/debug /tmp/render
+/tmp/render presets/default.toml ffi/harness/phrase.mid /tmp/out.wav
+cargo run -p piano-emulator -- render /tmp/reference.wav ffi/harness/phrase.mid \
+    --preset presets/default.toml
+```
+
+Those two WAVs hold the same 321 600 frames, sample for sample — md5
+`f0fcb07999c00ca60110cd537de8f09e` over the payload of each, and the same again
+through `--queue` (the SPSC path) and through the built-in preset (`-`).
+`ffi/tests/harness.rs` builds and runs the same program against the CLI's own
+code path on every `cargo test`. Pass `--rate 44100` or `--rate 96000` to hear
+the boundary resampler doing its work.
+
+What is still missing is the host side: an `AUAudioUnit` to put the ABI behind,
+and the standalone SwiftUI app that hosts it (`DISTRIBUTION.md` M2-M3). The
+velocity widening `SHIPPING.md` §4 asks for has landed — `pe_event_t` carries
+its velocity in 32 bits with the same two lanes the engine uses, and
+`PE_ABI_VERSION` is 2 because values above 127 mean something now.

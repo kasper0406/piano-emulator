@@ -234,7 +234,7 @@ fn main() {
         let mut row = Vec::new();
         for &vel in &VELOCITIES {
             let engine_events = [
-                RenderEvent::new(0.05, Event::NoteOn { key, vel }),
+                RenderEvent::new(0.05, Event::NoteOn { key, vel: u16::from(vel) }),
                 RenderEvent::new(0.55, Event::NoteOff { key, vel: 64 }),
             ];
             let (l, r) = render_to_buffer(&preset, &engine_events, 0.8);

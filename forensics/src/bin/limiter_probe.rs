@@ -63,7 +63,7 @@ fn db(x: f32) -> f32 {
 fn strike(preset: &Preset, keys: &[u8], vel: u8, seconds: f32) -> (f32, f32, usize) {
     let events: Vec<RenderEvent> = keys
         .iter()
-        .map(|&key| RenderEvent::new(0.0, Event::NoteOn { key, vel }))
+        .map(|&key| RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(vel) }))
         .collect();
     let (l, r) = render_to_buffer(preset, &events, seconds);
     let mono = l.iter().zip(&r).fold(0.0f32, |m, (&a, &b)| m.max((a + b).abs()));

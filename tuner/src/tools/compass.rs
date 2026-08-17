@@ -70,9 +70,12 @@ use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::types::Event;
 use piano_tuner::cache;
 use piano_tuner::motion::Motion;
+use piano_tuner::realism::{StereoBand, StereoImage, STEREO_BANDS};
 use piano_tuner::sampler::SAMPLER_VERSION;
 use piano_tuner::series::{amp_db, Series, PARTIALS, WINDOW_S as SPECTRUM_WINDOW};
-use piano_tuner::{audio, realism, Audio, Sampler, SampleLibrary, SamplerEvent, TimedEvent, SAMPLE_RATE};
+use piano_tuner::{
+    audio, realism, Audio, SampleLibrary, Sampler, SamplerEvent, TimedEvent, SAMPLE_RATE,
+};
 
 /// Velocity every key is struck at: the middle layer, the one the fits and the
 /// motion columns both use.
@@ -81,11 +84,21 @@ const VELOCITY: u8 = 90;
 /// Seconds of note. The partial motion window ends at 3.0 s.
 const RENDER_S: f64 = 3.6;
 
-/// Seconds of silence before the strike, so an onset is never at sample zero.
-const PREROLL_S: f64 = 0.05;
+/// Silence before the strike, in samples.
+///
+/// `realism::STEREO_PREROLL_SAMPLES`, which is `tuner/tests/stereo.rs`'s and
+/// `tools::mics`'s, because this board reads a **stereo image** of the same
+/// material and a window that does not open at the strike measures its own edge
+/// (`DECISIONS.md` 378). A whole number of engine blocks, asserted here as it is
+/// there: the number is only right by construction if something checks.
+const PREROLL: usize = realism::STEREO_PREROLL_SAMPLES;
 
+const _: () = assert!(
+    PREROLL % piano_emulator::types::BLOCK == 0,
+    "the preroll must be a whole number of engine blocks or the window starts inside the note"
+);
 
-
+const PREROLL_S: f64 = PREROLL as f64 / 48_000.0;
 
 /// How many neighbours a key is scored against.
 ///
@@ -223,55 +236,71 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let keys: Vec<u8> = (FIRST_KEY..=LAST_KEY).collect();
     let measured: Vec<(Scan, Option<String>)> = keys
         .par_iter()
-        .map(|&key| -> Result<(Scan, Option<String>), piano_tuner::Error> {
-            let params = preset.string_params(key);
-            let partial_hz: Vec<f64> = (1..=PARTIALS)
-                .map(|k| f64::from(params.partial_freq(k)))
-                .collect();
-            let engine_audio = render_engine(&preset, key);
-            let mut key_print = reference_key;
-            key_print.u64(u64::from(key));
-            let path = reference_cache.join(format!("compass-key{key:03}-{}.wav", key_print.hex()));
-            let reference_audio =
-                cache::audio(&path, || with_sampler(&sfz, |s| render_reference(s, key)))?;
-            let (reference, reference_spectrum) =
-                Metrics::measure(&reference_audio.mono(), &partial_hz, None);
-            // `match` is the one metric of the seven that scores the engine
-            // against *the recording of this key*, and two keys in three have
-            // no recording of their own: what the player answers with there is
-            // a neighbour's take, resampled. Rendering it is right — it is what
-            // a listener hears — but scoring against it measures the resampler,
-            // so the column is left empty and the key is marked
-            // `transposed — unscored` (`DECISIONS.md` 328).
-            let recorded = sampled.contains(&key);
-            let (mut engine, _) = Metrics::measure(
-                &engine_audio.mono(),
-                &partial_hz,
-                recorded.then_some(&reference_spectrum),
-            );
-            if !recorded {
-                engine.match_db = f64::NAN;
-            }
-            let detail_text = detail
-                .contains(&key)
-                .then(|| detail_report(key, &partial_hz, &engine_audio, &reference_audio, &out))
-                .transpose()?;
-            let count = done.fetch_add(1, Ordering::Relaxed) + 1;
-            print!("\r  {count} keys   ");
-            use std::io::Write;
-            std::io::stdout().flush().ok();
-            Ok((
-                Scan {
-                    key,
-                    f0: partial_hz[0],
-                    unison: usize::from(preset.notes.unison[usize::from(key - FIRST_KEY)]),
-                    sampled: recorded,
-                    engine,
-                    reference,
-                },
-                detail_text,
-            ))
-        })
+        .map(
+            |&key| -> Result<(Scan, Option<String>), piano_tuner::Error> {
+                let params = preset.string_params(key);
+                let partial_hz: Vec<f64> = (1..=PARTIALS)
+                    .map(|k| f64::from(params.partial_freq(k)))
+                    .collect();
+                let engine_audio = render_engine(&preset, key);
+                let mut key_print = reference_key;
+                key_print.u64(u64::from(key));
+                let path =
+                    reference_cache.join(format!("compass-key{key:03}-{}.wav", key_print.hex()));
+                let reference_audio =
+                    cache::audio(&path, || with_sampler(&sfz, |s| render_reference(s, key)))?;
+                let (reference, reference_spectrum) =
+                    Metrics::measure(&reference_audio.mono(), &partial_hz, None);
+                // `match` is the one metric of the seven that scores the engine
+                // against *the recording of this key*, and two keys in three have
+                // no recording of their own: what the player answers with there is
+                // a neighbour's take, resampled. Rendering it is right — it is what
+                // a listener hears — but scoring against it measures the resampler,
+                // so the column is left empty and the key is marked
+                // `transposed — unscored` (`DECISIONS.md` 328).
+                let recorded = sampled.contains(&key);
+                let (mut engine, _) = Metrics::measure(
+                    &engine_audio.mono(),
+                    &partial_hz,
+                    recorded.then_some(&reference_spectrum),
+                );
+                if !recorded {
+                    engine.match_db = f64::NAN;
+                }
+                // The STEREO column, on the two channels rather than the mono sum
+                // every metric above is measured from (`DECISIONS.md` 314, 317 (a)).
+                // One band per key — the one this key's fundamental falls in — so
+                // that the report is a line down the compass rather than a surface,
+                // and so that the band quoted is always one the note actually
+                // fills.
+                let stereo_band = StereoImage::band_for(partial_hz[0]);
+                let stereo_engine = realism::stereo_image_of(&engine_audio)?.bands[stereo_band];
+                let stereo_reference =
+                    realism::stereo_image_of(&reference_audio)?.bands[stereo_band];
+                let detail_text = detail
+                    .contains(&key)
+                    .then(|| detail_report(key, &partial_hz, &engine_audio, &reference_audio, &out))
+                    .transpose()?;
+                let count = done.fetch_add(1, Ordering::Relaxed) + 1;
+                print!("\r  {count} keys   ");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                Ok((
+                    Scan {
+                        key,
+                        f0: partial_hz[0],
+                        unison: usize::from(preset.notes.unison[usize::from(key - FIRST_KEY)]),
+                        sampled: recorded,
+                        engine,
+                        reference,
+                        stereo_band,
+                        stereo_engine,
+                        stereo_reference,
+                    },
+                    detail_text,
+                ))
+            },
+        )
         .collect::<Result<Vec<_>, _>>()?;
     println!("\r  {} keys rendered      ", measured.len());
 
@@ -284,6 +313,32 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         scans.push(scan);
     }
+
+    let readable: Vec<&Scan> = scans
+        .iter()
+        .filter(|sc| sc.stereo_engine.readable() && sc.stereo_reference.readable())
+        .collect();
+    let inverted = readable
+        .iter()
+        .filter(|sc| sc.stereo_engine.r0 * sc.stereo_reference.r0 < 0.0)
+        .count();
+    println!(
+        "\nSTEREO r@0 in each key's fundamental band (not a mono sum): engine {:+.3}, \
+recording {:+.3} (medians over {} readable keys); {inverted} of them on opposite sides of zero",
+        median(
+            &readable
+                .iter()
+                .map(|sc| sc.stereo_engine.r0)
+                .collect::<Vec<_>>()
+        ),
+        median(
+            &readable
+                .iter()
+                .map(|sc| sc.stereo_reference.r0)
+                .collect::<Vec<_>>()
+        ),
+        readable.len(),
+    );
 
     let engine_z = score(&scans, |s| s.engine);
     let reference_z = score(&scans, |s| s.reference);
@@ -331,14 +386,14 @@ fn render_engine(preset: &Preset, key: u8) -> Audio {
         PREROLL_S as f32,
         Event::NoteOn {
             key,
-            vel: VELOCITY,
+            vel: u16::from(VELOCITY),
         },
     )];
     let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + RENDER_S) as f32);
-    let skip = (PREROLL_S * f64::from(SAMPLE_RATE)) as usize;
+    debug_assert_eq!(events[0].frame(), PREROLL);
     Audio::new(
         SAMPLE_RATE,
-        vec![left[skip..].to_vec(), right[skip..].to_vec()],
+        vec![left[PREROLL..].to_vec(), right[PREROLL..].to_vec()],
     )
     .expect("the engine renders stereo")
 }
@@ -349,10 +404,7 @@ fn render_engine(preset: &Preset, key: u8) -> Audio {
 fn render_reference(sampler: &mut Sampler, key: u8) -> Result<Audio, piano_tuner::Error> {
     let events = [TimedEvent::new(
         0.0,
-        SamplerEvent::NoteOn {
-            key,
-            vel: VELOCITY,
-        },
+        SamplerEvent::NoteOn { key, vel: VELOCITY },
     )];
     let rendered = sampler.render(&events, RENDER_S + 0.2)?;
     let mono = rendered.mono();
@@ -461,7 +513,10 @@ impl Metrics {
                 match_db,
                 beat_db: median(&measured.iter().map(|m| m.beat_depth_db).collect::<Vec<_>>()),
                 jitter_cents: median(
-                    &measured.iter().map(|m| m.floored_cents()).collect::<Vec<_>>(),
+                    &measured
+                        .iter()
+                        .map(|m| m.floored_cents())
+                        .collect::<Vec<_>>(),
                 ),
                 decay_db_s: median(&measured.iter().map(|m| m.tail_db_s).collect::<Vec<_>>()),
             },
@@ -482,6 +537,16 @@ struct Scan {
     sampled: bool,
     engine: Metrics,
     reference: Metrics,
+    /// Which of [`STEREO_BANDS`] this key's fundamental falls in, clamped at
+    /// both ends — A0's 27.5 Hz is under the lowest band and reads there.
+    stereo_band: usize,
+    /// The engine's and the recording's interchannel behaviour in that band.
+    /// **Not a mono sum**, and not scored against the neighbours the seven
+    /// metrics above are: the recording's own r@0 is a fact about where the
+    /// microphones were, which changes smoothly down the compass and is not a
+    /// thing a key can be an outlier of.
+    stereo_engine: StereoBand,
+    stereo_reference: StereoBand,
 }
 
 /// One key's six robust `z` scores.
@@ -674,12 +739,24 @@ fn detail_report(
     let _ = writeln!(
         s,
         "    {:>2} {:>8}  {:>7} {:>7} {:>7} {:>4} | {:>6} {:>6} | {:>6} {:>6} | {:>7} {:>7}",
-        "k", "hz", "eng dB", "ref dB", "diff", "seen", "eBeat", "rBeat", "eRate", "rRate", "eTail",
+        "k",
+        "hz",
+        "eng dB",
+        "ref dB",
+        "diff",
+        "seen",
+        "eBeat",
+        "rBeat",
+        "eRate",
+        "rRate",
+        "eTail",
         "rTail"
     );
     for k in 0..partial_hz.len() {
         let f = |m: &Option<Motion>, g: fn(&Motion) -> f64| {
-            m.as_ref().map(g).map_or("  --  ".to_string(), |v| format!("{v:6.2}"))
+            m.as_ref()
+                .map(g)
+                .map_or("  --  ".to_string(), |v| format!("{v:6.2}"))
         };
         let _ = writeln!(
             s,
@@ -707,7 +784,10 @@ fn detail_report(
     std::fs::create_dir_all(&dir)?;
     let name = note_name(key);
     write_normalised(&dir.join(format!("key{key}_{name}_engine.wav")), engine)?;
-    write_normalised(&dir.join(format!("key{key}_{name}_reference.wav")), reference)?;
+    write_normalised(
+        &dir.join(format!("key{key}_{name}_reference.wav")),
+        reference,
+    )?;
     Ok(s)
 }
 
@@ -813,15 +893,12 @@ shows up in both columns and is not a defect of the model.\n\n"
             .iter()
             .map(|sc| sc.engine.values()[metric_index(f.metric)])
             .collect();
-        let neighbours: Vec<f64> = same_kind_neighbours_of(
-            scans,
-            i,
-            RECORDED_ONLY.contains(&f.metric),
-        )
-        .into_iter()
-        .map(|j| column[j])
-        .filter(|v| v.is_finite())
-        .collect();
+        let neighbours: Vec<f64> =
+            same_kind_neighbours_of(scans, i, RECORDED_ONLY.contains(&f.metric))
+                .into_iter()
+                .map(|j| column[j])
+                .filter(|v| v.is_finite())
+                .collect();
         s.push_str(&format!(
             "| {} | {} | {} | {} | `{}` | **{:+.1}** | {:.2} | {:.2} | {:+.1} |\n",
             scans[i].key,
@@ -848,6 +925,114 @@ shows up in both columns and is not a defect of the model.\n\n"
         "\n{} flags over {keys_flagged} of {} keys.\n\n",
         flags.len(),
         scans.len()
+    ));
+
+    // ---- the stereo line ----
+    s.push_str("## The stereo image, key by key  *(STEREO, not a mono sum)*\n\n");
+    s.push_str(
+        "Every one of the seven metrics above is measured on the mono sum, and this section is \
+the one that is not. `DECISIONS.md` 314 measured the interchannel correlation of the recording \
+against the engine's and found them **inverted**: the recording's two channels are +0.945 \
+correlated below 125 Hz, falling to about zero through the mid and treble, which is a spaced \
+pair of microphones over the strings; the engine read negative in the bass, where the \
+soundboard FDN's two opposite-sign output taps decorrelated it, and near +1 in the treble, \
+where `soundboard::pan_for_key` scaled one mono voice into two channels — 46 of 88 keys on the \
+opposite side of zero from the recording, median |Δ| 0.784. `PHYSICS.md` §8 is now built \
+(`voicing.mics`, `DECISIONS.md` 351-358): two virtual capsules over the string band, a \
+per-source delay and gain from where along the bass-treble axis that source sits, and a \
+frequency-dependent coherence on the board's diffuse field — with the pair's own geometry \
+since inverted out of the interchannel delays the recording carries (`DECISIONS.md` 359-367), \
+and with the board's **mode-controlled band** under it (`[voicing.mics.modal]`, `DECISIONS.md` \
+368-377), which is the part of the image no spacing can produce: where the plate's own modes \
+put a nodal line between the two capsules, both hear the same field with opposite signs and \
+the pair sees more difference than sum — built as an anti-phase copy of the pair's own sum \
+since `DECISIONS.md` 379, and read here through a window that opens at the strike rather than \
+96 samples after it (`DECISIONS.md` 378). \
+The line below is what all of that is worth key by key. Read the two summary numbers together: the \
+count of keys on the wrong side of zero counts keys sitting *near* zero, and the median |Δ| is \
+how far the image is off. It is **not a room** — §9 is refused by measurement in item 315.\n\n",
+    );
+    s.push_str(&format!(
+        "`r@0` is the normalised interchannel correlation at lag zero, **signed**, read in the \
+band this key's fundamental falls in (clamped at both ends: A0-B1 are under the lowest band and \
+read there, which is where their second partial is). `Δ` is engine minus recording, and its \
+sign is the whole finding. `peak |r| @ lag` is the largest |r| over ±{:.0} ms and where it sits, \
+positive meaning the *right* channel leads. `M/S` is 10·log10 of mid over side energy in the \
+band. A row is `-` where the band holds less than {:.0} dB under the whole note's energy on \
+either side, which is where a correlation is a ratio of two noise floors.\n\n",
+        realism::STEREO_MAX_LAG_S * 1000.0,
+        realism::STEREO_BAND_FLOOR_DB
+    ));
+    s.push_str(
+        "This column is **not** scored against the neighbours the seven above are. Where the \
+microphones were is a fact that changes smoothly down the compass, not something one key can be \
+an outlier of; the statistic that matters here is the whole line, and `renders/realism/REALISM.md`'s \
+Columns S and `tuner/tests/stereo.rs` are where it carries a bar.\n\n",
+    );
+    s.push_str(
+        "| key | note | f0 | band | engine r@0 | recording r@0 | Δ | engine peak \\|r\\| @ lag | recording peak \\|r\\| @ lag | engine M/S | recording M/S |\n",
+    );
+    s.push_str("|---|---|---|---|---|---|---|---|---|---|---|\n");
+    for sc in scans.iter() {
+        let readable = sc.stereo_engine.readable() && sc.stereo_reference.readable();
+        if !readable {
+            s.push_str(&format!(
+                "| {} | {} | {:.1} | `{}` | - | - | - | - | - | - | - |\n",
+                sc.key,
+                note_name(sc.key),
+                sc.f0,
+                STEREO_BANDS[sc.stereo_band].0
+            ));
+            continue;
+        }
+        s.push_str(&format!(
+            "| {} | {} | {:.1} | `{}` | {:+.3} | {:+.3} | **{:+.3}** | {:.3} @ {:+.2} ms | {:.3} @ {:+.2} ms | {:+.1} dB | {:+.1} dB |\n",
+            sc.key,
+            note_name(sc.key),
+            sc.f0,
+            STEREO_BANDS[sc.stereo_band].0,
+            sc.stereo_engine.r0,
+            sc.stereo_reference.r0,
+            sc.stereo_engine.r0 - sc.stereo_reference.r0,
+            sc.stereo_engine.peak_r.abs(),
+            sc.stereo_engine.lag_ms,
+            sc.stereo_reference.peak_r.abs(),
+            sc.stereo_reference.lag_ms,
+            sc.stereo_engine.mid_side_db,
+            sc.stereo_reference.mid_side_db,
+        ));
+    }
+    let readable: Vec<&Scan> = scans
+        .iter()
+        .filter(|sc| sc.stereo_engine.readable() && sc.stereo_reference.readable())
+        .collect();
+    let inverted = readable
+        .iter()
+        .filter(|sc| sc.stereo_engine.r0 * sc.stereo_reference.r0 < 0.0)
+        .count();
+    s.push_str(&format!(
+        "\n**{} of {} readable keys have the engine on the opposite side of zero from the \
+recording.** Median r@0 over them: engine {:+.3}, recording {:+.3}; median |Δ| {:.3}.\n\n",
+        inverted,
+        readable.len(),
+        median(
+            &readable
+                .iter()
+                .map(|sc| sc.stereo_engine.r0)
+                .collect::<Vec<_>>()
+        ),
+        median(
+            &readable
+                .iter()
+                .map(|sc| sc.stereo_reference.r0)
+                .collect::<Vec<_>>()
+        ),
+        median(
+            &readable
+                .iter()
+                .map(|sc| (sc.stereo_engine.r0 - sc.stereo_reference.r0).abs())
+                .collect::<Vec<_>>()
+        ),
     ));
 
     // ---- the full table ----
@@ -910,7 +1095,6 @@ distance from.\n\n",
 fn metric_index(name: &str) -> usize {
     METRIC_NAMES.iter().position(|&n| n == name).unwrap_or(0)
 }
-
 
 fn note_name(key: u8) -> String {
     const NAMES: [&str; 12] = [

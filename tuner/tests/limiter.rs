@@ -44,7 +44,6 @@ fn db(x: f32) -> f64 {
     20.0 * f64::from(x).max(1e-30).log10()
 }
 
-
 fn render(preset: &Preset, phrase: &Phrase) -> (Vec<f32>, Vec<f32>) {
     render_to_buffer(
         preset,
@@ -64,7 +63,10 @@ fn master_limiter(l: &[f32], r: &[f32]) -> (usize, f32) {
         .chain(r.iter())
         .filter(|x| x.abs() > LIMIT_THRESHOLD)
         .count();
-    let peak = l.iter().chain(r.iter()).fold(0.0f32, |m, &x| m.max(x.abs()));
+    let peak = l
+        .iter()
+        .chain(r.iter())
+        .fold(0.0f32, |m, &x| m.max(x.abs()));
     (over, peak)
 }
 
@@ -97,7 +99,8 @@ fn no_benchmark_phrase_reaches_the_master_safety_limiter() {
             let (over, peak) = master_limiter(&l, &r);
             let headroom = db(LIMIT_THRESHOLD) - db(peak);
             assert_eq!(
-                over, 0,
+                over,
+                0,
                 "{path} {}: {over} samples inside the safety limiter, peak {:.2} dBFS",
                 phrase.name,
                 db(peak)
@@ -139,7 +142,7 @@ fn no_benchmark_phrase_reaches_the_master_safety_limiter() {
 fn a_single_note_never_reaches_the_master_safety_limiter() {
     for path in ["presets/default.toml", "presets/salamander-c5.toml"] {
         let preset = preset(path);
-        let mut loudest = (0.0f32, 0u8, 0u8);
+        let mut loudest = (0.0f32, 0u8, 0u16);
         for key in (LOWEST_KEY..=HIGHEST_KEY).step_by(4) {
             for vel in [80, 110, 127] {
                 let (l, r) = render_to_buffer(

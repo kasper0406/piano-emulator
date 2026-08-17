@@ -74,21 +74,21 @@ use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::soundboard::{pan_for_key, Soundboard};
 use piano_emulator::types::{db_to_amp, Event, BLOCK};
 
-use piano_tuner::estimate::hammer::{
-    fit_hammer, fit_velocity_map, ContactConfig, FeltParams, HammerConfig, LayerSpectrum,
-    SpectrumWeighting,
-};
 use piano_tuner::estimate::directivity::{
     balance_drift, pan_spread_for_drift, DirectivityConfig, DRIFT_AT_ZERO_DB, DRIFT_PER_SPREAD_DB,
 };
 use piano_tuner::estimate::duplex::{DuplexConfig, DUPLEX_LEVEL_OFFSET_DB};
+use piano_tuner::estimate::hammer::{
+    fit_hammer, fit_velocity_map, ContactConfig, FeltParams, HammerConfig, LayerSpectrum,
+    SpectrumWeighting,
+};
 use piano_tuner::estimate::motion::{
     fit_false_beat, fit_strike_direction, strike_direction_for, MotionConfig, SwingLine,
     VelocityCell,
 };
 use piano_tuner::estimate::spread::{note_spread, SpreadConfig};
-use piano_tuner::motion::{partial_motion, Motion, Spectrum};
 use piano_tuner::estimate::{DecayConfig, StrikeConfig};
+use piano_tuner::motion::{partial_motion, Motion, Spectrum};
 use piano_tuner::pipeline::{analyze_trajectories, track_refined, NoteAnalysis, NoteConfig};
 use piano_tuner::preset::{equal_temperament, key_index, Preset, PresetBuilder};
 use piano_tuner::stft::StftConfig;
@@ -142,7 +142,13 @@ fn gate_preset() -> EnginePreset {
 /// between the channels without changing what is in them, so summing the two
 /// and dividing by the gains recovers the master chain's output exactly.
 fn render_note(preset: &EnginePreset, key: u8, vel: u8, duration_s: f32) -> Vec<f32> {
-    let events = [RenderEvent::new(ONSET_S, Event::NoteOn { key, vel })];
+    let events = [RenderEvent::new(
+        ONSET_S,
+        Event::NoteOn {
+            key,
+            vel: u16::from(vel),
+        },
+    )];
     let (left, right) = render_to_buffer(preset, &events, duration_s);
     let angle = (f64::from(pan_for_key(key)) + 1.0) * FRAC_PI_4;
     let scale = (1.0 / (angle.cos() + angle.sin())) as f32;
@@ -261,8 +267,9 @@ fn corpus_base() -> piano_tuner::cache::Fingerprint {
         let (key, vel, duration_s) = PROBE;
         let signal = render_note(&gate_preset(), key, vel, duration_s);
         let config = analysis_config();
-        let (probe, _) = track_refined(&signal, SAMPLE_RATE, seed_for(&gate_preset(), key), &config)
-            .expect("the probe note tracks");
+        let (probe, _) =
+            track_refined(&signal, SAMPLE_RATE, seed_for(&gate_preset(), key), &config)
+                .expect("the probe note tracks");
         let mut fingerprint = piano_tuner::cache::Fingerprint::new();
         fingerprint
             .str("calibration/corpus")
@@ -313,7 +320,10 @@ fn tracked(
         // is read by `analyze_trajectories`, which is not cached.
         .str(&format!("{:?}", config.tracker))
         .str(&format!("{:?}", config.refinement));
-    let path = corpus_dir().join(format!("note{key:03}-vel{vel:03}-{}.bin", fingerprint.hex()));
+    let path = corpus_dir().join(format!(
+        "note{key:03}-vel{vel:03}-{}.bin",
+        fingerprint.hex()
+    ));
     piano_tuner::cache::stored(&path, || {
         let signal = render_note(preset, key, vel, duration_s);
         track_refined(&signal, SAMPLE_RATE, seed_for(preset, key), config).map(|(t, _)| t)
@@ -393,10 +403,7 @@ impl Truth {
             // of hammer impulse (`string.rs`), and both polarizations are in
             // phase at the strike, which is where an excitation spectrum is
             // read.
-            gain: f64::from(v.excitation_scale)
-                * f64::from(n.bridge_gain[i])
-                * f0
-                / 261.6256
+            gain: f64::from(v.excitation_scale) * f64::from(n.bridge_gain[i]) * f0 / 261.6256
                 * (1.0 + horizontal_gain),
             sigma0: f64::from(n.sigma0[i]),
             sigma1: f64::from(n.sigma1[i]),
@@ -437,7 +444,11 @@ impl Truth {
 
     /// Hammer speed the engine's velocity map gives MIDI velocity `vel`.
     fn hammer_velocity(&self, preset: &EnginePreset, vel: u8) -> f64 {
-        f64::from(preset.hammer_params(self.key).hammer_velocity(vel))
+        f64::from(
+            preset
+                .hammer_params(self.key)
+                .hammer_velocity(u16::from(vel)),
+        )
     }
 }
 
@@ -601,7 +612,11 @@ fn a_beating_unisons_decays_come_back_within_what_the_beating_allows() {
             }
             errors.push(fit.t60() / case.truth.partial_t60(fit.k) - 1.0);
         }
-        assert!(errors.len() >= 5, "key {key}: only {} partials", errors.len());
+        assert!(
+            errors.len() >= 5,
+            "key {key}: only {} partials",
+            errors.len()
+        );
         let worst = errors.iter().fold(0.0f64, |m, e| m.max(e.abs()));
         let mean = errors.iter().sum::<f64>() / errors.len() as f64;
         println!(
@@ -630,7 +645,10 @@ fn the_strike_position_comes_back_within_five_percent() {
         let Some(fit) = &case.analysis.strike else {
             // A note whose partials stop before the comb's first null has no
             // strike position in it, and C6's do.
-            println!("key {:>3}: no strike position in six partials", case.truth.key);
+            println!(
+                "key {:>3}: no strike position in six partials",
+                case.truth.key
+            );
             continue;
         };
         let error = fit.position / case.truth.strike_position - 1.0;
@@ -748,7 +766,11 @@ fn the_felt_and_the_velocity_map_come_back_from_a_velocity_ladder() {
     // from the ladder: it is where the hammer sits on the string, the same
     // whatever it was struck at, and the long record measures it an order of
     // magnitude better than four seconds at one velocity does.
-    let strike = case(key).analysis.strike.clone().expect("C4 has a strike position");
+    let strike = case(key)
+        .analysis
+        .strike
+        .clone()
+        .expect("C4 has a strike position");
     let layers: Vec<LayerSpectrum> = analyses
         .iter()
         .enumerate()
@@ -851,8 +873,10 @@ fn the_felt_and_the_velocity_map_come_back_from_a_velocity_ladder() {
     );
     // A preset made of it is one the engine will play.
     PresetBuilder::new(
-        Preset::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/default.toml"))
-            .expect("the base preset"),
+        Preset::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/default.toml"),
+        )
+        .expect("the base preset"),
     )
     .velocity_map(map)
     .build()
@@ -939,7 +963,10 @@ fn a_known_fourth_order_inharmonicity_comes_back_within_a_tenth() {
             fit.residual_cents,
             fit.residual_cents_2,
         );
-        assert!(fit.is_fourth_order(), "key {key}: no fourth-order term fitted");
+        assert!(
+            fit.is_fourth_order(),
+            "key {key}: no fourth-order term fitted"
+        );
         assert!(
             (fit.model.b4 / f64::from(b4) - 1.0).abs() < 0.10,
             "key {key}: B4 {:+.4e} vs {b4:+.4e}",
@@ -1405,8 +1432,16 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
         (k * f64::from(preset.f0(KEY)) * (1.0 + b * k * k).sqrt() * (cents / 1200.0).exp2()) as f32
     };
     let truth = [
-        piano_emulator::preset::DuplexMode { hz: partial(5, 52.0), gain_db: -14.0, t60_s: 1.4 },
-        piano_emulator::preset::DuplexMode { hz: partial(9, -38.0), gain_db: -20.0, t60_s: 0.9 },
+        piano_emulator::preset::DuplexMode {
+            hz: partial(5, 52.0),
+            gain_db: -14.0,
+            t60_s: 1.4,
+        },
+        piano_emulator::preset::DuplexMode {
+            hz: partial(9, -38.0),
+            gain_db: -20.0,
+            t60_s: 0.9,
+        },
     ];
     preset.notes.duplex = vec![Vec::new(); 88];
     preset.notes.duplex[key_index(KEY).unwrap()] = truth.to_vec();
@@ -1449,7 +1484,10 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
     // is: an STFT peak against an STFT peak (`estimate::duplex::strongest_peak`).
     let (sl, sr) = render_to_buffer(
         &preset,
-        &[RenderEvent::new(ONSET_S, Event::NoteOn { key: KEY, vel: 90 })],
+        &[RenderEvent::new(
+            ONSET_S,
+            Event::NoteOn { key: KEY, vel: 90 },
+        )],
         3.0,
     );
     let strike: Vec<f32> = sl.iter().zip(&sr).map(|(&l, &r)| 0.5 * (l + r)).collect();
@@ -1588,7 +1626,10 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
         "the level offset over 18 dB of gain: {offsets:?} (spread {spread:.3} dB) against \
          DUPLEX_LEVEL_OFFSET_DB = {DUPLEX_LEVEL_OFFSET_DB:+.2}"
     );
-    assert!(spread < 0.2, "the level is not linear in gain_db: {offsets:?}");
+    assert!(
+        spread < 0.2,
+        "the level is not linear in gain_db: {offsets:?}"
+    );
     let mean = offsets.iter().sum::<f64>() / offsets.len() as f64;
     assert!(
         (mean - DUPLEX_LEVEL_OFFSET_DB).abs() < 2.0,
@@ -1637,7 +1678,10 @@ fn the_halo_level_follows_the_coupling_the_fit_inverts_it_on() {
         let halo = halo_only(&preset, KEY, 1.0, 6.0);
         let (sl, sr) = render_to_buffer(
             &preset,
-            &[RenderEvent::new(ONSET_S, Event::NoteOn { key: KEY, vel: 90 })],
+            &[RenderEvent::new(
+                ONSET_S,
+                Event::NoteOn { key: KEY, vel: 90 },
+            )],
             3.0,
         );
         let strike: Vec<f32> = sl.iter().zip(&sr).map(|(&l, &r)| 0.5 * (l + r)).collect();
@@ -1734,7 +1778,9 @@ fn a_known_bridge_tilt_is_the_tilt_the_engines_own_filter_realises() {
         }
         clustered.voicing.bridge = Some(cluster);
         clustered.voicing.resonance_coupling = 1.0e-6;
-        clustered.validate().expect("the clustered bridge is well formed");
+        clustered
+            .validate()
+            .expect("the clustered bridge is well formed");
         let engine_cluster =
             EnginePreset::from_toml(&clustered.to_toml()).expect("the engine reads it back");
         let mine_cluster =
@@ -1980,7 +2026,11 @@ mod per_partial {
         let preset = EnginePreset::from_toml(&preset.to_toml()).expect("a valid preset");
 
         let analyses = layers(&preset, KEY, 26.0);
-        let recovered = partial_gains(&spectra(&analyses), comb_of(&preset, KEY), &ShapingConfig::default());
+        let recovered = partial_gains(
+            &spectra(&analyses),
+            comb_of(&preset, KEY),
+            &ShapingConfig::default(),
+        );
         println!(
             "gains, dB from the truth: {:?}",
             recovered
@@ -2005,7 +2055,10 @@ mod per_partial {
         // this is measured against.
         let rms = (errors.iter().map(|e| e * e).sum::<f64>() / errors.len() as f64).sqrt();
         let worst = errors.iter().fold(0.0f64, |m, &e| m.max(e.abs()));
-        assert!(rms < 1.0, "{rms:.2} dB RMS over the first twelve: {errors:?}");
+        assert!(
+            rms < 1.0,
+            "{rms:.2} dB RMS over the first twelve: {errors:?}"
+        );
         assert!(worst < 1.6, "worst {worst:.2} dB: {errors:?}");
         // The pattern itself — the thing no smooth envelope can be — comes back
         // at its full contrast.
@@ -2160,7 +2213,10 @@ mod per_partial {
         let mean: f64 = (recovered.iter().map(|&s| f64::from(s).ln()).sum::<f64>()
             / recovered.len() as f64)
             .exp();
-        assert!((mean - 1.0).abs() < 1e-3, "the row's geometric mean is {mean}");
+        assert!(
+            (mean - 1.0).abs() < 1e-3,
+            "the row's geometric mean is {mean}"
+        );
         let truth_mean: f64 = {
             let mut logs: Vec<f64> = truth.iter().map(|&t| f64::from(t).ln()).collect();
             logs.resize(recovered.len(), 0.0);
@@ -2233,14 +2289,8 @@ mod per_partial {
         let (whole_db, delivered_db) = {
             let a = render_note(&quiet, KEY, 90, 2.0);
             let b = render_note(&preset, KEY, 90, 2.0);
-            let burst: Vec<f32> = a
-                .iter()
-                .zip(&b)
-                .map(|(&x, &y)| y - x)
-                .collect();
-            let whole = burst
-                .iter()
-                .fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
+            let burst: Vec<f32> = a.iter().zip(&b).map(|(&x, &y)| y - x).collect();
+            let whole = burst.iter().fold(0.0f64, |m, &x| m.max(f64::from(x).abs()));
             let seen = residual_metrics(
                 KEY,
                 90,
@@ -2260,26 +2310,26 @@ mod per_partial {
         let mut levels: Vec<f64> = LAYERS
             .par_iter()
             .map(|&vel| {
-            let analysis = analyze(&quiet, KEY, vel, 2.0);
-            let partial_hz: Vec<f64> = analysis
-                .decays
-                .partials
-                .iter()
-                .map(|fit| fit.frequency_hz)
-                .collect();
-            let onset_s = analysis.trajectories.onset_s;
-            let signal = render_note(&preset, KEY, vel, 2.0);
-            let metrics = residual_metrics(
-                KEY,
-                vel,
-                &signal,
-                SAMPLE_RATE,
-                &partial_hz,
-                onset_s,
-                reference,
-                &config,
-            )
-            .expect("a residual");
+                let analysis = analyze(&quiet, KEY, vel, 2.0);
+                let partial_hz: Vec<f64> = analysis
+                    .decays
+                    .partials
+                    .iter()
+                    .map(|fit| fit.frequency_hz)
+                    .collect();
+                let onset_s = analysis.trajectories.onset_s;
+                let signal = render_note(&preset, KEY, vel, 2.0);
+                let metrics = residual_metrics(
+                    KEY,
+                    vel,
+                    &signal,
+                    SAMPLE_RATE,
+                    &partial_hz,
+                    onset_s,
+                    reference,
+                    &config,
+                )
+                .expect("a residual");
                 metrics.level_db
             })
             .collect();
@@ -2309,7 +2359,13 @@ const LOWEST_KEY_FOR_ANCHOR: u8 = 21;
 fn motion_of(preset: &EnginePreset, key: u8, vel: u8, partials: u32) -> Vec<(u32, Motion)> {
     const PREROLL_S: f32 = 0.05;
     const NOTE_S: f32 = 4.5;
-    let events = [RenderEvent::new(PREROLL_S, Event::NoteOn { key, vel })];
+    let events = [RenderEvent::new(
+        PREROLL_S,
+        Event::NoteOn {
+            key,
+            vel: u16::from(vel),
+        },
+    )];
     let (left, right) = render_to_buffer(preset, &events, PREROLL_S + NOTE_S);
     let skip = (f64::from(PREROLL_S) * SAMPLE_RATE) as usize;
     let mono: Vec<f64> = left
@@ -2367,7 +2423,14 @@ fn a_known_false_beat_comes_back_from_the_engines_own_render_of_it() {
     // measures the bias: a 0.7 Hz split reads 1.11 Hz on a clean pair).
     let asked_motions: Vec<Vec<(u32, Motion)>> = [1.0f32, 1.4, 2.2]
         .par_iter()
-        .map(|&asked| motion_of(&preset_with_split(KEY, &[(PARTIAL, asked, LEVEL_DB)]), KEY, 90, 4))
+        .map(|&asked| {
+            motion_of(
+                &preset_with_split(KEY, &[(PARTIAL, asked, LEVEL_DB)]),
+                KEY,
+                90,
+                4,
+            )
+        })
         .collect();
     for (asked, motions) in [1.0f32, 1.4, 2.2].iter().copied().zip(&asked_motions) {
         let fit = fit_false_beat(
@@ -2415,9 +2478,7 @@ fn a_known_false_beat_comes_back_from_the_engines_own_render_of_it() {
     let rows: [&[(u16, f32, f32)]; 3] = [&[], &[(PARTIAL, 1.4, -16.0)], &[(PARTIAL, 1.4, -3.0)]];
     let depths: Vec<f64> = rows.par_iter().map(|rows| depth_at(rows)).collect();
     let (none, quiet, loud) = (depths[0], depths[1], depths[2]);
-    println!(
-        "beat depth: no split {none:.2} dB, -16 dB companion {quiet:.2}, -3 dB {loud:.2}"
-    );
+    println!("beat depth: no split {none:.2} dB, -16 dB companion {quiet:.2}, -3 dB {loud:.2}");
     assert!(
         quiet > none + 5.0 && loud > none + 5.0,
         "a split has to be audible as a beat: {none:.2} / {quiet:.2} / {loud:.2}"

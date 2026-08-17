@@ -74,7 +74,13 @@ fn main() {
             .map(|k| f64::from(params.partial_freq(k)))
             .collect();
         let events = [
-            RenderEvent::new(0.05, Event::NoteOn { key, vel: VEL }),
+            RenderEvent::new(
+                0.05,
+                Event::NoteOn {
+                    key,
+                    vel: u16::from(VEL),
+                },
+            ),
             RenderEvent::new((0.05 + HOLD_S) as f32, Event::NoteOff { key, vel: 64 }),
         ];
         let (l, r) = render_to_buffer(&preset, &events, DUR_S as f32);

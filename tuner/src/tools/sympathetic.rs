@@ -426,7 +426,7 @@ fn measure_targets(
                     0.0,
                     Event::NoteOn {
                         key: target.key,
-                        vel: REFERENCE_VELOCITY,
+                        vel: u16::from(REFERENCE_VELOCITY),
                     },
                 )],
                 RENDER_S,
@@ -476,7 +476,7 @@ fn halo_level(engine: &piano_emulator::preset::Preset, key: u8) -> f64 {
     bare.notes.duplex = Vec::new();
 
     let events = [
-        RenderEvent::new(0.0, Event::NoteOn { key, vel: REFERENCE_VELOCITY }),
+        RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(REFERENCE_VELOCITY) }),
         RenderEvent::new(HOLD_S, Event::NoteOff { key, vel: 64 }),
     ];
     let (wl, wr) = render_to_buffer(&quiet, &events, RENDER_S);
@@ -494,7 +494,7 @@ fn halo_level(engine: &piano_emulator::preset::Preset, key: u8) -> f64 {
     // microphone hears it (`DECISIONS.md` 145).
     let (sl, sr) = render_to_buffer(
         &quiet,
-        &[RenderEvent::new(0.0, Event::NoteOn { key, vel: REFERENCE_VELOCITY })],
+        &[RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(REFERENCE_VELOCITY) })],
         2.0,
     );
     let strike = mono(&sl, &sr);
@@ -547,7 +547,7 @@ fn fit_pan_spread(
         let line_at = |engine: &piano_emulator::preset::Preset| -> Option<f64> {
             let (left, right) = render_to_buffer(
                 engine,
-                &[RenderEvent::new(0.0, Event::NoteOn { key, vel: REFERENCE_VELOCITY })],
+                &[RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(REFERENCE_VELOCITY) })],
                 8.0,
             );
             balance_drift(&left, &right, f0, f64::from(SAMPLE_RATE), &note_config, &config)
@@ -598,7 +598,7 @@ fn fit_pan_spread(
         let note_config = survey.note_config(f0)?;
         let (left, right) = render_to_buffer(
             &fitted,
-            &[RenderEvent::new(0.0, Event::NoteOn { key: line.key, vel: REFERENCE_VELOCITY })],
+            &[RenderEvent::new(0.0, Event::NoteOn { key: line.key, vel: u16::from(REFERENCE_VELOCITY) })],
             8.0,
         );
         let Ok(drift) =

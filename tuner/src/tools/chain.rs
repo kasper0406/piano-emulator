@@ -59,9 +59,9 @@ use piano_tuner::estimate::chain::{
 use piano_tuner::estimate::melody;
 use piano_tuner::library::MechanismKind;
 use piano_tuner::realism::{self, Phrase, VelocityLayers, PHRASE_SET_VERSION, TARGET_RMS};
+use piano_tuner::sampler::engine_events;
 use piano_tuner::sampler::SAMPLER_VERSION;
 use piano_tuner::stft::{Stft, StftConfig};
-use piano_tuner::sampler::engine_events;
 use piano_tuner::{Audio, SampleLibrary, Sampler, SamplerEvent, TimedEvent, SAMPLE_RATE};
 
 const DEFAULT_PRESET: &str = "presets/salamander-c5.toml";
@@ -86,7 +86,9 @@ const WINDOW: usize = 4096;
 const HOP: usize = 1024;
 
 /// Octave-band centres for the phrase tilt, the same eight `brilliance` uses.
-const OCTAVES: [f64; 8] = [125.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 16_000.0];
+const OCTAVES: [f64; 8] = [
+    125.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 16_000.0,
+];
 const TILT_FROM_HZ: f64 = 500.0;
 
 /// The window a reflection is looked for in, seconds after the direct sound.
@@ -103,8 +105,7 @@ const REFLECTION_CLUSTER_S: f64 = 0.0025;
 /// Tail levels the room stage's late field is swept over, in dB under the
 /// direct sound. Fitted against the recording's own interchannel correlation,
 /// which is the one thing about the late field this material *does* measure.
-const TAIL_LEVEL_SWEEP_DB: [f64; 9] =
-    [-30.0, -24.0, -18.0, -12.0, -9.0, -6.0, -3.0, 0.0, 6.0];
+const TAIL_LEVEL_SWEEP_DB: [f64; 9] = [-30.0, -24.0, -18.0, -12.0, -9.0, -6.0, -3.0, 0.0, 6.0];
 
 /// The room stage's noise seed, so a render is reproducible.
 const ROOM_SEED: u64 = 0x0c8a_1000;
@@ -141,11 +142,20 @@ fn with_sampler<T>(
 // ---------------------------------------------------------------------------
 
 fn render_engine_note(preset: &Preset, key: u8, vel: u8) -> Audio {
-    let events = [RenderEvent::new(PREROLL_S as f32, Event::NoteOn { key, vel })];
+    let events = [RenderEvent::new(
+        PREROLL_S as f32,
+        Event::NoteOn {
+            key,
+            vel: u16::from(vel),
+        },
+    )];
     let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + NOTE_S) as f32);
     let skip = (PREROLL_S * SR) as usize;
-    Audio::new(SAMPLE_RATE, vec![left[skip..].to_vec(), right[skip..].to_vec()])
-        .expect("the engine renders stereo")
+    Audio::new(
+        SAMPLE_RATE,
+        vec![left[skip..].to_vec(), right[skip..].to_vec()],
+    )
+    .expect("the engine renders stereo")
 }
 
 fn render_reference_note(
@@ -174,17 +184,21 @@ fn render_reference_note(
             let skip = (onset * SR).round() as usize;
             let frames = (NOTE_S * SR) as usize;
             let cut = |c: &Vec<f32>| -> Vec<f32> {
-                (0..frames).map(|n| c.get(skip + n).copied().unwrap_or(0.0)).collect()
+                (0..frames)
+                    .map(|n| c.get(skip + n).copied().unwrap_or(0.0))
+                    .collect()
             };
             Audio::new(SAMPLE_RATE, rendered.channels.iter().map(cut).collect())
         })
     })
 }
 
-
 fn render_engine_phrase(preset: &Preset, phrase: &Phrase) -> Audio {
-    let (left, right) =
-        render_to_buffer(preset, &engine_events::to_render_events(&phrase.events), phrase.duration_s as f32);
+    let (left, right) = render_to_buffer(
+        preset,
+        &engine_events::to_render_events(&phrase.events),
+        phrase.duration_s as f32,
+    );
     Audio::new(SAMPLE_RATE, vec![left, right]).expect("the engine renders stereo")
 }
 
@@ -205,8 +219,11 @@ fn render_reference_phrase(
         .str(phrase.name)
         .str(name)
         .f64(phrase.duration_s);
-    let path = cache::reference_dir(data)
-        .join(format!("chain-phrase-{}-{name}-{}.wav", phrase.name, fingerprint.hex()));
+    let path = cache::reference_dir(data).join(format!(
+        "chain-phrase-{}-{name}-{}.wav",
+        phrase.name,
+        fingerprint.hex()
+    ));
     cache::audio(&path, || {
         with_sampler(sfz, |sampler| sampler.render(events, phrase.duration_s))
     })
@@ -306,14 +323,36 @@ fn mel_cells(engine: &[f32], reference: &[f32], window: usize) -> Vec<Vec<f64>> 
     let bands = realism::MEL_BANDS;
     let hop = window / realism::HOP_DIVISOR;
     let (Ok(a), Ok(b)) = (
-        realism::mel_spectrogram(engine, SR, window, hop, bands, realism::MEL_F_MIN, realism::MEL_F_MAX),
-        realism::mel_spectrogram(reference, SR, window, hop, bands, realism::MEL_F_MIN, realism::MEL_F_MAX),
+        realism::mel_spectrogram(
+            engine,
+            SR,
+            window,
+            hop,
+            bands,
+            realism::MEL_F_MIN,
+            realism::MEL_F_MAX,
+        ),
+        realism::mel_spectrogram(
+            reference,
+            SR,
+            window,
+            hop,
+            bands,
+            realism::MEL_F_MIN,
+            realism::MEL_F_MAX,
+        ),
     ) else {
         return vec![Vec::new(); bands];
     };
     let n = a.frames.len().min(b.frames.len());
     let floor = a.peak_db().max(b.peak_db()) + realism::MEL_FLOOR_DB;
-    let to_db = |e: f64| if e <= 0.0 { floor } else { (10.0 * e.log10()).max(floor) };
+    let to_db = |e: f64| {
+        if e <= 0.0 {
+            floor
+        } else {
+            (10.0 * e.log10()).max(floor)
+        }
+    };
     let mut out: Vec<Vec<f64>> = (0..bands).map(|_| Vec::with_capacity(n)).collect();
     for t in 0..n {
         for (k, band) in out.iter_mut().enumerate() {
@@ -373,8 +412,10 @@ fn oracle_bounds(per_phrase: &[Vec<Vec<f64>>]) -> (f64, f64, f64) {
     // One curve for all six: the median of every phrase's cells pooled.
     let global: Vec<f64> = (0..bands)
         .map(|k| {
-            let pooled: Vec<f64> =
-                per_phrase.iter().flat_map(|p| p[k].iter().copied()).collect();
+            let pooled: Vec<f64> = per_phrase
+                .iter()
+                .flat_map(|p| p[k].iter().copied())
+                .collect();
             let m = median_of(pooled);
             if m.is_finite() {
                 m
@@ -390,13 +431,21 @@ fn oracle_bounds(per_phrase: &[Vec<Vec<f64>>]) -> (f64, f64, f64) {
 /// Scale a render to the benchmark's own target level, guarding the peak.
 fn normalized(audio: &Audio) -> Audio {
     let r = realism::rms(&audio.mono());
-    let gain = if r > 0.0 { f64::from(TARGET_RMS) / r } else { 1.0 };
+    let gain = if r > 0.0 {
+        f64::from(TARGET_RMS) / r
+    } else {
+        1.0
+    };
     let peak = audio
         .channels
         .iter()
         .flat_map(|c| c.iter())
         .fold(0.0f32, |m, &x| m.max(x.abs()));
-    let gain = if peak as f64 * gain > 0.98 { 0.98 / peak as f64 } else { gain };
+    let gain = if peak as f64 * gain > 0.98 {
+        0.98 / peak as f64
+    } else {
+        gain
+    };
     Audio {
         sample_rate: audio.sample_rate,
         channels: audio
@@ -414,17 +463,33 @@ fn onset_trimmed(audio: &Audio) -> Audio {
     let skip = ((onset * SR).round() as usize).saturating_sub((0.001 * SR) as usize);
     Audio {
         sample_rate: audio.sample_rate,
-        channels: audio.channels.iter().map(|c| c[skip.min(c.len())..].to_vec()).collect(),
+        channels: audio
+            .channels
+            .iter()
+            .map(|c| c[skip.min(c.len())..].to_vec())
+            .collect(),
     }
 }
 
 fn note_name(key: u8) -> String {
-    const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-    format!("{}{}", NAMES[usize::from(key) % 12], i32::from(key) / 12 - 1)
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    format!(
+        "{}{}",
+        NAMES[usize::from(key) % 12],
+        i32::from(key) / 12 - 1
+    )
 }
 
 fn mean(xs: impl Iterator<Item = f64>) -> f64 {
-    let (s, n) = xs.fold((0.0, 0usize), |(s, n), x| if x.is_finite() { (s + x, n + 1) } else { (s, n) });
+    let (s, n) = xs.fold((0.0, 0usize), |(s, n), x| {
+        if x.is_finite() {
+            (s + x, n + 1)
+        } else {
+            (s, n)
+        }
+    });
     if n == 0 {
         f64::NAN
     } else {
@@ -505,7 +570,11 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    println!("{} matched note pairs in {:.1} s", samples.len(), started.elapsed().as_secs_f64());
+    println!(
+        "{} matched note pairs in {:.1} s",
+        samples.len(),
+        started.elapsed().as_secs_f64()
+    );
 
     let pick = |keep: &dyn Fn(&EqSample) -> bool| -> Vec<EqSample> {
         samples.iter().filter(|s| keep(s)).cloned().collect()
@@ -529,7 +598,10 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         level_abs, level_r
     );
     let centres = band_centres();
-    println!("\n  {:>8}  {:>7}  {:>7}  {:>7}  {:>6}  {:>7}", "Hz", "A", "B", "all", "n(A)", "MAD(A)");
+    println!(
+        "\n  {:>8}  {:>7}  {:>7}  {:>7}  {:>6}  {:>7}",
+        "Hz", "A", "B", "all", "n(A)", "MAD(A)"
+    );
     for (b, &centre) in centres.iter().enumerate() {
         println!(
             "  {:8.0}  {:7.2}  {:7.2}  {:7.2}  {:6}  {:7.2}",
@@ -603,7 +675,10 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             key,
             stereo_signature(&reference.channels[0], &reference.channels[1], SR)?,
         ));
-        engine_sigs.push((key, stereo_signature(&engine.channels[0], &engine.channels[1], SR)?));
+        engine_sigs.push((
+            key,
+            stereo_signature(&engine.channels[0], &engine.channels[1], SR)?,
+        ));
         spatial_notes.push((key, engine));
     }
     println!("  interchannel correlation, recording against engine:");
@@ -613,10 +688,30 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut band_zero_r: Vec<f64> = Vec::new();
     for (i, &(lo, hi)) in SPATIAL_BANDS.iter().enumerate() {
-        let rz = median_of(reference_sigs.iter().map(|(_, s)| s.per_band[i].zero_r).collect());
-        let rp = median_of(reference_sigs.iter().map(|(_, s)| s.per_band[i].peak_r.abs()).collect());
-        let rl = median_of(reference_sigs.iter().map(|(_, s)| s.per_band[i].lag_ms).collect());
-        let ez = median_of(engine_sigs.iter().map(|(_, s)| s.per_band[i].zero_r).collect());
+        let rz = median_of(
+            reference_sigs
+                .iter()
+                .map(|(_, s)| s.per_band[i].zero_r)
+                .collect(),
+        );
+        let rp = median_of(
+            reference_sigs
+                .iter()
+                .map(|(_, s)| s.per_band[i].peak_r.abs())
+                .collect(),
+        );
+        let rl = median_of(
+            reference_sigs
+                .iter()
+                .map(|(_, s)| s.per_band[i].lag_ms)
+                .collect(),
+        );
+        let ez = median_of(
+            engine_sigs
+                .iter()
+                .map(|(_, s)| s.per_band[i].zero_r)
+                .collect(),
+        );
         band_zero_r.push(rz);
         println!(
             "  {:>6}  {:9.3} / {:6.3}  {:16.2}  {:16.3}",
@@ -627,15 +722,27 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             ez
         );
     }
-    let broad_ref = median_of(reference_sigs.iter().map(|(_, s)| s.broadband.zero_r).collect());
-    let broad_eng = median_of(engine_sigs.iter().map(|(_, s)| s.broadband.zero_r).collect());
+    let broad_ref = median_of(
+        reference_sigs
+            .iter()
+            .map(|(_, s)| s.broadband.zero_r)
+            .collect(),
+    );
+    let broad_eng = median_of(
+        engine_sigs
+            .iter()
+            .map(|(_, s)| s.broadband.zero_r)
+            .collect(),
+    );
     println!("  broadband r@0: reference {broad_ref:.3}, engine {broad_eng:.3}");
 
     // The mechanism recordings: the only impulsive events in the library.
     let mut impulsive: Vec<(String, Audio)> = Vec::new();
     for m in library.mechanism() {
-        if matches!(m.kind, MechanismKind::KeyOff | MechanismKind::PedalDown | MechanismKind::PedalUp)
-        {
+        if matches!(
+            m.kind,
+            MechanismKind::KeyOff | MechanismKind::PedalDown | MechanismKind::PedalUp
+        ) {
             if let Ok(a) = piano_tuner::audio::load_at(&m.path, SAMPLE_RATE) {
                 let name = m
                     .path
@@ -654,9 +761,15 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
     }
-    println!("\n  {} impulsive mechanism recordings read", impulsive.len());
+    println!(
+        "\n  {} impulsive mechanism recordings read",
+        impulsive.len()
+    );
 
-    let decays: Vec<_> = impulsive.iter().map(|(_, a)| energy_decay(&a.mono(), SR)).collect();
+    let decays: Vec<_> = impulsive
+        .iter()
+        .map(|(_, a)| energy_decay(&a.mono(), SR))
+        .collect();
     let edt = median_of(decays.iter().filter_map(|d| d.edt_s).collect());
     let t20 = median_of(decays.iter().filter_map(|d| d.t20_s).collect());
     println!("  broadband EDT {edt:.3} s, T20 {t20:.3} s");
@@ -721,8 +834,14 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     reflections.sort_by(|a, b| a.delay_s.partial_cmp(&b.delay_s).expect("finite"));
     println!("\n  reflection candidates (clustered over the mechanism recordings):");
-    println!("  {:>9}  {:>9}  {:>7}  {:>6}", "delay ms", "level dB", "side", "n");
-    for (r, c) in reflections.iter().zip(clusters.iter().take(MAX_REFLECTIONS)) {
+    println!(
+        "  {:>9}  {:>9}  {:>7}  {:>6}",
+        "delay ms", "level dB", "side", "n"
+    );
+    for (r, c) in reflections
+        .iter()
+        .zip(clusters.iter().take(MAX_REFLECTIONS))
+    {
         println!(
             "  {:9.2}  {:9.2}  {:7.2}  {:6}",
             r.delay_s * 1000.0,
@@ -746,7 +865,11 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  the candidates {} with delay, so they are {} — the stage carries no reflections",
         if monotone_rise { "get LOUDER" } else { "decay" },
-        if monotone_rise { "the mechanism's own body and not arrivals" } else { "arrivals" }
+        if monotone_rise {
+            "the mechanism's own body and not arrivals"
+        } else {
+            "arrivals"
+        }
     );
 
     // Tail onset: a stated choice, not a reading (see the module's note 2 —
@@ -770,7 +893,12 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // makes of the same fact.
     let target_r: Vec<f64> = (0..SPATIAL_BANDS.len())
         .map(|i| {
-            median_of(reference_sigs.iter().map(|(_, s)| s.per_band[i].peak_r.abs()).collect())
+            median_of(
+                reference_sigs
+                    .iter()
+                    .map(|(_, s)| s.per_band[i].peak_r.abs())
+                    .collect(),
+            )
         })
         .collect();
     let width_mismatch = |sigs: &[StereoSignature]| -> f64 {
@@ -824,7 +952,10 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         reflection_lowpass_hz: 20_000.0,
         seed: ROOM_SEED,
     };
-    let chain = Chain { eq: eq_a.clone(), room: room.clone() };
+    let chain = Chain {
+        eq: eq_a.clone(),
+        room: room.clone(),
+    };
 
     // -----------------------------------------------------------------------
     // 3. The collapse, on held-out material.
@@ -837,8 +968,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     phrases.push(melody::soprano());
     for phrase in &phrases {
         let engine = render_engine_phrase(&preset, phrase);
-        let reference =
-            render_reference_phrase(&sfz, &data, phrase, "reference", &phrase.events)?;
+        let reference = render_reference_phrase(&sfz, &data, phrase, "reference", &phrase.events)?;
         let alt = render_reference_phrase(
             &sfz,
             &data,
@@ -850,9 +980,17 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         let chained = chain.apply(&engine);
         {
             let (a, b) = realism::level_match(&engine, &reference)?;
-            cells_before.push(mel_cells(&a.mono(), &b.mono(), realism::MULTI_RES_WINDOWS[1]));
+            cells_before.push(mel_cells(
+                &a.mono(),
+                &b.mono(),
+                realism::MULTI_RES_WINDOWS[1],
+            ));
             let (a, b) = realism::level_match(&eq_only, &reference)?;
-            cells_eq.push(mel_cells(&a.mono(), &b.mono(), realism::MULTI_RES_WINDOWS[1]));
+            cells_eq.push(mel_cells(
+                &a.mono(),
+                &b.mono(),
+                realism::MULTI_RES_WINDOWS[1],
+            ));
         }
         rows.push((
             phrase.name.to_string(),
@@ -916,17 +1054,15 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // 4. The renders.
     // -----------------------------------------------------------------------
     let mut written: Vec<String> = Vec::new();
-    let mut write_triple = |name: &str,
-                            engine: &Audio,
-                            reference: &Audio|
-     -> Result<(), Box<dyn std::error::Error>> {
-        let chained = chain.apply(engine);
-        normalized(engine).write_wav(out.join(format!("{name}_engine.wav")))?;
-        normalized(&chained).write_wav(out.join(format!("{name}_engine_chained.wav")))?;
-        normalized(reference).write_wav(out.join(format!("{name}_reference.wav")))?;
-        written.push(name.to_string());
-        Ok(())
-    };
+    let mut write_triple =
+        |name: &str, engine: &Audio, reference: &Audio| -> Result<(), Box<dyn std::error::Error>> {
+            let chained = chain.apply(engine);
+            normalized(engine).write_wav(out.join(format!("{name}_engine.wav")))?;
+            normalized(&chained).write_wav(out.join(format!("{name}_engine_chained.wav")))?;
+            normalized(reference).write_wav(out.join(format!("{name}_reference.wav")))?;
+            written.push(name.to_string());
+            Ok(())
+        };
     let soprano = melody::soprano();
     let soprano_engine = render_engine_phrase(&preset, &soprano);
     let soprano_reference =
@@ -1243,16 +1379,17 @@ trimmed to its own onset, so a pre-delay is not recoverable, and at a {:.2} s ta
 material does measure about a late field: the recording's own interchannel decorrelation, on \
 half A's notes.\n\n\
 | tail level dB | interchannel mismatch |\n|--:|--:|\n| bare engine | {:.3} |\n",
-        f.candidates
-            .last()
-            .map(|r| r.gain_db)
-            .unwrap_or(0.0)
+        f.candidates.last().map(|r| r.gain_db).unwrap_or(0.0)
             - f.candidates.first().map(|r| r.gain_db).unwrap_or(0.0),
         1000.0
             * (f.candidates.last().map(|r| r.delay_s).unwrap_or(0.0)
                 - f.candidates.first().map(|r| r.delay_s).unwrap_or(0.0)),
         f.room.tail_onset_s * 1000.0,
-        f.room.tail_t60.iter().map(|&(_, _, t)| t).fold(0.0f64, f64::max),
+        f.room
+            .tail_t60
+            .iter()
+            .map(|&(_, _, t)| t)
+            .fold(0.0f64, f64::max),
         f.bare_mismatch
     );
     for &(level, mismatch) in f.sweep {
@@ -1293,8 +1430,14 @@ the reference against itself played out of the neighbouring velocity layer. `ode
         let _ = writeln!(
             out,
             "| `{name}` | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} |",
-            before.mel, eq.mel, chained.mel, floor.mel,
-            before.modulation, eq.modulation, chained.modulation, floor.modulation
+            before.mel,
+            eq.mel,
+            chained.mel,
+            floor.mel,
+            before.modulation,
+            eq.modulation,
+            chained.modulation,
+            floor.modulation
         );
     }
     let _ = write!(
@@ -1372,8 +1515,14 @@ above C6 then gets a cut it did not earn. A chain is one curve for all 88 keys; 
 that has to be register-dependent to be right is not a chain, and this one does.\n\n\
 **What the chain is worth, and it is not nothing:** the interchannel column. The recording's \
 two channels are one signal below 125 Hz and about 60 % coherent above it at a sub-millisecond \
-lag; the engine's are the reverse — decorrelated in the bass by the board FDN's orthogonal \
-taps and a pan-pot's by 6-12 kHz ({:.3}). The room stage closes that mismatch {:.3} -> {:.3}, \
+lag; when this experiment was run the engine's were the reverse — decorrelated in the bass by \
+the board FDN's orthogonal taps and a pan-pot's by 6-12 kHz. `PHYSICS.md` §8 was built out of \
+that finding and then the board's mode-controlled band under it (`DECISIONS.md` 351-358, \
+359-367, 368-377), and the bare engine's mismatch here has come **0.233 -> {:.3}** since. What \
+has *not* moved is the top band's peak |r|, {:.3}: a spaced pair is decorrelated at lag zero \
+and still has a maximum somewhere in ±5 ms, which is why `realism::stereo_image` gates the \
+signed value at zero lag and reports the peak beside it rather than instead of it. The room \
+stage closes what is left {:.3} -> {:.3}, \
 and **nothing in `REALISM.md` scores it**, because every metric there is a mono sum. If the \
 listener's \"it doesn't sound bad, it's just different\" has a presentation component, this is \
 where it lives — and it is a **microphone** question (`PHYSICS.md` §8), not a room one (§9).\n\n\
@@ -1436,6 +1585,7 @@ equal while notes ring and differ after every damper.\n",
         mean(bench.iter().map(|r| r.2.hf2.abs())),
         mean(bench.iter().map(|r| r.1.tilt.abs())),
         mean(bench.iter().map(|r| r.2.tilt.abs())),
+        f.bare_mismatch,
         median_of(
             f.engine_sigs
                 .iter()

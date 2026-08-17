@@ -56,7 +56,9 @@ fn silent_mechanism(mut preset: Preset) -> Preset {
     for anchor in &mut preset.noise.strike.level_db {
         anchor.db = -200.0;
     }
-    preset.validate().expect("a silenced action is a legal preset");
+    preset
+        .validate()
+        .expect("a silenced action is a legal preset");
     preset
 }
 
@@ -118,7 +120,7 @@ fn render_mono(events: &[RenderEvent], duration_s: f32) -> Vec<f32> {
 }
 
 /// A single strike, released at `release_s` (never, if that is past the end).
-fn strike(key: u8, vel: u8, release_s: f32, duration_s: f32) -> Vec<f32> {
+fn strike(key: u8, vel: u16, release_s: f32, duration_s: f32) -> Vec<f32> {
     let mut events = vec![RenderEvent::new(0.0, Event::NoteOn { key, vel })];
     if release_s < duration_s {
         events.push(RenderEvent::new(release_s, Event::NoteOff { key, vel: 64 }));
@@ -308,7 +310,6 @@ fn the_top_octave_does_not_stop_dead_inside_the_note() {
     let measured = Preset::load(&path).expect("presets/salamander-c5.toml loads");
     const STEP_S: f32 = 0.1;
     const NOTE_S: f32 = 3.6;
-
 
     for key in 96u8..=108 {
         let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })];
@@ -532,12 +533,26 @@ fn a_prepared_string_rings_on_after_the_note_that_excited_it() {
     const EXCITER: u8 = 67; // G4, which lands on C3's third partial
     let mut preset = silent_mechanism(preset());
     preset.voicing.resonance_coupling = strongest_legal_coupling(&preset);
-    preset.validate().expect("a strongly coupled instrument is a legal preset");
+    preset
+        .validate()
+        .expect("a strongly coupled instrument is a legal preset");
 
     let render = |prepare: bool| {
         let mut events = vec![
-            RenderEvent::new(0.5, Event::NoteOn { key: EXCITER, vel: 120 }),
-            RenderEvent::new(2.5, Event::NoteOff { key: EXCITER, vel: 64 }),
+            RenderEvent::new(
+                0.5,
+                Event::NoteOn {
+                    key: EXCITER,
+                    vel: 120,
+                },
+            ),
+            RenderEvent::new(
+                2.5,
+                Event::NoteOff {
+                    key: EXCITER,
+                    vel: 64,
+                },
+            ),
         ];
         if prepare {
             events.push(RenderEvent::new(0.0, Event::KeyDown { key: PREPARED }));
@@ -608,7 +623,9 @@ fn a_duplex_segment_answers_another_keys_note_through_the_bridge() {
     let coupling = strongest_legal_coupling(&voiced);
     voiced.voicing.resonance_coupling = coupling;
     plain.voicing.resonance_coupling = coupling;
-    voiced.validate().expect("one segment on one key is a legal preset");
+    voiced
+        .validate()
+        .expect("one segment on one key is a legal preset");
     plain.validate().expect("the control is a legal preset");
 
     let run = |preset: &Preset| {
@@ -681,13 +698,16 @@ fn thirty_seconds_of_dense_playing_stays_safe() {
     for i in 0..1200 {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let key = 21 + (state >> 16) as u8 % 88;
-        let vel = 20 + (state >> 8) as u8 % 107;
+        let vel = 20 + (state >> 8) as u16 % 107;
         let t = i as f32 * 0.024;
         events.push(RenderEvent::new(t, Event::NoteOn { key, vel }));
         events.push(RenderEvent::new(t + 0.35, Event::NoteOff { key, vel: 64 }));
         if i % 100 == 0 {
             let pedal = if (i / 100) % 2 == 0 { 1.0 } else { 0.0 };
-            events.push(RenderEvent::new(t, Event::Pedal(PedalEvent::Sustain(pedal))));
+            events.push(RenderEvent::new(
+                t,
+                Event::Pedal(PedalEvent::Sustain(pedal)),
+            ));
         }
     }
     let (l, r) = render_to_buffer(&preset(), &events, 30.0);
@@ -797,8 +817,11 @@ fn the_most_extreme_bridge_a_preset_may_ask_for_stays_bounded_for_a_minute() {
     for i in 0..2400 {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let key = 21 + (state >> 16) as u8 % 88;
-        let vel = 40 + (state >> 8) as u8 % 87;
-        events.push(RenderEvent::new(i as f32 * 0.02, Event::NoteOn { key, vel }));
+        let vel = 40 + (state >> 8) as u16 % 87;
+        events.push(RenderEvent::new(
+            i as f32 * 0.02,
+            Event::NoteOn { key, vel },
+        ));
     }
     let (l, r) = render_to_buffer(&preset, &events, 60.0);
 
@@ -891,7 +914,10 @@ fn a_note_off_thumps_at_the_level_the_recordings_measured() {
 
     let mut total = 0.0f32;
     for (key, table) in MEASURED {
-        let strike = magnitude_peak(&[RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })], 1.0);
+        let strike = magnitude_peak(
+            &[RenderEvent::new(0.0, Event::NoteOn { key, vel: 90 })],
+            1.0,
+        );
         // Releases of a key that is not down: the thump on its own, with no
         // string sound anywhere near it. Spaced a second apart, which is four
         // envelope lifetimes of the longest key-off in the table.
@@ -998,7 +1024,10 @@ fn the_pedal_is_quiet_when_the_keys_already_hold_the_dampers() {
     for key in 21u8..=90 {
         everything.push(RenderEvent::new(0.0, Event::KeyDown { key }));
     }
-    everything.push(RenderEvent::new(0.5, Event::Pedal(PedalEvent::Sustain(1.0))));
+    everything.push(RenderEvent::new(
+        0.5,
+        Event::Pedal(PedalEvent::Sustain(1.0)),
+    ));
     let held = render_mono(&everything, 2.0);
     let free = render_mono(
         &[RenderEvent::new(
@@ -1074,7 +1103,10 @@ fn a_silently_held_key_answers_a_struck_note_with_the_pedal_up() {
         engine.process(&mut l, &mut r);
         engine.voice(key_index(48).unwrap()).string().energy()
     };
-    assert!(quietest > 0.0, "a velocity-1 note-on was swallowed as a silent press");
+    assert!(
+        quietest > 0.0,
+        "a velocity-1 note-on was swallowed as a silent press"
+    );
 }
 
 /// `PHYSICS.md` §6's second: how fast the key comes back sets how fast the
@@ -1088,7 +1120,7 @@ fn a_silently_held_key_answers_a_struck_note_with_the_pedal_up() {
 #[test]
 fn a_slow_release_rings_on_where_a_fast_one_stops() {
     let preset = silent_mechanism(preset());
-    let after_release = |release_vel: u8| {
+    let after_release = |release_vel: u16| {
         let events = [
             RenderEvent::new(0.0, Event::NoteOn { key: 48, vel: 100 }),
             RenderEvent::new(
@@ -1211,7 +1243,7 @@ fn a_restrike_attacks_like_a_strike_from_silence() {
     const KEY: u8 = 60;
     const AT: f32 = 3.0;
     let preset = silent_mechanism(preset());
-    let attack = |previous: Option<u8>| -> Vec<f32> {
+    let attack = |previous: Option<u16>| -> Vec<f32> {
         let mut events = Vec::new();
         if let Some(vel) = previous {
             events.push(RenderEvent::new(0.0, Event::NoteOn { key: KEY, vel }));
@@ -1293,7 +1325,7 @@ fn a_release_does_not_click_at_the_block_boundary() {
     let preset = silent_mechanism(preset());
     let off_s = 0.5;
     for key in [33u8, 45, 60, 72] {
-        for vel in [12u8, 90] {
+        for vel in [12u16, 90] {
             let events = [
                 RenderEvent::new(0.1, Event::NoteOn { key, vel }),
                 RenderEvent::new(off_s, Event::NoteOff { key, vel: 64 }),
@@ -1409,8 +1441,7 @@ fn the_worst_case_with_a_duplex_on_every_key_fits_the_performance_budget() {
             let position = i as f32 / (NUM_KEYS - 1) as f32;
             (0..MAX_DUPLEX_MODES)
                 .map(|k| DuplexMode {
-                    hz: 1_500.0
-                        * 2.0f32.powf(1.5 * position + k as f32 * 0.31 + i as f32 * 0.0037),
+                    hz: 1_500.0 * 2.0f32.powf(1.5 * position + k as f32 * 0.31 + i as f32 * 0.0037),
                     gain_db: -20.0,
                     t60_s: 1.5,
                 })
@@ -1420,7 +1451,10 @@ fn the_worst_case_with_a_duplex_on_every_key_fits_the_performance_budget() {
     voiced
         .validate()
         .expect("six scattered segments on every key is a legal preset");
-    assert_eq!(voiced.duplex_modes(index_to_note(0)).len(), MAX_DUPLEX_MODES);
+    assert_eq!(
+        voiced.duplex_modes(index_to_note(0)).len(),
+        MAX_DUPLEX_MODES
+    );
 
     let measure = |preset: &Preset| {
         // Best of three: the number is a floor on the cost, not an average of
@@ -1502,7 +1536,11 @@ fn the_worst_case_with_the_measured_presets_duplex_fits_the_performance_budget()
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/salamander-c5.toml");
     let measured = Preset::load(&path).expect("presets/salamander-c5.toml loads");
     let segments: usize = (0..88)
-        .map(|i| measured.duplex_modes(piano_emulator::types::index_to_note(i)).len())
+        .map(|i| {
+            measured
+                .duplex_modes(piano_emulator::types::index_to_note(i))
+                .len()
+        })
         .sum();
     assert!(
         segments > 0,
@@ -1565,10 +1603,7 @@ fn the_worst_case_with_the_strike_noise_fits_the_performance_budget() {
     voiced.noise.strike.centroid_hz = 2_000.0;
     voiced.noise.strike.bandwidth_hz = 8_000.0;
     voiced.noise.strike.decay_s = 0.3;
-    voiced.noise.strike.level_db = vec![piano_emulator::preset::NoiseAnchor {
-        key: 21,
-        db: -12.0,
-    }];
+    voiced.noise.strike.level_db = vec![piano_emulator::preset::NoiseAnchor { key: 21, db: -12.0 }];
     voiced
         .validate()
         .expect("a voiced hammer noise is a legal preset");

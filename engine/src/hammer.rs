@@ -30,7 +30,7 @@
 //! spring the reflection is equivalent to once several round trips have passed.
 //! The two have the same static effect on the contact; only the ripple differs.
 
-use crate::types::SAMPLE_RATE;
+use crate::types::{velocity_from_midi, SAMPLE_RATE};
 
 /// Longest force pulse the scratch buffer can hold: 20 ms, far above the
 /// 0.4-6 ms a real contact lasts, so the integration can never overrun.
@@ -102,8 +102,8 @@ impl HammerParams {
 
     /// MIDI velocity 1..127 to hammer velocity in m/s. Exponential, so each
     /// MIDI step is a constant ratio — the mapping the ear reads as even.
-    pub fn hammer_velocity(&self, vel: u8) -> f32 {
-        let v = vel.clamp(1, 127) as f32;
+    pub fn hammer_velocity(&self, vel: u16) -> f32 {
+        let v = velocity_from_midi(vel).clamp(1.0, 127.0);
         self.velocity_min * (self.velocity_max / self.velocity_min).powf((v - 1.0) / 126.0)
     }
 }
@@ -145,7 +145,7 @@ impl Hammer {
 
     /// Integrates a strike at MIDI velocity `vel` through this hammer's own
     /// velocity mapping.
-    pub fn strike_midi(&mut self, vel: u8) {
+    pub fn strike_midi(&mut self, vel: u16) {
         self.strike(self.params.hammer_velocity(vel));
     }
 
@@ -281,7 +281,7 @@ mod tests {
         Hammer::new(Preset::default().hammer_params(key))
     }
 
-    fn struck(key: u8, vel: u8) -> Hammer {
+    fn struck(key: u8, vel: u16) -> Hammer {
         let mut h = hammer_for(key);
         h.strike_midi(vel);
         h
@@ -329,7 +329,7 @@ mod tests {
         assert!((params.hammer_velocity(1) - params.velocity_min).abs() < 1e-6);
         assert!((params.hammer_velocity(127) - params.velocity_max).abs() < 1e-4);
         let mut prev = 0.0;
-        for vel in 1..=127u8 {
+        for vel in 1..=127u16 {
             let v = params.hammer_velocity(vel);
             assert!(v > prev);
             prev = v;
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn contact_time_is_physical_across_the_compass() {
         for key in [21u8, 40, 60, 84, 108] {
-            for vel in [20u8, 80, 127] {
+            for vel in [20u16, 80, 127] {
                 let h = struck(key, vel);
                 let ms = duration_ms(&h);
                 // The spec's 0.5-3 ms is the typical range; a pianissimo bass
@@ -369,7 +369,7 @@ mod tests {
         // is `m v (1 + e)`, and the restitution `e` of a felt hammer against a
         // string that carries energy away cannot reach 1.
         for key in LOWEST_KEY..=HIGHEST_KEY {
-            for vel in [1u8, 20, 48, 80, 110, 127] {
+            for vel in [1u16, 20, 48, 80, 110, 127] {
                 let h = struck(key, vel);
                 let m = h.params().mass;
                 let v = h.params().hammer_velocity(vel);
@@ -434,7 +434,7 @@ mod tests {
     fn restriking_reuses_the_buffers() {
         let mut h = hammer_for(60);
         let pulse_ptr = h.pulse.as_ptr();
-        for vel in [1u8, 64, 127] {
+        for vel in [1u16, 64, 127] {
             h.strike_midi(vel);
             assert!(h.is_active());
         }

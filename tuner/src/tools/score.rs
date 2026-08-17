@@ -159,7 +159,7 @@ fn measure_render(
 ) -> Vec<Option<piano_tuner::motion::Motion>> {
     let events = [RenderEvent::new(
         PREROLL_S as f32,
-        Event::NoteOn { key, vel: velocity },
+        Event::NoteOn { key, vel: u16::from(velocity) },
     )];
     let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + RENDER_S) as f32);
     let skip = (PREROLL_S * f64::from(SAMPLE_RATE)) as usize;

@@ -542,7 +542,9 @@ fn fit_backbone(anchors: &[(f64, f64)]) -> (f64, Vec<f64>) {
         .collect();
 
     let mut gain_db = anchors[0].1;
-    let mut steps: Vec<f64> = (0..n - 1).map(|i| anchors[i + 1].1 - anchors[i].1).collect();
+    let mut steps: Vec<f64> = (0..n - 1)
+        .map(|i| anchors[i + 1].1 - anchors[i].1)
+        .collect();
     let mut best = (gain_db, steps.clone(), f64::INFINITY);
 
     for _ in 0..BACKBONE_FIT_PASSES {
@@ -872,9 +874,7 @@ mod tests {
             }
             // ... and it is not gratuitously tighter than the bound either: the
             // ceiling is the bound, to the last few bits.
-            assert!(
-                (r.ceiling() - MAX_COUPLING.min(MAX_BRIDGE_LOOP_GAIN / max_b)).abs() < 1.0e-9
-            );
+            assert!((r.ceiling() - MAX_COUPLING.min(MAX_BRIDGE_LOOP_GAIN / max_b)).abs() < 1.0e-9);
         }
         // A flat bus is exactly as free as it always was.
         let mut r = ResonanceBus::from_preset(&Preset::default());
@@ -1140,14 +1140,8 @@ mod tests {
             });
             let measured = amp_to_db(filter.max_magnitude()) as f64;
             let span = (b - a).max(a / MAX_BRIDGE_Q) as f64 * 8.0;
-            let dense = 20.0
-                * dense_max(
-                    &filter,
-                    a as f64 - span,
-                    b as f64 + span,
-                    2_000_001,
-                )
-                .log10();
+            let dense =
+                20.0 * dense_max(&filter, a as f64 - span, b as f64 + span, 2_000_001).log10();
             assert!(
                 measured >= dense - 0.01,
                 "peaks at {a}/{b} Hz measure {measured:.3} dB but reach {dense:.3} dB: \

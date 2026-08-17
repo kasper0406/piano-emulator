@@ -140,7 +140,7 @@ fn the_sounding_path_is_what_it_was_before_the_mechanism() {
             0.35 * i as f32,
             Event::NoteOn {
                 key,
-                vel: 40 + 8 * i as u8,
+                vel: 40 + 8 * i as u16,
             },
         ));
     }
@@ -180,7 +180,7 @@ fn the_inert_fields_do_not_reach_the_render_of_either_shipped_preset() {
                 0.3 * i as f32,
                 Event::NoteOn {
                     key,
-                    vel: 48 + 10 * i as u8,
+                    vel: 48 + 10 * i as u16,
                 },
             )
         })

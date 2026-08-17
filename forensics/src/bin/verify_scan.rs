@@ -35,7 +35,13 @@ fn db(x: f64) -> f64 {
 }
 
 fn engine_note(preset: &Preset, key: u8, vel: u8, seconds: f64) -> Vec<f32> {
-    let events = [RenderEvent::new(PREROLL_S as f32, Event::NoteOn { key, vel })];
+    let events = [RenderEvent::new(
+        PREROLL_S as f32,
+        Event::NoteOn {
+            key,
+            vel: u16::from(vel),
+        },
+    )];
     let (l, r) = render_to_buffer(preset, &events, (PREROLL_S + seconds) as f32);
     let skip = (PREROLL_S * f64::from(SAMPLE_RATE)) as usize;
     l[skip..]
@@ -270,7 +276,12 @@ fn mode_solo() {
     ) -> f64 {
         let mut nb: Vec<(u16, f64)> = (0..rows.len())
             .filter(|&j| j != i && unison[j] == unison[i])
-            .map(|j| ((rows[j].0 as i16 - rows[i].0 as i16).unsigned_abs(), levels[j]))
+            .map(|j| {
+                (
+                    (rows[j].0 as i16 - rows[i].0 as i16).unsigned_abs(),
+                    levels[j],
+                )
+            })
             .collect();
         nb.sort_by_key(|&(d, _)| d);
         let mut vals: Vec<f64> = nb.iter().take(8).map(|&(_, v)| v).collect();
@@ -326,7 +337,10 @@ fn mode_solo() {
         d.len()
     );
     for x in d.iter().take(6) {
-        println!("  key {:>3}  e {:.1}  r {:.1}  |d| {:.1}", x.0, x.1, x.2, x.3);
+        println!(
+            "  key {:>3}  e {:.1}  r {:.1}  |d| {:.1}",
+            x.0, x.1, x.2, x.3
+        );
     }
 }
 
@@ -375,7 +389,10 @@ fn mode_ff() {
                 worst = (key, db(chan));
             }
             if over > 0 {
-                println!("  key {key}: {over} samples over the limiter, peak {:.2} dBFS", db(chan));
+                println!(
+                    "  key {key}: {over} samples over the limiter, peak {:.2} dBFS",
+                    db(chan)
+                );
             }
         }
         println!(
@@ -442,7 +459,15 @@ fn mode_chord() {
         let strike = |keys: &[u8], vel: u8, secs: f32| {
             let events: Vec<RenderEvent> = keys
                 .iter()
-                .map(|&k| RenderEvent::new(0.0, Event::NoteOn { key: k, vel }))
+                .map(|&k| {
+                    RenderEvent::new(
+                        0.0,
+                        Event::NoteOn {
+                            key: k,
+                            vel: u16::from(vel),
+                        },
+                    )
+                })
                 .collect();
             let (l, r) = render_to_buffer(&preset, &events, secs);
             let chan = l

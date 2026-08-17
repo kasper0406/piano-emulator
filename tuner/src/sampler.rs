@@ -302,7 +302,9 @@ impl Region {
         if self.keytrack == 0 || self.cc64_gate().is_some() {
             return None;
         }
-        u8::try_from(self.keycenter).ok().filter(|k| (21..=108).contains(k))
+        u8::try_from(self.keycenter)
+            .ok()
+            .filter(|k| (21..=108).contains(k))
     }
 
     /// The keys this region answers to.
@@ -437,7 +439,11 @@ impl Instrument {
     /// Unpitched regions — the damper landing, the pedal tray, anything with
     /// `pitch_keytrack=0` or a CC 64 gate — are carried over untouched: they are
     /// recorded per key and there is nothing to reroute.
-    pub fn rerouted(&self, keys: std::ops::RangeInclusive<u8>, route: impl Fn(u8) -> Option<u8>) -> Instrument {
+    pub fn rerouted(
+        &self,
+        keys: std::ops::RangeInclusive<u8>,
+        route: impl Fn(u8) -> Option<u8>,
+    ) -> Instrument {
         let mut regions: Vec<Region> = self
             .regions
             .iter()
@@ -447,12 +453,19 @@ impl Instrument {
         for key in keys {
             let Some(take) = route(key) else {
                 // No route: keep whatever the file already says for this key.
-                regions.extend(self.regions.iter().filter(|r| {
-                    r.recorded_key().is_some() && r.matches_key(key)
-                }).cloned());
+                regions.extend(
+                    self.regions
+                        .iter()
+                        .filter(|r| r.recorded_key().is_some() && r.matches_key(key))
+                        .cloned(),
+                );
                 continue;
             };
-            for region in self.regions.iter().filter(|r| r.recorded_key() == Some(take)) {
+            for region in self
+                .regions
+                .iter()
+                .filter(|r| r.recorded_key() == Some(take))
+            {
                 let mut moved = region.clone();
                 moved.lokey = i32::from(key);
                 moved.hikey = i32::from(key);
@@ -734,10 +747,7 @@ impl Sampler {
                 };
                 let entering = cc >= lo && cc <= hi;
                 let was_inside = previous >= lo && previous <= hi;
-                entering
-                    && !was_inside
-                    && draw >= region.lorand
-                    && draw < region.hirand
+                entering && !was_inside && draw >= region.lorand && draw < region.hirand
             })
             .map(|(index, _)| index)
             .collect();
@@ -826,7 +836,12 @@ impl Sampler {
             channels = audio::resample(&channels, REFERENCE_HZ as u32, target)?;
         }
         let (left, right) = match channels.len() {
-            0 => return Err(Error::Unsupported(format!("{}: no channels", path.display()))),
+            0 => {
+                return Err(Error::Unsupported(format!(
+                    "{}: no channels",
+                    path.display()
+                )))
+            }
             1 => (channels[0].clone(), channels[0].clone()),
             _ => (channels[0].clone(), channels[1].clone()),
         };
@@ -1067,6 +1082,21 @@ pub mod engine_events {
     use piano_emulator::{Event, PedalEvent, RenderEvent};
     use std::path::Path;
 
+    /// The engine's widened velocity as a sample-layer velocity.
+    ///
+    /// A layer is selected by `lovel..=hivel`, which is 7-bit in every sample
+    /// format there is, so this direction is where the extra resolution stops.
+    /// It is exact for every velocity a phrase written in this crate can
+    /// produce — `to_render_events` puts them in the legacy lane, and rounding
+    /// a whole number changes nothing — and it is only the round trip of a
+    /// *live* MIDI 2.0 velocity that loses anything, which is a comparison
+    /// against a 7-bit sample library and could not have kept it anyway.
+    fn to_layer_velocity(vel: u16) -> u8 {
+        piano_emulator::velocity_from_midi(vel)
+            .round()
+            .clamp(0.0, 127.0) as u8
+    }
+
     /// The same performance, spelled for the sampler. Total: every engine
     /// event has a meaning here, including the ones this player answers with
     /// silence.
@@ -1075,8 +1105,14 @@ pub mod engine_events {
             .iter()
             .map(|e| {
                 let event = match e.event {
-                    Event::NoteOn { key, vel } => SamplerEvent::NoteOn { key, vel },
-                    Event::NoteOff { key, vel } => SamplerEvent::NoteOff { key, vel },
+                    Event::NoteOn { key, vel } => SamplerEvent::NoteOn {
+                        key,
+                        vel: to_layer_velocity(vel),
+                    },
+                    Event::NoteOff { key, vel } => SamplerEvent::NoteOff {
+                        key,
+                        vel: to_layer_velocity(vel),
+                    },
                     Event::KeyDown { key } => SamplerEvent::KeyDown { key },
                     Event::Pedal(PedalEvent::Sustain(v)) => SamplerEvent::Sustain(v),
                     Event::Pedal(PedalEvent::Sostenuto(on)) => SamplerEvent::Sostenuto(on),
@@ -1099,8 +1135,14 @@ pub mod engine_events {
             .iter()
             .map(|e| {
                 let event = match e.event {
-                    SamplerEvent::NoteOn { key, vel } => Event::NoteOn { key, vel },
-                    SamplerEvent::NoteOff { key, vel } => Event::NoteOff { key, vel },
+                    SamplerEvent::NoteOn { key, vel } => Event::NoteOn {
+                        key,
+                        vel: u16::from(vel),
+                    },
+                    SamplerEvent::NoteOff { key, vel } => Event::NoteOff {
+                        key,
+                        vel: u16::from(vel),
+                    },
                     SamplerEvent::KeyDown { key } => Event::KeyDown { key },
                     SamplerEvent::Sustain(v) => Event::Pedal(PedalEvent::Sustain(v)),
                     SamplerEvent::Sostenuto(v) => Event::Pedal(PedalEvent::Sostenuto(v)),
@@ -1179,7 +1221,9 @@ mod tests {
                 .collect();
             let right: Vec<f32> = left.iter().map(|&x| x * 0.5).collect();
             let audio = Audio::new(RATE, vec![left.clone(), right]).unwrap();
-            audio.write_wav(self.dir.join("samples").join(name)).unwrap();
+            audio
+                .write_wav(self.dir.join("samples").join(name))
+                .unwrap();
             left
         }
 
@@ -1208,7 +1252,10 @@ mod tests {
         if to <= from {
             return 0.0;
         }
-        let sum: f64 = x[from..to].iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+        let sum: f64 = x[from..to]
+            .iter()
+            .map(|&v| f64::from(v) * f64::from(v))
+            .sum();
         (sum / (to - from) as f64).sqrt()
     }
 
@@ -1256,7 +1303,10 @@ mod tests {
         assert_eq!(regions[4].cc64_gate(), Some((126, 127)));
         assert_eq!(regions[4].off_by, Some(2));
         assert_eq!(regions[5].lorand, 0.5);
-        assert!(!regions[4].matches(60, 100, 0.25), "a pedal region is on no key");
+        assert!(
+            !regions[4].matches(60, 100, 0.25),
+            "a pedal region is on no key"
+        );
     }
 
     #[test]
@@ -1345,9 +1395,8 @@ mod tests {
         .regions[0]
             .clone();
         // 0.73 * 40 log10(v/127) dB on top of volume.
-        let expected = |v: u8| {
-            10f64.powf((-4.0 + 0.73 * 40.0 * (f64::from(v) / 127.0).log10()) / 20.0)
-        };
+        let expected =
+            |v: u8| 10f64.powf((-4.0 + 0.73 * 40.0 * (f64::from(v) / 127.0).log10()) / 20.0);
         for v in [1u8, 32, 64, 100, 127] {
             assert!((region.gain(v) - expected(v)).abs() < 1e-12, "velocity {v}");
         }
@@ -1369,7 +1418,10 @@ mod tests {
         let mut sampler = Sampler::with_config(&path, config()).unwrap();
         let out = sampler
             .render(
-                &[TimedEvent::new(0.0, SamplerEvent::NoteOn { key: 60, vel: 100 })],
+                &[TimedEvent::new(
+                    0.0,
+                    SamplerEvent::NoteOn { key: 60, vel: 100 },
+                )],
                 1.5,
             )
             .unwrap();
@@ -1399,13 +1451,14 @@ mod tests {
         // here as a last-bit difference.
         let fixture = Fixture::new("bit-exact");
         let source = fixture.sine("note.wav", 220.0, 0.4, 0.5);
-        let path = fixture.sfz(
-            "<region> sample=samples/note.wav key=60 amp_veltrack=0 volume=0\n",
-        );
+        let path = fixture.sfz("<region> sample=samples/note.wav key=60 amp_veltrack=0 volume=0\n");
         let mut sampler = Sampler::with_config(&path, config()).unwrap();
         let out = sampler
             .render(
-                &[TimedEvent::new(0.0, SamplerEvent::NoteOn { key: 60, vel: 127 })],
+                &[TimedEvent::new(
+                    0.0,
+                    SamplerEvent::NoteOn { key: 60, vel: 127 },
+                )],
                 0.5,
             )
             .unwrap();
@@ -1447,7 +1500,11 @@ mod tests {
             "<region> sample=samples/C4.wav lokey=59 hikey=61 pitch_keycenter=60 amp_veltrack=0\n",
         );
         let mut sampler = Sampler::with_config(&path, config()).unwrap();
-        for (key, expected) in [(59u8, 200.0 / 1.059_463), (60, 200.0), (61, 200.0 * 1.059_463)] {
+        for (key, expected) in [
+            (59u8, 200.0 / 1.059_463),
+            (60, 200.0),
+            (61, 200.0 * 1.059_463),
+        ] {
             let out = sampler
                 .render(
                     &[TimedEvent::new(0.0, SamplerEvent::NoteOn { key, vel: 80 })],
@@ -1532,7 +1589,10 @@ mod tests {
         let long = level(2.5);
         // Two seconds more holding at 6 dB per second: 12 dB quieter.
         let ratio_db = 20.0 * (long / short).log10();
-        assert!((ratio_db + 12.0).abs() < 0.3, "rt_decay gave {ratio_db:.2} dB");
+        assert!(
+            (ratio_db + 12.0).abs() < 0.3,
+            "rt_decay gave {ratio_db:.2} dB"
+        );
     }
 
     #[test]
@@ -1559,12 +1619,18 @@ mod tests {
         // The key came up at 1.0 s and the note is still there at full level
         // two seconds later.
         let held = rms(left, 2.0, 2.9);
-        assert!((held - 0.4 / 2f64.sqrt()).abs() < 0.02, "note faded while held: {held}");
+        assert!(
+            (held - 0.4 / 2f64.sqrt()).abs() < 0.02,
+            "note faded while held: {held}"
+        );
         // The release sample did not fire at the note-off.
         assert!(rms(left, 1.05, 1.4) - held < 0.02);
         // The pedal coming up ends it: the note is gone and the release sample
         // is there instead.
-        assert!(rms(left, 3.1, 3.4) > 0.2, "release sample missing after the pedal");
+        assert!(
+            rms(left, 3.1, 3.4) > 0.2,
+            "release sample missing after the pedal"
+        );
         assert_eq!(peak(&left[(3.6 * f64::from(RATE)) as usize..]), 0.0);
 
         // Half-pedalling is a documented limitation, and this is what it looks
@@ -1610,11 +1676,17 @@ mod tests {
             )
             .unwrap();
         let down = rms(&out.channels[0], 0.2, 0.5) * 2f64.sqrt();
-        assert!((down - 0.3 * db_to_amp(-20.0)).abs() < 5e-4, "pedal down at {down}");
+        assert!(
+            (down - 0.3 * db_to_amp(-20.0)).abs() < 5e-4,
+            "pedal down at {down}"
+        );
         // `off_by=2` stops the tray going down when the tray comes up, so the
         // 70 Hz recording is not still running under the 90 Hz one.
         let up = rms(&out.channels[0], 1.1, 1.4) * 2f64.sqrt();
-        assert!((up - 0.3 * db_to_amp(-19.0)).abs() < 5e-4, "pedal up at {up}");
+        assert!(
+            (up - 0.3 * db_to_amp(-19.0)).abs() < 5e-4,
+            "pedal up at {up}"
+        );
     }
 
     #[test]
@@ -1706,7 +1778,10 @@ mod tests {
         assert_eq!(out.frames(), 30 * RATE as usize);
 
         for channel in &out.channels {
-            assert!(channel.iter().all(|x| x.is_finite()), "a sample is not finite");
+            assert!(
+                channel.iter().all(|x| x.is_finite()),
+                "a sample is not finite"
+            );
             assert!(peak(channel) < 8.0, "runaway peak {}", peak(channel));
             // The material's own worst step is a 75 Hz sine at 0.25:
             // 0.25 * 2 pi * 75 / 48000 = 2.5e-3 per voice. Six keys of two
@@ -1773,7 +1848,10 @@ mod tests {
             translated[1],
             TimedEvent::new(0.25, SamplerEvent::NoteOn { key: 60, vel: 90 })
         );
-        assert_eq!(translated[3].event, SamplerEvent::NoteOff { key: 60, vel: 40 });
+        assert_eq!(
+            translated[3].event,
+            SamplerEvent::NoteOff { key: 60, vel: 40 }
+        );
         assert_eq!(translated[7].event, SamplerEvent::AllOff);
 
         let fixture = Fixture::new("engine-events");
@@ -1921,7 +1999,10 @@ mod tests {
                     .regions()
                     .iter()
                     .find(|r| r.trigger == Trigger::Attack && r.matches(key, vel, 0.5));
-                assert!(region.is_some(), "no region for key {key} at velocity {vel}");
+                assert!(
+                    region.is_some(),
+                    "no region for key {key} at velocity {vel}"
+                );
             }
         }
     }
@@ -2014,7 +2095,11 @@ mod tests {
         assert!(rms(&out.channels[0], 4.5, 5.9) < 1e-3);
         // Three struck notes, each of them three layers deep in release
         // recordings (`harmL`, `harmV3`, `rel`), from three distinct keys.
-        assert!(sampler.cached_buffers() >= 12, "{}", sampler.cached_buffers());
+        assert!(
+            sampler.cached_buffers() >= 12,
+            "{}",
+            sampler.cached_buffers()
+        );
     }
 
     /// Counts zero crossings per second in a window, which reads a sine's

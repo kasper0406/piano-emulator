@@ -868,7 +868,7 @@ fn render(preset: &EnginePreset, key: u8, vel: u8) -> Stereo {
 fn render_for(preset: &EnginePreset, key: u8, vel: u8, seconds: f64) -> Stereo {
     let events = [RenderEvent::new(
         PREROLL_S as f32,
-        Event::NoteOn { key, vel },
+        Event::NoteOn { key, vel: u16::from(vel) },
     )];
     let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + seconds) as f32);
     let skip = (PREROLL_S * SR) as usize;

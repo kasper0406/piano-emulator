@@ -84,7 +84,7 @@ impl Engine {
             voices,
             pedals: PedalState::new(),
             resonance: ResonanceBus::from_preset(preset),
-            soundboard: Soundboard::new(&preset.soundboard),
+            soundboard: Soundboard::with_mics(&preset.soundboard, preset.voicing.mics.as_ref()),
             events: consumer,
             voice_out: [0.0; BLOCK],
             held: [false; NUM_KEYS],
@@ -172,7 +172,7 @@ impl Engine {
         }
     }
 
-    fn key_down(&mut self, key: u8, vel: u8) {
+    fn key_down(&mut self, key: u8, vel: u16) {
         if let Some(i) = key_index(key) {
             self.held[i] = true;
             self.voices[i].key_down(vel, &self.pedals, self.frame);

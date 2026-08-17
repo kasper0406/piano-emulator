@@ -646,7 +646,7 @@ fn render_note(preset: &piano_emulator::preset::Preset, key: u8) -> (Vec<f32>, V
         0.0,
         Event::NoteOn {
             key,
-            vel: CONTROL_VELOCITY,
+            vel: u16::from(CONTROL_VELOCITY),
         },
     )];
     render_to_buffer(preset, &events, CONTROL_SECONDS)
@@ -903,7 +903,7 @@ fn phantom_pass(
                     0.0,
                     Event::NoteOn {
                         key,
-                        vel: sample.midi_velocity(),
+                        vel: u16::from(sample.midi_velocity()),
                     },
                 )];
                 let (left, right) = render_to_buffer(&engine, &events, CONTROL_SECONDS);

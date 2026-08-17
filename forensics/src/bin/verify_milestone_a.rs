@@ -730,7 +730,7 @@ fn dense_pass(preset: &piano_emulator::preset::Preset) {
         let key = 21 + (next() % 88) as u8;
         let vel = 20 + (next() % 108) as u8;
         let hold = 0.2 + (next() % 2300) as f32 / 1000.0;
-        events.push(RenderEvent::new(t, Event::NoteOn { key, vel }));
+        events.push(RenderEvent::new(t, Event::NoteOn { key, vel: u16::from(vel) }));
         events.push(RenderEvent::new(t + hold, Event::NoteOff { key, vel: 64 }));
         t += 0.03 + (next() % 120) as f32 / 1000.0;
     }

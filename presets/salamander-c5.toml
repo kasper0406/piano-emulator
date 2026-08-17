@@ -222,6 +222,18 @@ vh_db_at_pp = 3.1324303
 vh_db_at_ff = -1.3022463
 share_tilt = 0.0
 
+[voicing.mics]
+spacing_m = 0.12631701
+height_m = 0.12
+span_m = 1.5
+width = 1.6262758
+diffuse_coherence = 3.4744656
+
+[voicing.mics.modal]
+lo_hz = 229.42517
+hi_hz = 307.39163
+lift = 2.1242962
+
 [hammer]
 velocity_min = 0.2
 velocity_max = 6.0

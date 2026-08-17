@@ -322,9 +322,7 @@ fn roots_of(coeff: &[Complex64], radius: f64) -> Vec<Complex64> {
     }
     let seed = Complex64::new(0.4, 0.9);
     let scale = radius.max(1e-12);
-    let mut z: Vec<Complex64> = (0..n)
-        .map(|i| seed.powu(i as u32) * scale)
-        .collect();
+    let mut z: Vec<Complex64> = (0..n).map(|i| seed.powu(i as u32) * scale).collect();
     let eval = |x: Complex64| {
         // Horner, high order first.
         coeff
@@ -610,12 +608,13 @@ impl EigenKey {
             // `sigma_k` the engine starts from, before its own vertical /
             // horizontal / per-string factors, all three of which the
             // eigenproblem replaces.
-            let sigma_hat = f64::from(
-                params.partial_sigma(k) * shaping.sigma_scale_at(k) * radiated[k - 1],
-            );
+            let sigma_hat =
+                f64::from(params.partial_sigma(k) * shaping.sigma_scale_at(k) * radiated[k - 1]);
             let gain_k = partial_gain(&params, voicing, &shaping, k);
             let scale = decay_scale(&params, voicing, k, sigma_hat, gain_k, beta);
-            partials.push(partial_modes(&params, voicing, k, sigma_hat, gain_k, scale, beta));
+            partials.push(partial_modes(
+                &params, voicing, k, sigma_hat, gain_k, scale, beta,
+            ));
             scales.push(scale);
         }
         EigenKey {
@@ -720,8 +719,7 @@ impl ShippedModal {
         let shaping = preset.partial_shaping(key);
         let partials = params.partial_count();
         let radiated = radiated_damping(&params, voicing, partials);
-        let output_scale =
-            voicing.excitation_scale * params.bridge_gain * params.f0 / REFERENCE_F0;
+        let output_scale = voicing.excitation_scale * params.bridge_gain * params.f0 / REFERENCE_F0;
         let vertical_factor = voicing.vertical_decay_factor();
         let horizontal_gain = db_to_amp(voicing.horizontal_gain_db);
         let mut strings = Vec::with_capacity(params.unison);
@@ -818,7 +816,7 @@ fn render_shipped_modal(preset: &EnginePreset, key: u8, vel: u8) -> Stereo {
     while start < frames {
         let end = (start + BLOCK).min(frames);
         if start == PREROLL {
-            hammer.strike_midi(vel);
+            hammer.strike_midi(u16::from(vel));
         }
         board.begin_block();
         if hammer.is_active() {
@@ -866,7 +864,7 @@ fn render_through_board(
     while start < frames {
         let end = (start + BLOCK).min(frames);
         if start == PREROLL {
-            hammer.strike_midi(vel);
+            hammer.strike_midi(u16::from(vel));
         }
         board.begin_block();
         excitation.fill(0.0);
@@ -908,7 +906,13 @@ fn cut_preroll((left, right): Stereo) -> Stereo {
 /// The shipped engine's render of one note through its public API.
 fn render_engine(preset: &EnginePreset, key: u8, vel: u8) -> Stereo {
     let preroll_s = PREROLL as f32 / ENGINE_SR;
-    let events = [RenderEvent::new(preroll_s, Event::NoteOn { key, vel })];
+    let events = [RenderEvent::new(
+        preroll_s,
+        Event::NoteOn {
+            key,
+            vel: u16::from(vel),
+        },
+    )];
     let (left, right) = render_to_buffer(preset, &events, preroll_s + RENDER_S as f32);
     let mut left = left;
     let mut right = right;
@@ -1137,7 +1141,10 @@ fn track_partial(
         })
         .collect();
     let peak_power = weight.iter().copied().fold(0.0f64, f64::max);
-    let amp_db: Vec<f64> = weight.iter().map(|w| 10.0 * w.max(1e-300).log10()).collect();
+    let amp_db: Vec<f64> = weight
+        .iter()
+        .map(|w| 10.0 * w.max(1e-300).log10())
+        .collect();
     let weight: Vec<f64> = weight.iter().map(|w| w / peak_power).collect();
     let long = spectrum.demodulate(carrier_hz, PROMPT_LO_S, TAIL_HI_S, planner);
     let decay_db: Vec<f64> = long
@@ -1408,7 +1415,9 @@ fn mod_stats(x: &[f64], rate: f64) -> ModStats {
         .zip(&window)
         .map(|(&v, &w)| Complex64::new(v * w, 0.0))
         .collect();
-    FftPlanner::<f64>::new().plan_fft_forward(n).process(&mut buf);
+    FftPlanner::<f64>::new()
+        .plan_fft_forward(n)
+        .process(&mut buf);
     let bin_hz = rate / n as f64;
     let lo = (MOD_LO_HZ / bin_hz).ceil().max(1.0) as usize;
     let hi = ((MOD_HI_HZ / bin_hz).floor() as usize).min(n / 2 - 1);
@@ -1421,8 +1430,7 @@ fn mod_stats(x: &[f64], rate: f64) -> ModStats {
         return ModStats::default();
     }
     let mean = total / power.len() as f64;
-    let log_mean =
-        power.iter().map(|p| p.max(1e-300).ln()).sum::<f64>() / power.len() as f64;
+    let log_mean = power.iter().map(|p| p.max(1e-300).ln()).sum::<f64>() / power.len() as f64;
     ModStats {
         flatness_db: 10.0 * (log_mean.exp() / mean).log10(),
     }
@@ -1548,10 +1556,7 @@ fn row(label: &str, cells: &[String]) -> String {
 fn cell(stats: &[Option<PartialStats>], get: impl Fn(&PartialStats) -> f64) -> Vec<String> {
     stats
         .iter()
-        .map(|s| {
-            s.as_ref()
-                .map_or("-".into(), |s| format!("{:.2}", get(s)))
-        })
+        .map(|s| s.as_ref().map_or("-".into(), |s| format!("{:.2}", get(s))))
         .collect()
 }
 
@@ -1668,7 +1673,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut signals: Vec<Signal> = vec![
             Signal::new("recording", recording(layer_for(&library, key, VELOCITY)?)?),
             Signal::new("engine", render_engine(&preset, key, VELOCITY)),
-            Signal::new("modal_shipped", render_shipped_modal(&preset, key, VELOCITY)),
+            Signal::new(
+                "modal_shipped",
+                render_shipped_modal(&preset, key, VELOCITY),
+            ),
             Signal::new("eigenmode", render_eigen(&preset, &cached, key, VELOCITY)),
         ];
         for vel in EXTRA_VELOCITIES {
@@ -1842,9 +1850,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rate = |k: usize| measured[idx][k - 1].as_ref().map(|s| s.beat_rate_hz);
             let cells: Vec<String> = (1..=MAX_PARTIAL)
                 .map(|k| rate(k).map_or("-".into(), |v| format!("{v:.2}")))
-                .chain((1..=MAX_PARTIAL).map(|k| {
-                    rate(k).map_or("-".into(), |v| format!("{:.2}", v / k as f64))
-                }))
+                .chain(
+                    (1..=MAX_PARTIAL)
+                        .map(|k| rate(k).map_or("-".into(), |v| format!("{:.2}", v / k as f64))),
+                )
                 .collect();
             writeln!(report, "{}", row(&signals[idx].label, &cells))?;
         }
@@ -2003,7 +2012,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        reference.insert(name, measured.into_iter().next().expect("the recording is row 0"));
+        reference.insert(
+            name,
+            measured.into_iter().next().expect("the recording is row 0"),
+        );
         println!(
             "{name}: {} signals to {} ({} partials x {} modes solved in {build_ms:.1} ms)",
             signals.len(),

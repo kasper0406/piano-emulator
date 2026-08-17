@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// `(peak dBFS, RMS dBFS over [`RMS_WINDOW`])` of one key struck alone.
 fn levels(preset: &Preset, key: u8) -> (f64, f64) {
-    let events = [RenderEvent::new(PREROLL_S, Event::NoteOn { key, vel: VELOCITY })];
+    let events = [RenderEvent::new(PREROLL_S, Event::NoteOn { key, vel: u16::from(VELOCITY) })];
     let (left, right) = render_to_buffer(preset, &events, RENDER_S);
     let sr = f64::from(SAMPLE_RATE);
     let mono: Vec<f64> = left

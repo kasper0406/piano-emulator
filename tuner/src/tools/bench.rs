@@ -36,18 +36,18 @@ use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::types::Event;
 use piano_tuner::audio::Audio;
+use piano_tuner::cache;
 use piano_tuner::realism::{
     self, MelDiff, MotionCell, MotionColumns, Phrase, RealismMetrics, RecordedKeys, ReleaseDelta,
-    VelocityLayers,
-    A1_GATE, A2_GATE, B1_GATE_DB, B2_GATE, MEL_BANDS, MEL_FLOOR_DB, MEL_F_MAX, MEL_F_MIN,
-    MOTION_KEYS, MOTION_PARTIALS, MOTION_REFERENCE_VELOCITY, MOTION_VELOCITIES, MULTI_RES_WINDOWS,
-    PHRASE_SET_VERSION,
+    StereoColumn, StereoItem, VelocityLayers, A1_GATE, A2_GATE, B1_GATE_DB, B2_GATE, MEL_BANDS,
+    MEL_FLOOR_DB, MEL_F_MAX, MEL_F_MIN, MOTION_KEYS, MOTION_PARTIALS, MOTION_REFERENCE_VELOCITY,
+    MOTION_VELOCITIES, MULTI_RES_WINDOWS, PHRASE_SET_VERSION, STEREO_ALLOWANCE,
+    STEREO_BAND_FLOOR_DB, STEREO_MAX_LAG_S,
 };
-use piano_tuner::cache;
-use piano_tuner::{audio, detect_onset};
 use piano_tuner::sampler::{
     engine_events, Sampler, SamplerConfig, SamplerEvent, TimedEvent, SAMPLER_VERSION,
 };
+use piano_tuner::{audio, detect_onset};
 use piano_tuner::{SampleLibrary, SAMPLE_RATE};
 
 /// The preset the engine is voiced from. The measured one: the whole point is
@@ -169,8 +169,11 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let rerouted_raw = {
                 let mut key = reference_key;
                 key.str("rerouted").str(phrase.name).f64(phrase.duration_s);
-                let path = reference_cache
-                    .join(format!("realism-{}-rerouted-{}.wav", phrase.name, key.hex()));
+                let path = reference_cache.join(format!(
+                    "realism-{}-rerouted-{}.wav",
+                    phrase.name,
+                    key.hex()
+                ));
                 cache::audio(&path, || {
                     let mut player =
                         Sampler::from_instrument(rerouted.clone(), SamplerConfig::default());
@@ -181,8 +184,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
             let (engine, reference) =
                 realism::level_match(&engine_raw, &reference_raw).map_err(say)?;
-            let (reference_b, alt) =
-                realism::level_match(&reference_raw, &alt_raw).map_err(say)?;
+            let (reference_b, alt) = realism::level_match(&reference_raw, &alt_raw).map_err(say)?;
             let (reference_c, rerouted_matched) =
                 realism::level_match(&reference_raw, &rerouted_raw).map_err(say)?;
 
@@ -210,6 +212,19 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             )
             .map_err(say)?;
             let (struck, transposed_notes) = phrase_keys(&phrase, &recorded);
+
+            // The STEREO columns. Measured on the two channels rather than on
+            // the mono sum every metric above is computed from, which is the
+            // whole reason they exist (`DECISIONS.md` 314, 317 (a)). The
+            // level-matched renders are used so that the mid/side ratio — the
+            // one stereo number that is *not* invariant to a gain — is read on
+            // the same signals the mono columns are.
+            let stereo = StereoItem {
+                label: phrase.name.to_string(),
+                engine: realism::stereo_image_of(&engine).map_err(say)?,
+                reference: realism::stereo_image_of(&reference).map_err(say)?,
+                alternate: realism::stereo_image_of(&alt).map_err(say)?,
+            };
 
             draw_page(
                 &out.join(format!("{}_mel.png", phrase.name)),
@@ -239,6 +254,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     measured,
                     floor,
                     transposition,
+                    stereo,
                     struck,
                     transposed_notes,
                 },
@@ -251,6 +267,29 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     for (row, line) in done {
         print!("{line}");
         rows.push(row);
+    }
+
+    // ---- Columns S: the stereo image ---------------------------------------
+    // Arithmetic on images that were already measured beside every phrase, so
+    // this costs nothing and is printed where a reader looks for it.
+    let stereo_items: Vec<StereoItem> = rows.iter().map(|r| r.stereo.clone()).collect();
+    let stereo_columns = realism::stereo_columns(&stereo_items);
+    println!("\nSTEREO columns (not a mono sum) — interchannel r at lag 0, per band:");
+    println!(
+        "  {:>8}  {:>9}  {:>11}  {:>7}  {:>7}  {:>6}  {:>4}",
+        "band", "engine", "reference", "|err|", "bar", "", "n"
+    );
+    for c in &stereo_columns {
+        println!(
+            "  {:>8}  {:+9.3}  {:+11.3}  {:7.3}  {:7.3}  {:>6}  {:4}",
+            c.name,
+            c.engine_r0,
+            c.reference_r0,
+            c.error,
+            c.bar,
+            if c.pass { "pass" } else { "RED" },
+            c.items
+        );
     }
 
     // ---- Columns A and B: the sixteen cells, at three velocities -----------
@@ -282,6 +321,10 @@ struct Row {
     /// recordings reaching every unrecorded key from its second-nearest take
     /// instead of its nearest. `DECISIONS.md` 329.
     transposition: RealismMetrics,
+    /// The phrase's stereo image, three ways: engine, reference and the
+    /// reference's neighbouring velocity layer. Not a mono sum and marked
+    /// STEREO everywhere it is printed.
+    stereo: StereoItem,
     /// How many of the phrase's strikes there are, and how many of them land on
     /// a key the library never recorded.
     struck: usize,
@@ -310,7 +353,6 @@ fn phrase_keys(phrase: &Phrase, recorded: &RecordedKeys) -> (usize, usize) {
 // ---------------------------------------------------------------------------
 // Driving the engine from the phrase set
 // ---------------------------------------------------------------------------
-
 
 fn render_engine(preset: &Preset, phrase: &Phrase) -> Audio {
     let (left, right) = render_to_buffer(
@@ -384,13 +426,13 @@ fn measure_render(
 ) -> Vec<Option<piano_tuner::motion::Motion>> {
     let events = [RenderEvent::new(
         MOTION_PREROLL_S as f32,
-        Event::NoteOn { key, vel: velocity },
+        Event::NoteOn {
+            key,
+            vel: u16::from(velocity),
+        },
     )];
-    let (left, right) = render_to_buffer(
-        preset,
-        &events,
-        (MOTION_PREROLL_S + MOTION_RENDER_S) as f32,
-    );
+    let (left, right) =
+        render_to_buffer(preset, &events, (MOTION_PREROLL_S + MOTION_RENDER_S) as f32);
     let skip = (MOTION_PREROLL_S * f64::from(SAMPLE_RATE)) as usize;
     let mono: Vec<f64> = left
         .iter()
@@ -403,14 +445,19 @@ fn measure_render(
 
 fn scoreboard(rows: &[Row], columns: &MotionColumns, preset: &Path, sfz: &Path) -> String {
     let mut s = String::new();
-    let _ = writeln!(s, "# REALISM.md — the engine against the piano it was measured from\n");
+    let _ = writeln!(
+        s,
+        "# REALISM.md — the engine against the piano it was measured from\n"
+    );
     let _ = writeln!(
         s,
         "Written by `cargo run --release -p piano-tuner -- bench`. \
 Six fixed phrases (set v{PHRASE_SET_VERSION}), each rendered twice from **one event list**: \
 through the engine on `{}`, and through the recordings of the Yamaha C5 that preset was \
 estimated from (`{}`), played by `piano_tuner::sampler`. Every pair is level-matched on \
-whole-phrase RMS and measured on the mono sum.\n",
+whole-phrase RMS. **Every column of the scoreboard and of Columns A and B is measured on the \
+mono sum**; the one section that is not is *Columns S*, which is marked STEREO throughout and \
+is the only place in this file where the two channels are looked at separately.\n",
         preset.display(),
         sfz.display()
     );
@@ -440,10 +487,7 @@ asserting it.\n"
         s,
         "| phrase | notes | mel dB | modulation dB | attack dB | r bass | r mid | r treble | release dB |"
     );
-    let _ = writeln!(
-        s,
-        "|:--|--:|--:|--:|--:|--:|--:|--:|--:|"
-    );
+    let _ = writeln!(s, "|:--|--:|--:|--:|--:|--:|--:|--:|--:|");
     for r in rows {
         let _ = writeln!(
             s,
@@ -473,9 +517,18 @@ asserting it.\n"
             mean(|r| r.measured.attack.mean_abs_db),
             mean(|r| r.floor.attack.mean_abs_db)
         ),
-        cell3(mean(|r| r.measured.bands.r[0]), mean(|r| r.floor.bands.r[0])),
-        cell3(mean(|r| r.measured.bands.r[1]), mean(|r| r.floor.bands.r[1])),
-        cell3(mean(|r| r.measured.bands.r[2]), mean(|r| r.floor.bands.r[2])),
+        cell3(
+            mean(|r| r.measured.bands.r[0]),
+            mean(|r| r.floor.bands.r[0])
+        ),
+        cell3(
+            mean(|r| r.measured.bands.r[1]),
+            mean(|r| r.floor.bands.r[1])
+        ),
+        cell3(
+            mean(|r| r.measured.bands.r[2]),
+            mean(|r| r.floor.bands.r[2])
+        ),
         cell(
             mean(|r| r.measured.release.mean_abs_db),
             mean(|r| r.floor.release.mean_abs_db)
@@ -507,10 +560,10 @@ interrupts, with the number of such windows in brackets.\n",
         .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
         .unwrap();
     let mean_lag = rows.iter().map(|r| r.measured.lag_s).sum::<f64>() / rows.len() as f64;
-    let rise_engine = rows.iter().map(|r| r.measured.attack.rise_s.0).sum::<f64>()
-        / rows.len() as f64;
-    let rise_reference = rows.iter().map(|r| r.measured.attack.rise_s.1).sum::<f64>()
-        / rows.len() as f64;
+    let rise_engine =
+        rows.iter().map(|r| r.measured.attack.rise_s.0).sum::<f64>() / rows.len() as f64;
+    let rise_reference =
+        rows.iter().map(|r| r.measured.attack.rise_s.1).sum::<f64>() / rows.len() as f64;
     let _ = writeln!(
         s,
         "**Alignment.** Both renders are driven by the same event list quantised to the same \
@@ -534,6 +587,107 @@ rather than a bug.\n",
         rise_reference * 1000.0,
     );
 
+    // ---- Columns S: the stereo image ----
+    let stereo: Vec<StereoItem> = rows.iter().map(|r| r.stereo.clone()).collect();
+    let stereo_columns = realism::stereo_columns(&stereo);
+    let _ = writeln!(
+        s,
+        "## Columns S — the stereo image  *(STEREO, not a mono sum)*\n"
+    );
+    let _ = writeln!(
+        s,
+        "**Every other number in this file is a mono sum and these are not.** `DECISIONS.md` \
+314 measured the interchannel behaviour of the recording against the engine's and found the \
+largest single difference in the chain experiment sitting in a place no column could see: the \
+recording's two channels are **+0.945 correlated below 125 Hz** and fall to about zero \
+through the mid and treble, with a peak |r| of 0.57-0.65 at lags under two milliseconds — a \
+spaced pair of microphones, two capsules inside a wavelength of each other in the bass seeing \
+one wavefront and seeing the same sound about 60 % coherent a fraction of a millisecond apart \
+above it. The engine was **inverted in every band**: the soundboard FDN's two opposite-sign \
+output taps decorrelated the bass to −0.55 on these six phrases, and `soundboard::pan_for_key` \
+scaled one mono voice into two channels, which is a pan-pot and correlated at +0.79 where the \
+recording reads −0.07. Item 317 (a) asked for the loss to get this term *before* the \
+two-microphone geometry of `PHYSICS.md` §8 was built, because a stage built to fix something \
+nothing scores is a stage nobody can regress; that is what this section is. §8 is now built — \
+`voicing.mics`, a spaced pair of virtual capsules over the string band with a per-source delay \
+and gain and a frequency-dependent coherence on the board's diffuse field (`DECISIONS.md` \
+351-358), its five numbers since fitted off the recording rather than swept (`DECISIONS.md` \
+359-367) — and the sign of every band became the recording's. What that could not reach was \
+125 Hz to 500 Hz, and *no* two-point geometry can: the recording's own +0.95 at 100 Hz and \
+about zero one octave up is a step no spatial coherence function has. What closed it is the \
+board's **mode-controlled band** (`[voicing.mics.modal]`, `DECISIONS.md` 368-377), measured \
+off the recording's sixth-octave interchannel curve — +0.94 at 127 Hz, −0.53 at 180, back \
+inside ±0.2 of zero above 500, and repeated by the same keys' other velocity layer. That is a \
+plate whose modes put a nodal line between two capsules, not a pair of microphones. Since \
+`DECISIONS.md` 379 the band is built as an **anti-phase copy of the pair's own sum** rather \
+than as a gain on the board's difference, on the direct path as well as the board's, so it is \
+there from a note's first sample instead of once the diffuse field has built — and the whole \
+section was refitted at a window that opens where the note does, which is `DECISIONS.md` 378 \
+and is the reason the numbers on this board moved. It is \
+still **not a room**: §9 is refused by measurement in item 315 and is out of scope. These are \
+six *phrases*; the per-key gate is `tuner/tests/stereo.rs` and `renders/stereo/STEREO.md` is \
+the A/B you can listen to.\n"
+    );
+    let _ = writeln!(
+        s,
+        "`r@0` is the normalised interchannel correlation at lag zero, **signed** — a pan-pot \
+pins it at +1 and an anti-phase pair reads −1, and a metric that reported |r| would call those \
+two the same thing. `peak |r| @ lag` is the largest |r| over ±{:.0} ms and where it sits, \
+positive meaning the *right* channel leads. `M/S` is 10·log10 of mid over side energy in the \
+band, which is the same fact as `r@0` for a level-balanced pair and is not the same fact when \
+the two channels differ in level. A band is read only where it holds more than \
+{STEREO_BAND_FLOOR_DB:.0} dB under the whole signal's energy in **all three** of engine, \
+reference and floor partner, so the three sides are always the same set; `n` is how many of \
+the {} phrases survived that.\n",
+        STEREO_MAX_LAG_S * 1000.0,
+        rows.len()
+    );
+    let _ = write!(s, "{}", realism::stereo_report(&stereo_columns));
+    let _ = writeln!(
+        s,
+        "\n`|err|` is |engine r@0 − reference r@0|, both **medians over the phrases**, and is \
+the score. `floor` is that same distance between the reference and *itself played out of the \
+neighbouring velocity layer* — the identical statistic on a second recording of the same \
+music. `scatter` is the robust sigma of the reference's own r@0 across the phrases, and it is \
+**not** the bar: material moving is a thing the engine is meant to reproduce, not to be \
+excused from. It enters as `scatter/sqrt(n)`, the precision with which n phrases pin a \
+median. The **bar** is the larger of those two times {STEREO_ALLOWANCE}, built out of the \
+reference and never out of the engine — the property that makes it a bar rather than a \
+description. `per-item |err| / floor` is the stricter, ungated statement: the median of the \
+per-phrase distances, beside the same median between the two takes. A model that fixes a \
+band's median without fixing its image shows up as a small `|err|` next to a large per-phrase \
+one.\n\n`tuner/tests/stereo.rs` gates these same columns on **solo notes at the 30 recorded \
+keys**, which is the material with a real take pair under it (a transposed key's two velocity \
+layers are two resamplings of one take, not two takes — `DECISIONS.md` 328's argument). The \
+phrases are the held-out reading; the notes are the gate.\n"
+    );
+    let reds: Vec<&StereoColumn> = stereo_columns.iter().filter(|c| !c.pass).collect();
+    let _ = writeln!(
+        s,
+        "**{} of {} bands are red.**{}\n",
+        reds.len(),
+        stereo_columns.len(),
+        if reds.is_empty() {
+            String::new()
+        } else {
+            let worst = reds
+                .iter()
+                .max_by(|a, b| (a.error / a.bar).total_cmp(&(b.error / b.bar)))
+                .expect("a red band");
+            format!(
+                " The worst is `{}`, {:.3} against a bar of {:.3} ({:.0}x), engine {:+.3} \
+where the recording reads {:+.3}; its worst phrase is `{}`.",
+                worst.name,
+                worst.error,
+                worst.bar,
+                worst.error / worst.bar.max(1e-12),
+                worst.engine_r0,
+                worst.reference_r0,
+                worst.worst.as_ref().map(|w| w.0.as_str()).unwrap_or("?"),
+            )
+        }
+    );
+
     // ---- Columns A and B ----
     let _ = writeln!(s, "## Columns A and B — the motion of a single partial\n");
     let _ = writeln!(
@@ -553,7 +707,10 @@ verification errata's pinned spec.\n",
         MOTION_PARTIALS,
         MOTION_VELOCITIES
     );
-    let _ = writeln!(s, "| column | what it measures | gate | reading | verdict |");
+    let _ = writeln!(
+        s,
+        "| column | what it measures | gate | reading | verdict |"
+    );
     let _ = writeln!(s, "|:--|:--|--:|--:|:--|");
     let verdict = |pass: bool| if pass { "**pass**" } else { "fail" };
     let _ = writeln!(
@@ -897,7 +1054,11 @@ band {} ({:.2} dB, engine {} the piano there); worst instant {:.2} s.",
             excess,
             hz(band_hz),
             band_db,
-            if signed_at(d, band_hz) > 0.0 { "above" } else { "below" },
+            if signed_at(d, band_hz) > 0.0 {
+                "above"
+            } else {
+                "below"
+            },
             time_s,
         );
     }
@@ -934,7 +1095,10 @@ band {} ({:.2} dB, engine {} the piano there); worst instant {:.2} s.",
                 .unwrap()
         });
 
-    let _ = writeln!(s, "\n**The three worst discrepancies, with where they are:**\n");
+    let _ = writeln!(
+        s,
+        "\n**The three worst discrepancies, with where they are:**\n"
+    );
     let _ = writeln!(
         s,
         "1. **Spectral — `{}` at {}.** {:.2} dB of mean absolute difference in that band \
@@ -978,7 +1142,15 @@ its floor is a decay-rate or a pedal-timing disagreement, not a timbre one.",
             .floor
             .bands
             .r
-            .get(worst_corr.measured.bands.names.iter().position(|&n| n == cname).unwrap())
+            .get(
+                worst_corr
+                    .measured
+                    .bands
+                    .names
+                    .iter()
+                    .position(|&n| n == cname)
+                    .unwrap()
+            )
             .copied()
             .unwrap_or(0.0),
     );
@@ -992,7 +1164,11 @@ absolute ({:+.2} dB signed) over {} clean half-second window{}, floor {:.2} dB."
             r.measured.release.mean_abs_db,
             r.measured.release.mean_signed_db,
             r.measured.release.windows,
-            if r.measured.release.windows == 1 { "" } else { "s" },
+            if r.measured.release.windows == 1 {
+                ""
+            } else {
+                "s"
+            },
             r.floor.release.mean_abs_db,
         );
     }
@@ -1007,7 +1183,11 @@ absolute ({:+.2} dB signed) over {} clean half-second window{}, floor {:.2} dB."
         "\nAcross all six phrases the engine's attacks read {:+.2} dB of spectral tonality \
 against the piano's — {} than the recordings.",
         attack_bias,
-        if attack_bias > 0.0 { "more tonal, i.e. less noisy" } else { "noisier" }
+        if attack_bias > 0.0 {
+            "more tonal, i.e. less noisy"
+        } else {
+            "noisier"
+        }
     );
     s
 }
@@ -1090,7 +1270,8 @@ impl Canvas {
 
     fn write_png(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let file = std::fs::File::create(path)?;
-        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), self.w as u32, self.h as u32);
+        let mut encoder =
+            png::Encoder::new(std::io::BufWriter::new(file), self.w as u32, self.h as u32);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.write_header()?.write_image_data(&self.px)?;
@@ -1207,12 +1388,34 @@ fn draw_page(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let window = 1024usize;
     let hop = 256usize;
-    let a = realism::mel_spectrogram(engine, sample_rate, window, hop, IMAGE_BANDS, MEL_F_MIN, MEL_F_MAX)?;
-    let b = realism::mel_spectrogram(reference, sample_rate, window, hop, IMAGE_BANDS, MEL_F_MIN, MEL_F_MAX)?;
+    let a = realism::mel_spectrogram(
+        engine,
+        sample_rate,
+        window,
+        hop,
+        IMAGE_BANDS,
+        MEL_F_MIN,
+        MEL_F_MAX,
+    )?;
+    let b = realism::mel_spectrogram(
+        reference,
+        sample_rate,
+        window,
+        hop,
+        IMAGE_BANDS,
+        MEL_F_MIN,
+        MEL_F_MAX,
+    )?;
     let frames = a.frames.len().min(b.frames.len());
     let peak = a.peak_db().max(b.peak_db());
     let floor = peak + MEL_FLOOR_DB;
-    let db = |e: f64| if e > 0.0 { (10.0 * e.log10()).max(floor) } else { floor };
+    let db = |e: f64| {
+        if e > 0.0 {
+            (10.0 * e.log10()).max(floor)
+        } else {
+            floor
+        }
+    };
 
     // Columns: the mean, in dB, of the frames that fall in each column. The
     // mean rather than the maximum, so that a column is the level over that
@@ -1265,7 +1468,11 @@ fn draw_page(
                         0.5 + 0.5 * (d / DIFF_RANGE_DB).clamp(-1.0, 1.0)
                     }
                 };
-                let colour = if panel == 2 { diverging(value) } else { viridis(value) };
+                let colour = if panel == 2 {
+                    diverging(value)
+                } else {
+                    viridis(value)
+                };
                 // Band 0 is the bottom of the panel.
                 let y = top + (IMAGE_BANDS - 1 - band) * BAND_PX;
                 c.rect(MARGIN_L + x, y, 1, BAND_PX, colour);
@@ -1305,7 +1512,13 @@ fn draw_page(
                 }
                 if panel == 2 {
                     c.rect(x, top + PANEL_H + 1, 1, 4, DIM);
-                    c.text(x.saturating_sub(4), top + PANEL_H + 8, &format!("{t:.0}"), 1, DIM);
+                    c.text(
+                        x.saturating_sub(4),
+                        top + PANEL_H + 8,
+                        &format!("{t:.0}"),
+                        1,
+                        DIM,
+                    );
                 }
             }
             t += 2.0;
@@ -1324,17 +1537,33 @@ fn draw_page(
     let bar_x = MARGIN_L + PLOT_W + 24;
     let bar_w = 14;
     let top_a = MARGIN_T + PANEL_GAP;
-    draw_bar(&mut c, bar_x, top_a, bar_w, PANEL_H, viridis, &[
-        (1.0, format!("{peak:.0} DB")),
-        (0.5, format!("{:.0}", floor + 0.5 * (peak - floor))),
-        (0.0, format!("{floor:.0}")),
-    ]);
+    draw_bar(
+        &mut c,
+        bar_x,
+        top_a,
+        bar_w,
+        PANEL_H,
+        viridis,
+        &[
+            (1.0, format!("{peak:.0} DB")),
+            (0.5, format!("{:.0}", floor + 0.5 * (peak - floor))),
+            (0.0, format!("{floor:.0}")),
+        ],
+    );
     let top_c = MARGIN_T + 2 * (PANEL_GAP + PANEL_H) + PANEL_GAP;
-    draw_bar(&mut c, bar_x, top_c, bar_w, PANEL_H, diverging, &[
-        (1.0, format!("+{DIFF_RANGE_DB:.0} DB")),
-        (0.5, "0".to_string()),
-        (0.0, format!("-{DIFF_RANGE_DB:.0} DB")),
-    ]);
+    draw_bar(
+        &mut c,
+        bar_x,
+        top_c,
+        bar_w,
+        PANEL_H,
+        diverging,
+        &[
+            (1.0, format!("+{DIFF_RANGE_DB:.0} DB")),
+            (0.5, "0".to_string()),
+            (0.0, format!("-{DIFF_RANGE_DB:.0} DB")),
+        ],
+    );
 
     c.write_png(path)?;
     Ok(())

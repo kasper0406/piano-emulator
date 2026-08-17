@@ -79,10 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.next()
             .unwrap_or_else(|| "presets/salamander-c5.toml".into()),
     );
-    let first: u8 = args
-        .next()
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(96);
+    let first: u8 = args.next().and_then(|a| a.parse().ok()).unwrap_or(96);
     let last: u8 = args.next().and_then(|a| a.parse().ok()).unwrap_or(108);
 
     let preset = Preset::load(&preset_path)?;
@@ -99,7 +96,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // --- the rendered truth -------------------------------------------
         let events = [RenderEvent::new(
             PREROLL_S,
-            Event::NoteOn { key, vel: VELOCITY },
+            Event::NoteOn {
+                key,
+                vel: u16::from(VELOCITY),
+            },
         )];
         let (left, right) = render_to_buffer(&preset, &events, PREROLL_S + RENDER_S);
         let skip = (PREROLL_S * SAMPLE_RATE as f32) as usize;
@@ -141,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let params = preset.string_params(key);
         let mut string = PianoString::new(params, &preset.voicing, preset.partial_shaping(key));
         let mut hammer = Hammer::new(preset.hammer_params(key));
-        hammer.strike_midi(VELOCITY);
+        hammer.strike_midi(u16::from(VELOCITY));
         let blocks = (PROBE_S * SAMPLE_RATE as f32) as usize / BLOCK;
         let mut buf = vec![0.0f32; BLOCK];
         let mut string_peak = 0.0f32;
@@ -164,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // goes through.
         let mut solo = PianoString::new(params, &preset.voicing, preset.partial_shaping(key));
         let mut solo_hammer = Hammer::new(preset.hammer_params(key));
-        solo_hammer.strike_midi(VELOCITY);
+        solo_hammer.strike_midi(u16::from(VELOCITY));
         let mut bare = vec![0.0f32; (f64::from(SAMPLE_RATE) * 1.2) as usize / BLOCK * BLOCK];
         for chunk in bare.chunks_mut(BLOCK) {
             solo_hammer.add_pulse(solo.excitation_mut(), 0, 1.0);
@@ -177,7 +177,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if hi <= lo {
                 return 0.0;
             }
-            (v[lo..hi].iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>()
+            (v[lo..hi]
+                .iter()
+                .map(|&x| f64::from(x) * f64::from(x))
+                .sum::<f64>()
                 / (hi - lo) as f64)
                 .sqrt()
         };
@@ -189,7 +192,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // --- the recording ------------------------------------------------
         let (ref_peak, ref_60) = match sampler.as_mut() {
             Some(s) => {
-                let ev = [TimedEvent::new(0.0, SamplerEvent::NoteOn { key, vel: VELOCITY })];
+                let ev = [TimedEvent::new(
+                    0.0,
+                    SamplerEvent::NoteOn { key, vel: VELOCITY },
+                )];
                 let a: Audio = s.render(&ev, f64::from(RENDER_S) + 0.2)?;
                 let m = a.mono();
                 let p = m.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
@@ -199,7 +205,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut t60 = 0.0;
                 let mut i = 0;
                 while i + win <= m.len() {
-                    let rms = (m[i..i + win].iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>()
+                    let rms = (m[i..i + win]
+                        .iter()
+                        .map(|&x| f64::from(x) * f64::from(x))
+                        .sum::<f64>()
                         / win as f64)
                         .sqrt();
                     if db(rms) > db(f64::from(p)) - 60.0 {
@@ -214,7 +223,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut floor = f64::INFINITY;
                 let mut i = 0;
                 while i + win <= m.len() {
-                    let rms = (m[i..i + win].iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>()
+                    let rms = (m[i..i + win]
+                        .iter()
+                        .map(|&x| f64::from(x) * f64::from(x))
+                        .sum::<f64>()
                         / win as f64)
                         .sqrt();
                     floor = floor.min(db(rms));
@@ -226,7 +238,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if hi <= lo {
                         return f64::NAN;
                     }
-                    db((m[lo..hi].iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>()
+                    db((m[lo..hi]
+                        .iter()
+                        .map(|&x| f64::from(x) * f64::from(x))
+                        .sum::<f64>()
                         / (hi - lo) as f64)
                         .sqrt())
                 };
@@ -258,7 +273,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let n = v.len();
-            if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) }
+            if n % 2 == 1 {
+                v[n / 2]
+            } else {
+                0.5 * (v[n / 2 - 1] + v[n / 2])
+            }
         };
         let decay = med(measured.iter().map(|m| m.tail_db_s).collect());
         let beat = med(measured.iter().map(|m| m.beat_depth_db).collect());

@@ -15,7 +15,7 @@ use piano_emulator::types::{Event, PedalEvent};
 use std::path::PathBuf;
 
 fn note_on(t: f32, key: u8, vel: u8) -> RenderEvent {
-    RenderEvent::new(t, Event::NoteOn { key, vel })
+    RenderEvent::new(t, Event::NoteOn { key, vel: u16::from(vel) })
 }
 
 fn note_off(t: f32, key: u8) -> RenderEvent {

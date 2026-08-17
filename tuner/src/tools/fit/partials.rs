@@ -444,7 +444,7 @@ fn strike_band(library: &SampleLibrary, base: &Preset, survey: &SurveyConfig) ->
             0.05,
             Event::NoteOn {
                 key,
-                vel: REFERENCE_VELOCITY,
+                vel: u16::from(REFERENCE_VELOCITY),
             },
         )];
         let (left, right) = render_to_buffer(&engine, &events, ATTACK_RENDER_S);
@@ -588,7 +588,7 @@ fn rendered_residual_density(
         0.05,
         Event::NoteOn {
             key,
-            vel: REFERENCE_VELOCITY,
+            vel: u16::from(REFERENCE_VELOCITY),
         },
     )];
     let (left, right) = render_to_buffer(&engine, &events, ATTACK_RENDER_S);
@@ -992,7 +992,7 @@ fn rendered_spectrum(probe: &Preset, survey: &SurveyConfig, key: u8) -> Option<V
         0.05,
         Event::NoteOn {
             key,
-            vel: REFERENCE_VELOCITY,
+            vel: u16::from(REFERENCE_VELOCITY),
         },
     )];
     let (left, right) = render_to_buffer(&engine, &events, COMB_RENDER_S);
@@ -1042,7 +1042,7 @@ fn comb_line(
             0.05,
             Event::NoteOn {
                 key,
-                vel: REFERENCE_VELOCITY,
+                vel: u16::from(REFERENCE_VELOCITY),
             },
         )];
         let (left, right) = render_to_buffer(&engine, &events, COMB_RENDER_S);
@@ -1402,7 +1402,7 @@ fn report_damper(library: &SampleLibrary, base: &Preset) -> Result<Option<(u8, f
 fn rendered_release_t20(preset: &Preset, key: u8, config: &DamperConfig) -> Option<f64> {
     let engine = engine_preset(preset)?;
     let events = [
-        RenderEvent::new(0.05, Event::NoteOn { key, vel: REFERENCE_VELOCITY }),
+        RenderEvent::new(0.05, Event::NoteOn { key, vel: u16::from(REFERENCE_VELOCITY) }),
         RenderEvent::new(0.05 + HOLD_S, Event::NoteOff { key, vel: 64 }),
     ];
     let (left, right) = render_to_buffer(&engine, &events, RELEASE_RENDER_S);

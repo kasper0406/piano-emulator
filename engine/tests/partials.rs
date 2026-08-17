@@ -33,8 +33,8 @@
 use std::f64::consts::TAU;
 
 use piano_emulator::preset::{FalseBeat, Preset, StrikeDirection};
-use piano_emulator::string::PianoString;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
+use piano_emulator::string::PianoString;
 use piano_emulator::types::{Event, SAMPLE_RATE};
 use rustfft::{num_complex::Complex64, FftPlanner};
 
@@ -44,7 +44,7 @@ const SR: f64 = SAMPLE_RATE as f64;
 /// published counterpart.
 const KEYS: [(u8, &str); 3] = [(60, "C4"), (45, "A2"), (84, "C6")];
 const MAX_PARTIAL: usize = 4;
-const VELOCITY: u8 = 90;
+const VELOCITY: u16 = 90;
 
 /// How long a probe render is. Long enough for the tail window below and for
 /// the transform not to wrap into its own input.
@@ -207,7 +207,10 @@ fn track_partial(
         return None;
     }
 
-    let amp_db: Vec<f64> = weight.iter().map(|w| 10.0 * w.max(1e-300).log10()).collect();
+    let amp_db: Vec<f64> = weight
+        .iter()
+        .map(|w| 10.0 * w.max(1e-300).log10())
+        .collect();
     let residual = detrended(&amp_db, 3);
     let band = band_limited(&residual, TRACK_HZ);
     let mut sorted = band.clone();
@@ -393,7 +396,7 @@ fn line_fit(y: &[f64], t0: f64, rate: f64, lo: f64, hi: f64) -> Option<(f64, f64
 // ----------------------------------------------------------------- the rig
 
 /// Renders one note of `preset` and returns its mono sum, frame 0 at the strike.
-fn render(preset: &Preset, key: u8, vel: u8) -> Vec<f64> {
+fn render(preset: &Preset, key: u8, vel: u16) -> Vec<f64> {
     let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel })];
     let (l, r) = render_to_buffer(preset, &events, RENDER_S as f32);
     l.iter()
@@ -403,7 +406,7 @@ fn render(preset: &Preset, key: u8, vel: u8) -> Vec<f64> {
 }
 
 /// Every partial of one key, measured.
-fn measure(preset: &Preset, key: u8, vel: u8) -> Vec<Option<PartialStats>> {
+fn measure(preset: &Preset, key: u8, vel: u16) -> Vec<Option<PartialStats>> {
     let mono = render(preset, key, vel);
     let mut planner = FftPlanner::<f64>::new();
     let spectrum = Spectrum::new(&mono, &mut planner);
@@ -472,7 +475,11 @@ fn cells(preset: &Preset) -> Vec<(&'static str, usize, f64, PartialStats)> {
 fn every_partial_sits_at_the_pitch_the_preset_asks_for() {
     let preset = Preset::default();
     let measured = cells(&preset);
-    assert!(measured.len() >= 10, "only {} cells tracked", measured.len());
+    assert!(
+        measured.len() >= 10,
+        "only {} cells tracked",
+        measured.len()
+    );
     let mut worst = (0.0f64, 0.0f64);
     for (name, k, nominal, stats) in &measured {
         let key = KEYS
@@ -490,7 +497,10 @@ fn every_partial_sits_at_the_pitch_the_preset_asks_for() {
         let built = 1200.0 * (f64::from(string.partial_freq(*k)) / nominal).log2();
         // ... and what the render adds on top of that, which is the tracker.
         let rendered = 1200.0 * (stats.mean_hz / nominal).log2();
-        worst = (worst.0.max(built.abs()), worst.1.max((rendered - built).abs()));
+        worst = (
+            worst.0.max(built.abs()),
+            worst.1.max((rendered - built).abs()),
+        );
         assert!(
             built.abs() < 0.5,
             "{name} k={k} is *built* {built:+.3} cents off its nominal {nominal:.3} Hz"
@@ -562,7 +572,9 @@ fn no_shared_beat_rate_survives_into_the_render() {
     // ... and they are spread rather than clustered: the fastest cell moves at
     // more than twice the rate of the slowest, where a metronome would put every
     // one of them on the same number.
-    let (lo, hi) = lines.iter().fold((f64::MAX, 0.0f64), |(l, h), &x| (l.min(x), h.max(x)));
+    let (lo, hi) = lines
+        .iter()
+        .fold((f64::MAX, 0.0f64), |(l, h), &x| (l.min(x), h.max(x)));
     assert!(
         hi > 2.0 * lo,
         "every cell modulates between {lo:.3} and {hi:.3} Hz — that is one rate, not twelve"
@@ -662,7 +674,7 @@ fn the_strike_lands_at_the_level_it_always_did() {
 
     // Peak of the render, dB, from the free-running construction at `b929658`,
     // and the budget this key is held to against it.
-    const PINNED: [(u8, u8, f64, f64); 18] = [
+    const PINNED: [(u8, u16, f64, f64); 18] = [
         (21, 40, -32.59, 0.5),
         (21, 90, -19.73, 0.5),
         (21, 120, -12.40, 0.5),
@@ -684,12 +696,15 @@ fn the_strike_lands_at_the_level_it_always_did() {
         (108, 120, -11.55, 3.1),
     ];
     let preset = Preset::default();
-    let mut worst = (0.0f64, 0u8, 0u8);
+    let mut worst = (0.0f64, 0u8, 0u16);
     for (key, vel, pinned, budget) in PINNED {
         let want = pinned + MASTER_GAIN_DB;
         let events = [RenderEvent::new(0.0, Event::NoteOn { key, vel })];
         let (l, r) = render_to_buffer(&preset, &events, 3.0);
-        let peak = l.iter().chain(r.iter()).fold(0.0f32, |m, &x| m.max(x.abs()));
+        let peak = l
+            .iter()
+            .chain(r.iter())
+            .fold(0.0f32, |m, &x| m.max(x.abs()));
         let got = 20.0 * f64::from(peak).max(1e-30).log10();
         if (got - want).abs() > worst.0 {
             worst = ((got - want).abs(), key, vel);
@@ -705,7 +720,6 @@ fn the_strike_lands_at_the_level_it_always_did() {
         worst.0, worst.1, worst.2
     );
 }
-
 
 // ------------------------------------- the two motion mechanisms, rendered
 
@@ -852,7 +866,7 @@ fn a_false_beat_beats_on_the_partial_it_names_and_nowhere_else() {
 #[test]
 fn only_a_strike_direction_makes_the_render_depend_on_velocity() {
     const KEY: u8 = 60;
-    const VELOCITIES: [u8; 3] = [40, 90, 120];
+    const VELOCITIES: [u16; 3] = [40, 90, 120];
 
     // The engine as it is: the mixture is a constant, so the beat structure is
     // the *same number* at every velocity and not merely a close one.
@@ -890,7 +904,9 @@ fn only_a_strike_direction_makes_the_render_depend_on_velocity() {
         vh_db_at_ff: 8.0,
         share_tilt: 0.2,
     });
-    voiced.validate().expect("a voiced strike direction validates");
+    voiced
+        .validate()
+        .expect("a voiced strike direction validates");
     let mut depths: Vec<Vec<f64>> = Vec::new();
     for vel in VELOCITIES {
         depths.push(
@@ -916,7 +932,10 @@ fn only_a_strike_direction_makes_the_render_depend_on_velocity() {
         spread += hi - lo;
         counted += 1.0;
     }
-    assert!(counted >= 3.0, "only {counted} partials tracked at all three velocities");
+    assert!(
+        counted >= 3.0,
+        "only {counted} partials tracked at all three velocities"
+    );
     let mean = spread / counted;
     assert!(
         mean > 1.0,
@@ -1035,8 +1054,7 @@ fn the_shipped_presets_build_every_partial_their_series_asks_for() {
         for key in 21..=108u8 {
             let params = preset.string_params(key);
             let asked = params.partial_count();
-            let string =
-                PianoString::new(params, &preset.voicing, preset.partial_shaping(key));
+            let string = PianoString::new(params, &preset.voicing, preset.partial_shaping(key));
             assert_eq!(
                 string.partial_count(),
                 asked,
@@ -1049,7 +1067,10 @@ fn the_shipped_presets_build_every_partial_their_series_asks_for() {
                 }
             }
         }
-        println!("{name}: highest mode {highest:.1} Hz of {} Hz", 0.5 * SAMPLE_RATE);
+        println!(
+            "{name}: highest mode {highest:.1} Hz of {} Hz",
+            0.5 * SAMPLE_RATE
+        );
         assert!(
             highest < 0.5 * SAMPLE_RATE,
             "{name} put a mode at {highest} Hz"

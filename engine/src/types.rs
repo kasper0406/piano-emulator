@@ -171,8 +171,7 @@ pub const CULL_AMPLITUDE: f32 = 3.162e-5 / (FLOOR_REFERENCE_GAIN * 2.0 * MAX_UNI
 /// gate on this number and not an afterthought: measured, they move by 0.1
 /// point or less (29.7 -> 29.8 %, 30.3 -> 30.3, 29.5 -> 29.6, 29.4 -> 29.5),
 /// because the worst case is a keyboard whose voices are all live anyway.
-pub const IDLE_ENERGY: f32 =
-    (1.0e-7 / FLOOR_REFERENCE_GAIN) * (1.0e-7 / FLOOR_REFERENCE_GAIN);
+pub const IDLE_ENERGY: f32 = (1.0e-7 / FLOOR_REFERENCE_GAIN) * (1.0e-7 / FLOOR_REFERENCE_GAIN);
 
 /// Concert pitch reference: A4 = MIDI 69 = 440 Hz.
 pub fn note_to_freq(note: u8) -> f32 {
@@ -241,6 +240,84 @@ pub enum PedalEvent {
     UnaCorda(bool),
 }
 
+/// The largest velocity a MIDI 1.0 source can send. The engine clamps to it —
+/// see [`velocity_from_midi`] for the two lanes the event's field has.
+pub const MIDI1_MAX_VELOCITY: u16 = 127;
+
+/// The top of the event velocity's **legacy lane**: every value the field could
+/// hold when it was a `u8`.
+///
+/// 255 and not 127, so that the widening preserves the meaning of *every* old
+/// value rather than only the legal ones. A MIDI velocity above 127 does not
+/// exist, but a `u8` could hold one, and this repository had one — a velocity
+/// sweep in `tuner/tests/calibration.rs` walks `layer * 8` up to 128 and used
+/// to be clamped downstream. Anything that was silently clamped stays silently
+/// clamped.
+pub const LEGACY_VELOCITY_MAX: u16 = u8::MAX as u16;
+
+/// High-resolution velocity steps per MIDI 1.0 velocity step, in the event
+/// velocity's *fine lane* — see [`velocity_from_midi`].
+///
+/// 512 is chosen so that the fine lane spans the whole 7-bit range inside a
+/// `u16` (`127 * 512 = 65024 <= 65535`) with room to spare, and so that every
+/// MIDI 1.0 velocity lands on an exact multiple: a note that reaches us as
+/// MIDI 2.0 because Core MIDI up-translated a 7-bit keyboard plays *exactly*
+/// what the same note played through `midi.rs` does.
+pub const VELOCITY_STEPS: u16 = 512;
+
+/// The continuous MIDI velocity an [`Event`] carries, in the 7-bit numbering:
+/// 0 (the silent press) to 127, with a fraction when the source had one.
+///
+/// **The event's `vel` field has two lanes**, and this function is what reads
+/// them:
+///
+/// | `vel` | means | resolution |
+/// |---|---|---|
+/// | `0 ..= 255` | a MIDI 1.0 velocity, exactly the number the field held when it was a `u8` | 1 |
+/// | `256 ..= 65535` | a velocity in 1/[`VELOCITY_STEPS`] of a MIDI step | 1/512 |
+///
+/// Two lanes rather than one scale, because a single scale would have had to
+/// multiply every velocity in the repository — three hundred literal `vel: 90`s
+/// in tests, tools and acceptance numbers measured at exactly those velocities
+/// — by 512 in one commit, and any site that was missed would have gone on
+/// compiling and started playing pianissimo. The legacy lane makes the widening
+/// *value-preserving*: `Event::NoteOn { key: 60, vel: 90 }` means what it meant
+/// before this type was `u16`, and so does every other value a `u8` could have
+/// held (see [`LEGACY_VELOCITY_MAX`]).
+///
+/// The price is that a fine-lane velocity below `256 / 512` — half of the
+/// softest playable blow, and two hundred times under the quietest note a
+/// pianist can produce — cannot be expressed and is clamped up to it by
+/// [`hires_velocity`]. A MIDI 2.0 source asking for one is asking for the
+/// quietest note the instrument has, which is what it gets.
+///
+/// Within each lane the map is exact, continuous and strictly increasing, and
+/// it agrees with the old `u8` map at every one of the old points: for every
+/// `v` in `1..=127`, `velocity_from_midi(v) == v as f32` in the legacy lane and
+/// `velocity_from_midi(v * VELOCITY_STEPS) == v as f32` in the fine one. Both
+/// are pinned by `midi::ump::tests::the_velocity_map_reproduces_every_old_point`.
+pub fn velocity_from_midi(vel: u16) -> f32 {
+    if vel <= LEGACY_VELOCITY_MAX {
+        vel as f32
+    } else {
+        vel as f32 / VELOCITY_STEPS as f32
+    }
+}
+
+/// The fine-lane encoding of a continuous MIDI velocity in `0.0..=127.0`.
+///
+/// Zero stays zero: it is the silent press, and it is the one value the fine
+/// lane shares with the legacy one. Everything else is clamped into the lane
+/// (see [`velocity_from_midi`] for what that costs).
+pub fn hires_velocity(vel: f32) -> u16 {
+    if vel <= 0.0 {
+        return 0;
+    }
+    let steps = (vel * VELOCITY_STEPS as f32).round();
+    let top = MIDI1_MAX_VELOCITY as f32 * VELOCITY_STEPS as f32;
+    steps.clamp(LEGACY_VELOCITY_MAX as f32 + 1.0, top) as u16
+}
+
 /// Nominal velocity attributed to the damper lift of a silent press.
 ///
 /// A key pressed slowly enough that the jack escapes without the hammer
@@ -253,11 +330,11 @@ pub enum PedalEvent {
 /// pianissimo notes at velocities 1–3, and a threshold would silence them —
 /// exactly the kind of silent, data-dependent loss stage-2 replay fitting
 /// cannot survive.
-pub const ESCAPEMENT_VELOCITY: u8 = 3;
+pub const ESCAPEMENT_VELOCITY: u16 = 3;
 
 /// Release velocity used when the source has none to give: MIDI's own idle
 /// value, and what a note-off written as a note-on with velocity 0 means.
-pub const DEFAULT_RELEASE_VELOCITY: u8 = 64;
+pub const DEFAULT_RELEASE_VELOCITY: u16 = 64;
 
 /// Everything the UI thread can tell the audio thread to do.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -265,14 +342,26 @@ pub enum Event {
     /// A key press. Any nonzero velocity throws the hammer — velocity 1 is the
     /// quietest playable note, not a silent press. Velocity 0 is the silent
     /// press, same as [`Event::KeyDown`].
-    NoteOn { key: u8, vel: u8 },
+    ///
+    /// `vel` is read through [`velocity_from_midi`], which is what makes the
+    /// field's two lanes — a MIDI 1.0 velocity in `0..=127`, or a
+    /// 1/[`VELOCITY_STEPS`] one above that — one continuous velocity.
+    NoteOn {
+        key: u8,
+        vel: u16,
+    },
     /// A key release. `vel` is the *release* velocity: how fast the key comes
     /// back sets how fast the damper falls onto the string, and how loud the
-    /// key-off thump is.
-    NoteOff { key: u8, vel: u8 },
+    /// key-off thump is. Same two lanes as [`Event::NoteOn`].
+    NoteOff {
+        key: u8,
+        vel: u16,
+    },
     /// A key held down without striking — the silent press, made explicit for
     /// callers that do not want to express it as a velocity.
-    KeyDown { key: u8 },
+    KeyDown {
+        key: u8,
+    },
     Pedal(PedalEvent),
     AllOff,
 }

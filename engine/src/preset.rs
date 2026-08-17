@@ -36,8 +36,9 @@
 //! absent (no aliquot segments), `notes.pan_spread` absent (the one global
 //! spread applies to the whole compass), `notes.comb_floor` at zero (the bare
 //! strike comb, nulls and all), `notes.partial_gains` and
-//! `notes.partial_sigma_scale` absent (one on every partial of every key), and
-//! `[noise.strike]` at its default (the hammer makes no noise of its own).
+//! `notes.partial_sigma_scale` absent (one on every partial of every key),
+//! `[noise.strike]` at its default (the hammer makes no noise of its own), and
+//! `[voicing.mics]` absent (the pan-pot, and the board's orthogonal taps).
 //! The three **inert** fields of `DECISIONS.md` 225 are written the same way
 //! for a different reason — `voicing.unison_coupling` at zero,
 //! `voicing.horizontal_offset_hz` all zero and `voicing.unison_sigma_scale` at
@@ -70,7 +71,10 @@
 use crate::duplex::MAX_DUPLEX_LOOP_GAIN;
 use crate::hammer::HammerParams;
 use crate::resonance::{BridgeFilter, MAX_BRIDGE_LOOP_GAIN, MAX_COUPLING};
-use crate::soundboard::MAX_PAN_SPREAD;
+use crate::soundboard::{
+    MAX_MIC_SPACING_M, MAX_PAN_SPREAD, MIC_DIFFUSE_COHERENCE, MIC_HEIGHT_M, MIC_MODAL_HZ,
+    MIC_MODAL_LIFT, MIC_SPAN_M, MIC_WIDTH,
+};
 use crate::string::{
     PartialShaping, StringParams, MAX_COMB_FLOOR, MAX_CONTACT_WIDTH, MAX_PARTIAL_GAIN,
     MAX_PARTIAL_SIGMA_SCALE, MAX_SIGMA_SCALE, MIN_MODE_SIGMA, MIN_PARTIAL_GAIN,
@@ -193,7 +197,11 @@ pub struct Voicing {
     ///
     /// Zero — the default — keeps both polarizations at the key's pan and the
     /// single-buffer render path with them.
-    #[serde(default, skip_serializing_if = "is_zero", serialize_with = "short::scalar")]
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        serialize_with = "short::scalar"
+    )]
     pub polarization_pan_spread: f32,
     /// The bridge admittance `B(f)` on the sympathetic bus's drive path.
     ///
@@ -231,6 +239,116 @@ pub struct Voicing {
     /// bit for bit. See [`StrikeDirection`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strike_direction: Option<StrikeDirection>,
+    /// The virtual microphone pair the instrument is heard through.
+    ///
+    /// Absent — the default — is the pan-pot and the board's orthogonal output
+    /// taps, bit for bit. See [`MicVoicing`] and `soundboard::Mics`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mics: Option<MicVoicing>,
+}
+
+/// Two virtual capsules above the string band: `PHYSICS.md` §8's microphone
+/// geometry, and nothing of its §9 room, which item 315 refuses by measurement.
+///
+/// Five numbers, three of them lengths in metres and two dimensionless. What
+/// they build, and why the structure is the one it is, is `soundboard::Mics`;
+/// this is the schema and its bounds.
+///
+/// # The neutrality contract
+///
+/// The section absent is the pan-pot: `Soundboard::new` builds no geometry at
+/// all, `add_voice` runs the same two multiply-accumulates it always ran, and
+/// the board's two orthogonal taps go out untouched. That is `DECISIONS.md`
+/// 103's rule, and it is asserted by rendering rather than by reasoning —
+/// `presets/default.toml` has no `[voicing.mics]` and its demo and compass
+/// renders are byte-identical across this change.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MicVoicing {
+    /// Capsule separation along the bass-treble axis, metres. An AB pair over
+    /// the strings of a grand; the recording this instrument is fitted to was
+    /// made with one about 0.12 m across.
+    #[serde(serialize_with = "short::scalar")]
+    pub spacing_m: f32,
+    /// Height of the capsules above the string plane, metres.
+    ///
+    /// It is what decides how *fast* the interchannel delay grows as a key
+    /// moves off centre: capsules low over the strings see the outer keys at
+    /// nearly the full `spacing / c`, high ones see the whole compass from
+    /// almost the same angle and hear it nearly coherent.
+    #[serde(serialize_with = "short::scalar")]
+    pub height_m: f32,
+    /// Half the width of the string band, metres: where `|pan| = 1` sits.
+    ///
+    /// The compass itself only reaches `MAX_PAN` (0.6) of it; the rest of the
+    /// range is what `voicing.polarization_pan_spread` displaces into.
+    #[serde(serialize_with = "short::scalar")]
+    pub span_m: f32,
+    /// Gain on the geometric difference signal. 1.0 is the geometry itself.
+    ///
+    /// A key is not a point: what radiates it is a region of a large board, and
+    /// an extended source averages its own interchannel difference down. Below
+    /// one this says how much; above one it says the lid and the board's
+    /// directivity put back more difference than two omnis in free field would
+    /// see. It cannot touch the mono sum at any value — it scales the side and
+    /// only the side.
+    #[serde(serialize_with = "short::scalar")]
+    pub width: f32,
+    /// How much longer than an isotropic field's the board field's coherence
+    /// length is; 1.0 is isotropic.
+    ///
+    /// The board's diffuse field is the near field of one large plate rather
+    /// than a room's superposition of plane waves from every direction, so it
+    /// stays organised across the capsules to a higher frequency than
+    /// `sin(kd)/kd` says. This is the multiplier on that curve's corner, and it
+    /// is the only number in the section not fixed by a length.
+    #[serde(serialize_with = "short::scalar")]
+    pub diffuse_coherence: f32,
+    /// The band over which the board is **mode-controlled** and the pair sees
+    /// its two capsules in opposition.
+    ///
+    /// Absent — the default — is the diffuse coherence alone, which is the
+    /// four-of-six image `DECISIONS.md` 359-367 shipped, bit for bit. See
+    /// [`ModalBand`] and `soundboard::ModalLobe`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalBand>,
+}
+
+/// The board's mode-controlled band: two edges and a lift.
+///
+/// This is the third regime of `soundboard::ModalLobe`'s three, and the only
+/// one a spaced pair of capsules cannot produce on its own. Every number in it
+/// is read off the recording's own sixth-octave interchannel profile
+/// (`piano-tuner mics --stage profile`) and then fitted on the two surfaces the
+/// stereo table is printed on; `DECISIONS.md` 369-372.
+///
+/// It is instrument, not room. `PHYSICS.md` §9's reverberant field is refused
+/// by measurement in item 315 and stays refused: what this models is a
+/// property of a plate — where its modes begin to put a nodal line between two
+/// capsules 12 cm apart, and where modal overlap stops there being a sign to
+/// see at all.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModalBand {
+    /// Bottom edge, Hz: the board's first mode with a nodal line across the
+    /// pair. Below it the plate and its air load are one radiator and the two
+    /// capsules see one pressure.
+    #[serde(serialize_with = "short::scalar")]
+    pub lo_hz: f32,
+    /// Top edge, Hz: modal overlap. Above it many modes sum with unrelated
+    /// phases, the near field is disorganised, and the difference is no larger
+    /// than the sum.
+    #[serde(serialize_with = "short::scalar")]
+    pub hi_hz: f32,
+    /// How much larger than the sum the pair sees the difference, inside the
+    /// band.
+    ///
+    /// One is the diffuse field's own coherence — the orthogonal taps as they
+    /// stand, `r0 = 0`. Above one the band goes *anti-phase*, which is what the
+    /// recording does: `-3.5 dB` of mid over side at 200 Hz, on both takes.
+    /// Zero is the section not being there.
+    #[serde(serialize_with = "short::scalar")]
+    pub lift: f32,
 }
 
 /// The one place velocity can enter a linear model: the *direction* of the
@@ -438,7 +556,11 @@ pub struct BridgeVoicing {
     /// Absent, or zero, the factor is exactly `1.0` for every partial and every
     /// string in the instrument is built bit for bit as it was before this
     /// field existed.
-    #[serde(default, skip_serializing_if = "is_zero", serialize_with = "short::scalar")]
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        serialize_with = "short::scalar"
+    )]
     pub radiated_share: f32,
 }
 
@@ -1267,7 +1389,12 @@ impl Preset {
         // that is not a note this engine can hold, and 0.02 is still a T60 of
         // 345 s.
         for (i, &c) in n.detune_cents.iter().enumerate() {
-            within(&format!("notes.detune_cents[{i}]"), c, 0.0, MAX_DETUNE_CENTS)?;
+            within(
+                &format!("notes.detune_cents[{i}]"),
+                c,
+                0.0,
+                MAX_DETUNE_CENTS,
+            )?;
         }
         for (i, &s) in n.sigma0.iter().enumerate() {
             if s < MIN_MODE_SIGMA {
@@ -1298,7 +1425,12 @@ impl Preset {
         // `string_params` reads it and the radicand loop calls `string_params`.
         table_length("comb_floor", n.comb_floor.len())?;
         for (i, &floor) in n.comb_floor.iter().enumerate() {
-            within(&format!("notes.comb_floor[{i}]"), floor, 0.0, MAX_COMB_FLOOR)?;
+            within(
+                &format!("notes.comb_floor[{i}]"),
+                floor,
+                0.0,
+                MAX_COMB_FLOOR,
+            )?;
         }
         // The per-key stereo spread is either absent — the global scalar
         // applies — or a whole compass of them, each inside the same range the
@@ -1401,7 +1533,12 @@ impl Preset {
             0.0,
             LEGACY_MAX_UNISON_COUPLING,
         )?;
-        within("voicing.resonance_coupling", v.resonance_coupling, 0.0, MAX_COUPLING)?;
+        within(
+            "voicing.resonance_coupling",
+            v.resonance_coupling,
+            0.0,
+            MAX_COUPLING,
+        )?;
         // A displacement either side of a pan position that already reaches
         // `MAX_PAN`: the ceiling is what puts the outer polarization of the
         // outermost key exactly hard left or hard right, never past it.
@@ -1411,6 +1548,66 @@ impl Preset {
             0.0,
             MAX_PAN_SPREAD,
         )?;
+        if let Some(m) = &v.mics {
+            // Every one of the five is a length or a ratio with a physical
+            // meaning and a physical bound, and the first of them bounds the
+            // engine's own state: `spacing / c` is the longest interchannel
+            // delay the stage can be asked for, and the buffer that carries it
+            // is sized from `MAX_MIC_SPACING_M` at compile time.
+            within(
+                "voicing.mics.spacing_m",
+                m.spacing_m,
+                0.0,
+                MAX_MIC_SPACING_M,
+            )?;
+            positive("voicing.mics.spacing_m", m.spacing_m)?;
+            within(
+                "voicing.mics.height_m",
+                m.height_m,
+                MIC_HEIGHT_M.0,
+                MIC_HEIGHT_M.1,
+            )?;
+            within("voicing.mics.span_m", m.span_m, MIC_SPAN_M.0, MIC_SPAN_M.1)?;
+            within("voicing.mics.width", m.width, MIC_WIDTH.0, MIC_WIDTH.1)?;
+            within(
+                "voicing.mics.diffuse_coherence",
+                m.diffuse_coherence,
+                MIC_DIFFUSE_COHERENCE.0,
+                MIC_DIFFUSE_COHERENCE.1,
+            )?;
+            if let Some(b) = &m.modal {
+                within(
+                    "voicing.mics.modal.lo_hz",
+                    b.lo_hz,
+                    MIC_MODAL_HZ.0,
+                    MIC_MODAL_HZ.1,
+                )?;
+                within(
+                    "voicing.mics.modal.hi_hz",
+                    b.hi_hz,
+                    MIC_MODAL_HZ.0,
+                    MIC_MODAL_HZ.1,
+                )?;
+                within(
+                    "voicing.mics.modal.lift",
+                    b.lift,
+                    MIC_MODAL_LIFT.0,
+                    MIC_MODAL_LIFT.1,
+                )?;
+                // A band whose edges cross is not a band, and the cascade that
+                // realises it would be a notch rather than a lobe — the one
+                // way this section could be written down and mean the opposite
+                // of what it says.
+                // `within` has already refused a NaN on both edges, so an
+                // ordinary comparison is the whole of the question here.
+                if b.lo_hz >= b.hi_hz {
+                    return Err(PresetError::invalid(format!(
+                        "voicing.mics.modal needs lo_hz < hi_hz, got {} and {}",
+                        b.lo_hz, b.hi_hz
+                    )));
+                }
+            }
+        }
         if v.horizontal_offset_hz.len() != MAX_UNISON {
             return Err(PresetError::invalid(format!(
                 "voicing.horizontal_offset_hz needs {MAX_UNISON} entries"
@@ -1710,8 +1907,18 @@ impl Preset {
                         entry.k
                     )));
                 }
-                within(&format!("{at}.hz"), entry.hz, MIN_FALSE_BEAT_HZ, MAX_FALSE_BEAT_HZ)?;
-                within(&format!("{at}.db"), entry.db, MIN_FALSE_BEAT_DB, MAX_FALSE_BEAT_DB)?;
+                within(
+                    &format!("{at}.hz"),
+                    entry.hz,
+                    MIN_FALSE_BEAT_HZ,
+                    MAX_FALSE_BEAT_HZ,
+                )?;
+                within(
+                    &format!("{at}.db"),
+                    entry.db,
+                    MIN_FALSE_BEAT_DB,
+                    MAX_FALSE_BEAT_DB,
+                )?;
                 if row[..e].iter().any(|other| other.k == entry.k) {
                     return Err(PresetError::invalid(format!(
                         "{at} splits partial {} of key {key} a second time",
@@ -2553,6 +2760,7 @@ impl Default for Preset {
                 // added since Phase E sits at its neutral value here, and none
                 // of them is written to the file.
                 polarization_pan_spread: 0.0,
+                mics: None,
                 // ... and the bus it couples through is still the flat one.
                 bridge: None,
                 unison_sigma_scale: unity_sigma_scale(),
@@ -2954,6 +3162,25 @@ mod tests {
         d
     }
 
+    /// The shipped microphone geometry with one field bent, for the rejection
+    /// list: every legal value on it and one that is not.
+    fn mics_with(break_it: impl FnOnce(&mut MicVoicing)) -> MicVoicing {
+        let mut mics = MicVoicing {
+            spacing_m: 0.5,
+            height_m: 0.45,
+            span_m: 1.0,
+            width: 1.5,
+            diffuse_coherence: 5.0,
+            modal: Some(ModalBand {
+                lo_hz: 190.0,
+                hi_hz: 330.0,
+                lift: 2.4,
+            }),
+        };
+        break_it(&mut mics);
+        mics
+    }
+
     fn one_anchor_bridge() -> BridgeVoicing {
         let mut bridge = flat_bridge(Vec::new());
         bridge.backbone.truncate(1);
@@ -2978,7 +3205,7 @@ mod tests {
 
         // Every one of these would reach the DSP as a divide by zero, a NaN,
         // or a resonator pole outside the unit circle.
-        let breakages: [fn(&mut Preset); 146] = [
+        let breakages: [fn(&mut Preset); 167] = [
             |p: &mut Preset| p.notes.f0_hz[3] = 0.0,
             |p: &mut Preset| p.notes.sigma0[3] = -1.0,
             |p: &mut Preset| p.notes.inharmonicity_b[3] = -1e-4,
@@ -3062,11 +3289,15 @@ mod tests {
                     radiated_share: 0.0,
                 })
             },
-            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[1].hz = 10.0)),
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[1].hz = 10.0))
+            },
             |p: &mut Preset| {
                 p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[1].hz = 20_000.0))
             },
-            |p: &mut Preset| p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[1].hz = 20.0)),
+            |p: &mut Preset| {
+                p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| b[1].hz = 20.0))
+            },
             |p: &mut Preset| {
                 p.voicing.bridge = Some(flat_bridge_with(Vec::new(), |b| {
                     b[0].hz = MAX_BRIDGE_HZ;
@@ -3272,11 +3503,19 @@ mod tests {
                 }];
                 p.notes.false_beat = rows;
             },
-            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.hz = MIN_FALSE_BEAT_HZ * 0.5),
-            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.hz = MAX_FALSE_BEAT_HZ + 0.1),
+            |p: &mut Preset| {
+                p.notes.false_beat = false_beat_with(|e| e.hz = MIN_FALSE_BEAT_HZ * 0.5)
+            },
+            |p: &mut Preset| {
+                p.notes.false_beat = false_beat_with(|e| e.hz = MAX_FALSE_BEAT_HZ + 0.1)
+            },
             |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.hz = f32::NAN),
-            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.db = MAX_FALSE_BEAT_DB + 0.1),
-            |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.db = MIN_FALSE_BEAT_DB - 0.1),
+            |p: &mut Preset| {
+                p.notes.false_beat = false_beat_with(|e| e.db = MAX_FALSE_BEAT_DB + 0.1)
+            },
+            |p: &mut Preset| {
+                p.notes.false_beat = false_beat_with(|e| e.db = MIN_FALSE_BEAT_DB - 0.1)
+            },
             |p: &mut Preset| p.notes.false_beat = false_beat_with(|e| e.db = f32::NAN),
             // One wire's one partial has one split.
             |p: &mut Preset| {
@@ -3355,6 +3594,107 @@ mod tests {
             |p: &mut Preset| p.notes.detune_cents[0] = MAX_DETUNE_CENTS + 0.1,
             |p: &mut Preset| p.notes.sigma0[3] = 1.0e-44,
             |p: &mut Preset| p.notes.sigma0[3] = MIN_MODE_SIGMA * 0.5,
+            // The microphone geometry. A spacing of zero is a division by zero
+            // in the diffuse field's coherence corner, one past the ceiling is
+            // a delay past the buffer that carries it, and a length that is not
+            // a length is not a capsule position.
+            |p: &mut Preset| p.voicing.mics = Some(mics_with(|m| m.spacing_m = 0.0)),
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| m.spacing_m = MAX_MIC_SPACING_M + 0.01))
+            },
+            |p: &mut Preset| p.voicing.mics = Some(mics_with(|m| m.spacing_m = -0.1)),
+            |p: &mut Preset| p.voicing.mics = Some(mics_with(|m| m.spacing_m = f32::NAN)),
+            |p: &mut Preset| p.voicing.mics = Some(mics_with(|m| m.height_m = 0.0)),
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| m.height_m = MIC_HEIGHT_M.1 + 0.01))
+            },
+            |p: &mut Preset| p.voicing.mics = Some(mics_with(|m| m.span_m = 0.0)),
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| m.span_m = MIC_SPAN_M.1 + 0.01))
+            },
+            |p: &mut Preset| p.voicing.mics = Some(mics_with(|m| m.width = -0.01)),
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| m.width = MIC_WIDTH.1 + 0.01))
+            },
+            |p: &mut Preset| p.voicing.mics = Some(mics_with(|m| m.width = f32::NAN)),
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| m.diffuse_coherence = 0.0))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics =
+                    Some(mics_with(|m| m.diffuse_coherence = MIC_DIFFUSE_COHERENCE.1 + 0.01))
+            },
+            // The mode-controlled band: two edges that have to be inside the
+            // range a plate is mode-controlled over, a lift that has to be a
+            // gain, and — the one that matters — a pair that has to be
+            // *ordered*, because a crossed pair realises a notch rather than
+            // the lobe the section names.
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: MIC_MODAL_HZ.0 - 0.01,
+                        ..m.modal.expect("the fixture carries a band")
+                    })
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        hi_hz: MIC_MODAL_HZ.1 + 0.01,
+                        ..m.modal.expect("the fixture carries a band")
+                    })
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lift: MIC_MODAL_LIFT.1 + 0.01,
+                        ..m.modal.expect("the fixture carries a band")
+                    })
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lift: -0.01,
+                        ..m.modal.expect("the fixture carries a band")
+                    })
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lift: f32::NAN,
+                        ..m.modal.expect("the fixture carries a band")
+                    })
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: 330.0,
+                        hi_hz: 190.0,
+                        lift: 2.4,
+                    })
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: 250.0,
+                        hi_hz: 250.0,
+                        lift: 2.4,
+                    })
+                }))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| {
+                    m.modal = Some(ModalBand {
+                        lo_hz: f32::NAN,
+                        ..m.modal.expect("the fixture carries a band")
+                    })
+                }))
+            },
         ];
         for break_it in breakages {
             let mut p = Preset::default();
@@ -3430,7 +3770,8 @@ mod tests {
         ] {
             let mut p = Preset::default();
             break_it(&mut p);
-            p.validate().expect("a preset at the rails is still a preset");
+            p.validate()
+                .expect("a preset at the rails is still a preset");
             for key in LOWEST_KEY..=HIGHEST_KEY {
                 let params = p.string_params(key);
                 let string =
@@ -3528,7 +3869,10 @@ mod tests {
         }
         assert!(preset.validate().is_ok());
         let text = preset.to_toml();
-        assert!(text.contains("[noise.key_off]"), "the silenced action was skipped");
+        assert!(
+            text.contains("[noise.key_off]"),
+            "the silenced action was skipped"
+        );
         assert!(text.contains("[[noise.pedal_up.level_db]]"));
         assert_eq!(Preset::from_toml(&text).expect("round trip parses"), preset);
         // ... and the default is still the default, byte for byte.
@@ -3545,9 +3889,7 @@ mod tests {
         preset.voicing.polarization_pan_spread = 0.22;
         preset.voicing.unison_sigma_scale[2].scale = vec![0.85, 1.0, 1.15];
         preset.voicing.unison_sigma_scale[1].scale = vec![0.9, 1.1];
-        preset.notes.pan_spread = (0..NUM_KEYS)
-            .map(|i| 0.05 + 0.003 * i as f32)
-            .collect();
+        preset.notes.pan_spread = (0..NUM_KEYS).map(|i| 0.05 + 0.003 * i as f32).collect();
         assert!(preset.validate().is_ok());
 
         let text = preset.to_toml();
@@ -3556,10 +3898,79 @@ mod tests {
         // The per-key table wins over the global scalar wherever it exists.
         assert_eq!(preset.pan_spread(LOWEST_KEY), 0.05);
         assert_eq!(preset.pan_spread(HIGHEST_KEY), preset.notes.pan_spread[87]);
-        assert_eq!(text.matches("[[voicing.unison_sigma_scale]]").count(), MAX_UNISON);
+        assert_eq!(
+            text.matches("[[voicing.unison_sigma_scale]]").count(),
+            MAX_UNISON
+        );
         assert!(text.contains("0.0125"));
         // Bit-exact, like every other number in a preset.
         assert_eq!(Preset::from_toml(&text).expect("round trip parses"), preset);
+    }
+
+    /// **The microphone pair's neutrality contract, and its round trip.**
+    ///
+    /// Absent, `[voicing.mics]` is not written and the engine builds no
+    /// geometry: `Preset::default()` has none, `presets/default.toml` has none,
+    /// and its demo and compass renders are byte-identical across the milestone
+    /// that added the field (`DECISIONS.md` 103's rule, and item 354's proof).
+    /// Present, every one of the five numbers survives a round trip bit for bit
+    /// and reaches `Soundboard::with_mics`.
+    #[test]
+    fn the_microphone_pair_is_absent_by_default_and_round_trips_when_it_is_not() {
+        assert!(Preset::default().voicing.mics.is_none());
+        assert!(!Preset::default().to_toml().contains("[voicing.mics]"));
+
+        let mut preset = Preset::default();
+        let mics = MicVoicing {
+            spacing_m: 0.5,
+            height_m: 0.45,
+            span_m: 1.0,
+            width: 1.5,
+            diffuse_coherence: 5.0,
+            modal: Some(ModalBand {
+                lo_hz: 190.0,
+                hi_hz: 330.0,
+                lift: 2.4,
+            }),
+        };
+        preset.voicing.mics = Some(mics);
+        preset.validate().expect("the shipped geometry validates");
+        let text = preset.to_toml();
+        assert!(text.contains("[voicing.mics]"));
+        assert!(text.contains("spacing_m = 0.5"));
+        assert!(text.contains("diffuse_coherence = 5.0"));
+        let back = Preset::from_toml(&text).expect("round trip parses");
+        assert_eq!(back, preset);
+        assert_eq!(back.voicing.mics, Some(mics));
+
+        // Both ends of every bound are a microphone, so nothing legal is
+        // refused by being made unreachable.
+        for at_the_rail in [
+            MicVoicing {
+                spacing_m: MAX_MIC_SPACING_M,
+                height_m: MIC_HEIGHT_M.1,
+                span_m: MIC_SPAN_M.1,
+                width: MIC_WIDTH.1,
+                diffuse_coherence: MIC_DIFFUSE_COHERENCE.1,
+                modal: Some(ModalBand {
+                    lo_hz: MIC_MODAL_HZ.0,
+                    hi_hz: MIC_MODAL_HZ.1,
+                    lift: MIC_MODAL_LIFT.1,
+                }),
+            },
+            MicVoicing {
+                spacing_m: 1.0e-4,
+                height_m: MIC_HEIGHT_M.0,
+                span_m: MIC_SPAN_M.0,
+                width: MIC_WIDTH.0,
+                diffuse_coherence: MIC_DIFFUSE_COHERENCE.0,
+                modal: None,
+            },
+        ] {
+            let mut p = Preset::default();
+            p.voicing.mics = Some(at_the_rail);
+            p.validate().expect("a geometry at the rails is a geometry");
+        }
     }
 
     /// The two mechanisms the recording asks for and the model did not have —
@@ -3759,13 +4170,20 @@ mod tests {
         let db = |hz| amp_to_db(filter.magnitude(hz));
         assert!(db(188.0) - db(160.0) > 5.0, "the 188 Hz mode is not a peak");
         assert!(db(247.0) - db(290.0) > 4.0, "the 247 Hz mode is not a peak");
-        assert!(db(331.0) < db(290.0) - 3.0, "the 331 Hz anti-resonance is not a dip");
+        assert!(
+            db(331.0) < db(290.0) - 3.0,
+            "the 331 Hz anti-resonance is not a dip"
+        );
         assert!(db(10_000.0) < db(600.0) - 8.0, "the treble does not fall");
         // ... and it is a bridge, not an amplifier: the loop bound is what the
         // whole design rests on, so check there is real margin left at the
         // default coupling.
         let max_b = filter.max_magnitude();
-        assert!(amp_to_db(max_b) < 14.0, "peaks at {:.1} dB", amp_to_db(max_b));
+        assert!(
+            amp_to_db(max_b) < 14.0,
+            "peaks at {:.1} dB",
+            amp_to_db(max_b)
+        );
         assert!(preset.voicing.resonance_coupling * max_b < MAX_BRIDGE_LOOP_GAIN / 2.0);
     }
 

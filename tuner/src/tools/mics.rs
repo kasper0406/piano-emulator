@@ -1,0 +1,1571 @@
+//! `piano-tuner mics` — fits `[voicing.mics]` off the recording's own stereo
+//! image and writes it into a preset.
+//!
+//! `PHYSICS.md` §8 gave the engine a virtual pair of capsules
+//! (`DECISIONS.md` 351-358), and its five numbers came out of a sweep run from
+//! an `#[ignore]`d test over one surface, with two of the five — the height and
+//! the span — "swept and left round" (item 355's own words). This subcommand is
+//! what replaces the sweep, and it is stage 2's usual shape: measure the
+//! recording, invert the part of it the model has a term for, and close the
+//! rest on the engine's own render.
+//!
+//! ```sh
+//! cargo run --release -p piano-tuner -- mics \
+//!     data/salamander presets/salamander-c5.toml --out presets/salamander-c5.toml
+//! ```
+//!
+//! # The stages, and why they are separate
+//!
+//! | stage | fields | material | what it is |
+//! |---|---|---|---|
+//! | `geometry` | `spacing_m`, `span_m` (`height_m` held) | the recording's own two channels | a TDOA inversion — [`estimate::mics`] |
+//! | `profile` | none — it prints | the recording's own two channels | the sixth-octave interchannel curve, engine beside recording beside the recording's second take |
+//! | `coherence` | `width`, `diffuse_coherence` | engine renders against the same recordings | a two-parameter search on `realism::stereo_columns` |
+//! | `modal` | `[voicing.mics.modal]`'s two edges and its lift | the same | a coarse grid then the same search |
+//! | `band` | the two edges, the lift, `width` and `diffuse_coherence` | the same | `modal`'s grid and search over all five at once |
+//!
+//! `band` is what to run: since `DECISIONS.md` 379 the mode-controlled term is
+//! an anti-phase copy of the pair's own sum rather than a gain on a signal
+//! orthogonal to it, so inside the band `width` and `lift` build **one** side
+//! signal and cannot be fitted one after the other. `coherence` and `modal`
+//! are kept because they are what the earlier milestones ran and because
+//! either alone is still the right instrument for asking what one half can do
+//! on its own.
+//!
+//! `profile` asserts nothing and writes nothing: it is the measurement item 357
+//! said was missing when it named "the board's mode-controlled nodal lines"
+//! and refused to model them without one. Six scoreboard bands are enough to
+//! *score* a coherence and not enough to *see* one, and what the sixth-octave
+//! curve shows is a three-regime plate rather than a two-point geometry —
+//! `DECISIONS.md` 369, and `soundboard::ModalLobe` is what it is acted on with.
+//!
+//! The split is the model's, not a convenience. The geometry is **when** the
+//! two capsules hear a source and nothing else: move the pair and every
+//! interchannel delay moves with it, whatever the board is doing. `width` and
+//! `diffuse_coherence` are **how much** of the resulting difference reaches the
+//! output — a gain on the direct difference and a corner frequency on the
+//! board's — and neither moves a delay. So the first stage can be inverted from
+//! the recording alone, in closed physical terms, with no engine in the loop at
+//! all; and the second cannot, because how coherent the engine's two channels
+//! end up is a property of the whole chain (how much of the sound arrives
+//! through the diffuse path, what the polarization spread is doing, where the
+//! duplex sits) and this crate would have to mirror all of it to predict.
+//! `estimate::directivity`'s header makes the same argument about the same
+//! boundary, and this tool is where it is acted on twice.
+//!
+//! # The height is not fitted, and that is a measurement too
+//!
+//! The recordings' own documentation — `data/salamander/readme.txt`, Alexander
+//! Holm's original note — says **"Two AKG c414 disposed in an AB position ~12cm
+//! above the strings"**. That is the one number about this microphone pair that
+//! is not an inference, and it is the height. It is therefore *held* at 0.12 m
+//! and the span is fitted against it, which is also what makes the fit
+//! well-posed: the delay curve constrains the ratio `span / height` far better
+//! than either alone (see `estimate::mics`'s header), so one of the two has to
+//! come from somewhere else, and here one of them is written down.
+//!
+//! The spacing is **not** written down — "AB position" is a family of setups,
+//! not a distance — and it is what the inversion is for.
+//!
+//! # Two surfaces, not one
+//!
+//! Both the thirty recorded keys of `tuner/tests/stereo.rs` and the six phrases
+//! of `renders/realism/REALISM.md`'s Columns S, because they disagree: a
+//! geometry fitted on the notes alone improved their 63-125 Hz band and made
+//! the phrases' worse than it started (`DECISIONS.md` 364). A note's coherence
+//! is two capsules' view of one source; a phrase's is their view of several at
+//! once.
+//!
+//! # Held-out material
+//!
+//! The fit runs at one velocity ([`FIT_VELOCITY`]). The check runs at the
+//! others: the same keys struck in velocity layers the fit never saw, which for
+//! this library are genuinely different *recordings* rather than the same take
+//! scaled. A microphone pair does not move between takes, so a geometry fitted
+//! at one dynamic that stops describing the image at another is a geometry that
+//! fitted something else — the strike, the register, the layer's own noise
+//! floor. That is the only honest test available for a stage with five
+//! parameters and thirty keys, and it is reported whether it passes or not.
+
+use std::path::PathBuf;
+
+use rayon::prelude::*;
+
+use piano_emulator::preset::{MicVoicing, ModalBand, Preset};
+use piano_emulator::render::{render_to_buffer, RenderEvent};
+use piano_emulator::types::Event;
+use piano_tuner::cache;
+use piano_tuner::estimate::mics::{
+    fit_geometry, interchannel_lag, GeometryConfig, GeometryFit, KeyLag, LagConfig, MicGeometry,
+};
+use piano_tuner::numeric::NelderMead;
+use piano_tuner::realism::{self, StereoColumn, StereoImage, StereoItem};
+use piano_tuner::sampler::SAMPLER_VERSION;
+use piano_tuner::realism::{Phrase, PHRASE_SET_VERSION};
+use piano_tuner::sampler::engine_events;
+use piano_tuner::{Audio, SampleLibrary, Sampler, SamplerEvent, TimedEvent, SAMPLE_RATE};
+
+/// Velocity the fit is made at: the middle layer, the one every other stage-2
+/// fit and both boards use.
+const FIT_VELOCITY: u8 = 90;
+
+/// Seconds of note the image is read over — `tuner/tests/stereo.rs`'s own, so
+/// that what this tool minimises and what the gate asserts are the same window.
+const RENDER_S: f64 = 3.0;
+
+/// Silence before the strike, in samples: `realism::STEREO_PREROLL_SAMPLES`,
+/// which is `tuner/tests/stereo.rs`'s own, so that what this tool minimises and
+/// what the gate asserts are read over the same window. It carries the argument
+/// for why the number is a whole number of engine blocks and what it cost when
+/// it was not (`DECISIONS.md` 378).
+const PREROLL: usize = realism::STEREO_PREROLL_SAMPLES;
+
+/// The strike has to land on the first sample of the window, and an event takes
+/// effect at the head of the block that contains it. Checked rather than
+/// trusted, in both places that render this material.
+const _: () = assert!(
+    PREROLL % piano_emulator::types::BLOCK == 0,
+    "the preroll must be a whole number of engine blocks or the window starts inside the note"
+);
+
+const PREROLL_S: f64 = PREROLL as f64 / 48_000.0;
+
+/// The height the pair is held at, metres: `data/salamander/readme.txt`.
+const DOCUMENTED_HEIGHT_M: f64 = 0.12;
+
+/// First step of the pattern search, as a log-ratio: `exp(0.5)` is a factor of
+/// 1.65, which crosses the whole legal range of every knob in five steps.
+const SEARCH_STEP: f64 = 0.5;
+
+/// Smallest improvement, in bars, the search will move a parameter for.
+///
+/// A hundredth of one band's take-to-take repeatability. Below that the
+/// objective is reading the difference between two renders of the same
+/// instrument rather than anything about the recording, and a search with no
+/// such floor walks a flat direction to whichever bound it is pointed at —
+/// which is exactly what the first run of this fit did with
+/// `diffuse_coherence`, riding it from 5.0 to the ceiling for a total gain of
+/// 0.08 bars spread over twenty accepted steps. A fitted preset should not
+/// carry a number at its rail unless the rail is what the material asked for.
+const SEARCH_EPSILON: f64 = 0.02;
+
+/// Fraction of a band's bar the objective stops pushing at.
+///
+/// Not 1.0, which is where the gate's own threshold is, and the difference is
+/// the whole reason the number exists: an objective that goes flat exactly at
+/// the bar leaves a band **parked on it**, passing by a thousandth, and the
+/// first version of this fit did precisely that — it walked 2-6 kHz to 0.072
+/// against a bar of 0.072 and 6-12 kHz to 0.098 against 0.098. A band that
+/// passes by nothing passes only this take. Half the bar is the margin the
+/// material itself asks for: the bar is already `max(floor, scatter/sqrt(n))`
+/// times an allowance, so half of it is about one floor — one take-to-take
+/// disagreement of the recording with itself.
+const PASS_MARGIN: f64 = 0.5;
+
+/// Evaluations the simplex polish is allowed after the compass search.
+const POLISH_EVALUATIONS: usize = 120;
+
+/// Bars charged for every band of the **recorded-keys** surface left red.
+///
+/// The two surfaces disagree about 250-500 Hz by more than either's own floor
+/// — the recording reads `−0.226` on thirty solo recorded keys and `+0.348` on
+/// six phrases, against floors of 0.039 and 0.018 — so one coherence curve
+/// cannot satisfy both band aggregates unless the engine's *within-band* energy
+/// distribution matches the recording's, which it does not exactly. A summed
+/// objective therefore splits the difference, and measured it splits it about
+/// evenly: at its own optimum the notes are 1.13 bars out in that band and the
+/// phrases 0.91, which is a good balance and still a **red gate**, because the
+/// two bars differ (0.059 against 0.089) and one threshold falls on each side.
+///
+/// This says which surface is authoritative when they cannot both be had, and
+/// the reasons are not "because it is the gate":
+///
+/// * it is the only surface made of keys the library **recorded**, with no
+///   resampling anywhere in it — item 328's rule for every other fitted
+///   quantity in this repository;
+/// * it is **thirty** items against six, and it spans the whole compass rather
+///   than whatever six phrases happen to play;
+/// * it is **one source at a time**, which is what a per-source geometry is
+///   about — item 364's own sentence, "a note's coherence is two capsules' view
+///   of *one* source and a phrase's is their view of several at once".
+///
+/// Item 364's objection to fitting on the notes alone was empirical and
+/// specific — it made the phrases *worse than they started* — and it does not
+/// apply here: the phrase surface improves from 23.88 bars to 18.77 at the
+/// constrained optimum, against 18.04 at the unconstrained one. **The price is
+/// 0.73 bars on the phrase board and it is stated rather than hidden**; what it
+/// buys is that both surfaces' 250-500 Hz columns pass at once, which neither
+/// the unconstrained optimum nor the pair alone manages.
+const RED_BAND_PENALTY: f64 = 10.0;
+
+/// Step at which the search stops, as a log-ratio: half a per cent, which is
+/// finer than the fourth decimal a preset writes and far finer than anything
+/// the material can distinguish.
+const SEARCH_FLOOR: f64 = 0.005;
+
+/// Where the mode-controlled band's search starts, read off the recording's
+/// own sixth-octave profile (`--stage profile`) rather than chosen.
+///
+/// The measured median `r0` is `+0.940` at 127 Hz, `+0.301` at 143, `+0.065`
+/// at 160 and `-0.529` at 180: it crosses zero at about **165 Hz**, which is
+/// the lower edge. It comes back through zero between 254 Hz (`-0.470`) and
+/// 285 (`+0.448`), so **270 Hz** is the upper one. Inside, the mid/side ratio
+/// is `-2.4` to `-4.0` dB, and since `soundboard::ModalLobe`'s lift *is* the
+/// side-over-mid amplitude the band carries, that is a lift of `10^(3.5/20)`,
+/// about **1.5** — a number read straight off the recording rather than
+/// converted through a model of the diffuse taps, which is what it had to be
+/// while the lobe was a gain on the difference (`DECISIONS.md` 379). All three
+/// are starting points and all three move.
+const PROFILE_LOBE_START_HZ: f32 = 165.0;
+const PROFILE_LOBE_END_HZ: f32 = 270.0;
+const PROFILE_LOBE_LIFT: f32 = 1.5;
+
+// ---------------------------------------------------------------------------
+// Material
+// ---------------------------------------------------------------------------
+
+fn render_engine(preset: &Preset, key: u8, velocity: u8) -> Audio {
+    let events = [RenderEvent::new(
+        PREROLL_S as f32,
+        Event::NoteOn {
+            key,
+            vel: u16::from(velocity),
+        },
+    )];
+    let (left, right) = render_to_buffer(preset, &events, (PREROLL_S + RENDER_S) as f32);
+    debug_assert_eq!(events[0].frame(), PREROLL);
+    Audio::new(
+        SAMPLE_RATE,
+        vec![left[PREROLL..].to_vec(), right[PREROLL..].to_vec()],
+    )
+    .expect("the engine renders stereo")
+}
+
+/// The recording of one key at one velocity, trimmed to its own onset and
+/// cached exactly as `tuner/tests/stereo.rs` caches it — same fingerprint, so
+/// the tool and the gate share one set of files on disk and can never be
+/// measuring two different trims of the same take.
+fn render_reference(
+    data: &std::path::Path,
+    sfz: &std::path::Path,
+    key: u8,
+    velocity: u8,
+) -> Result<Audio, piano_tuner::Error> {
+    let mut print = cache::Fingerprint::new();
+    print
+        .str("tests/stereo/reference")
+        .u64(u64::from(SAMPLER_VERSION))
+        .file(sfz)?
+        .u64(u64::from(SAMPLE_RATE))
+        .u64(u64::from(key))
+        .u64(u64::from(velocity))
+        .f64(RENDER_S);
+    let path = cache::reference_dir(data).join(format!(
+        "stereo-key{key:03}-v{velocity:03}-{}.wav",
+        print.hex()
+    ));
+    cache::audio(&path, || {
+        let mut sampler = Sampler::new(sfz)?;
+        let events = [TimedEvent::new(
+            0.0,
+            SamplerEvent::NoteOn { key, vel: velocity },
+        )];
+        let rendered = sampler.render(&events, RENDER_S + 0.2)?;
+        let mono = rendered.mono();
+        let onset = piano_tuner::detect_onset(&mono, f64::from(SAMPLE_RATE));
+        let skip = (onset * f64::from(SAMPLE_RATE)).round() as usize;
+        let frames = (RENDER_S * f64::from(SAMPLE_RATE)) as usize;
+        let channels: Vec<Vec<f32>> = rendered
+            .channels
+            .iter()
+            .map(|c| {
+                (0..frames)
+                    .map(|n| c.get(skip + n).copied().unwrap_or(0.0))
+                    .collect()
+            })
+            .collect();
+        Audio::new(SAMPLE_RATE, channels)
+    })
+}
+
+/// One phrase of `realism::phrase_set`, with the two reference images that do
+/// not move when the engine does.
+///
+/// **The second surface the stereo table is printed on**, and it is in the fit
+/// because it disagrees with the first. `renders/realism/REALISM.md`'s Columns S
+/// are six phrases — mixtures of keys, most of them transposed, three of them
+/// pedalled — and `tuner/tests/stereo.rs` is thirty keys struck alone. A
+/// geometry moves them differently and can move them *oppositely*: a fit made
+/// on the notes alone took the notes' 63-125 Hz band from 0.037 to 0.009 while
+/// taking the phrases' from 0.149 to 0.254, because a note's coherence is the
+/// two capsules' view of **one** source and a phrase's is their view of several
+/// at once, and steepening the pan-to-position map improves the first while
+/// spreading the second. Fitting both is the only way the answer is about the
+/// microphones rather than about which page it was read from.
+struct PhraseRow {
+    phrase: Phrase,
+    reference: StereoImage,
+    alternate: StereoImage,
+}
+
+fn render_phrase(preset: &Preset, phrase: &Phrase) -> Audio {
+    let (left, right) = render_to_buffer(
+        preset,
+        &engine_events::to_render_events(&phrase.events),
+        phrase.duration_s as f32,
+    );
+    Audio::new(SAMPLE_RATE, vec![left, right]).expect("the engine renders stereo")
+}
+
+/// The engine's own pan axis, mirrored: `soundboard::pan_for_key`.
+fn pan_for_key(key: u8) -> f64 {
+    let position = f64::from(key.clamp(21, 108) - 21) / 87.0;
+    (2.0 * position - 1.0) * 0.6
+}
+
+/// One recorded key's reference side, measured once and reused by every
+/// candidate geometry.
+struct Row {
+    key: u8,
+    label: String,
+    pan: f64,
+    /// The delay the recording carries at the fit velocity.
+    lag: KeyLag,
+    /// The same delay measured on the *other* velocity layer: a second
+    /// recording of the same key, and so the floor under the delay term the
+    /// same way the alternate image is the floor under the coherence term.
+    alternate_lag: KeyLag,
+    reference: StereoImage,
+    alternate: StereoImage,
+}
+
+// ---------------------------------------------------------------------------
+// The driver
+// ---------------------------------------------------------------------------
+
+pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut positional: Vec<String> = Vec::new();
+    let mut out: Option<PathBuf> = None;
+    let mut stages: Vec<String> = Vec::new();
+    let mut holdout = true;
+    let mut set: Option<MicVoicing> = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" => out = Some(PathBuf::from(args.next().ok_or("--out needs a path")?)),
+            "--stage" => stages.push(args.next().ok_or("--stage needs a name")?),
+            "--no-holdout" => holdout = false,
+            "--set" => {
+                let text = args.next().ok_or("--set needs five comma-separated numbers")?;
+                let n: Vec<f32> = text
+                    .split(',')
+                    .map(|f| f.trim().parse::<f32>())
+                    .collect::<Result<Vec<f32>, _>>()?;
+                if n.len() != 5 && n.len() != 8 {
+                    return Err("--set takes spacing,height,span,width,coherence \
+                                and optionally modal lo_hz,hi_hz,lift"
+                        .into());
+                }
+                set = Some(MicVoicing {
+                    spacing_m: n[0],
+                    height_m: n[1],
+                    span_m: n[2],
+                    width: n[3],
+                    diffuse_coherence: n[4],
+                    modal: (n.len() == 8).then(|| ModalBand {
+                        lo_hz: n[5],
+                        hi_hz: n[6],
+                        lift: n[7],
+                    }),
+                });
+            }
+            _ => positional.push(arg),
+        }
+    }
+    let data = PathBuf::from(
+        positional
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "data/salamander".into()),
+    );
+    let preset_path = PathBuf::from(
+        positional
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "presets/salamander-c5.toml".into()),
+    );
+    const STAGES: [&str; 6] = ["geometry", "profile", "coherence", "image", "modal", "band"];
+    if let Some(unknown) = stages.iter().find(|s| !STAGES.contains(&s.as_str())) {
+        return Err(format!(
+            "unknown stage {unknown:?}; stages are {}",
+            STAGES.join(", ")
+        )
+        .into());
+    }
+    let wants = |name: &str| set.is_none() && (stages.is_empty() || stages.iter().any(|s| s == name));
+
+    let sfz = data.join("SalamanderGrandPiano-V3+20200602.sfz");
+    if !sfz.exists() {
+        eprintln!(
+            "the reference piano is not here: {}\nrun data/fetch_salamander.sh first (707 MiB).",
+            sfz.display()
+        );
+        std::process::exit(2);
+    }
+    let base = Preset::load(&preset_path)?;
+    let library = SampleLibrary::from_sfz(&sfz)?;
+    let recorded = realism::RecordedKeys::from_library(&library)?;
+    let layers = realism::VelocityLayers::from_library(&library)?;
+    let alternate_velocity = layers.alternate(FIT_VELOCITY);
+
+    println!(
+        "mics: {} recorded keys at v{FIT_VELOCITY}, floor layer v{alternate_velocity}, base {}",
+        recorded.keys().len(),
+        preset_path.display()
+    );
+
+    // ---- the recording's side, measured once -----------------------------
+    let lag_config = LagConfig::default();
+    let rows: Vec<Row> = recorded
+        .keys()
+        .par_iter()
+        .map(|&key| -> Result<Row, piano_tuner::Error> {
+            let reference = render_reference(&data, &sfz, key, FIT_VELOCITY)?;
+            let alternate = render_reference(&data, &sfz, key, alternate_velocity)?;
+            let measured = interchannel_lag(
+                &reference.channels[0],
+                &reference.channels[1],
+                f64::from(SAMPLE_RATE),
+                &lag_config,
+            )?;
+            let other = interchannel_lag(
+                &alternate.channels[0],
+                &alternate.channels[1],
+                f64::from(SAMPLE_RATE),
+                &lag_config,
+            )?;
+            Ok(Row {
+                key,
+                label: realism::note_name(key),
+                pan: pan_for_key(key),
+                lag: KeyLag {
+                    pan: pan_for_key(key),
+                    lag_s: measured.lag_s,
+                    confidence: measured.confidence,
+                    ild_db: measured.ild_db,
+                },
+                alternate_lag: KeyLag {
+                    pan: pan_for_key(key),
+                    lag_s: other.lag_s,
+                    confidence: other.confidence,
+                    ild_db: other.ild_db,
+                },
+                reference: realism::stereo_image_of(&reference)?,
+                alternate: realism::stereo_image_of(&alternate)?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // The census behind `LagConfig`'s defaults, kept so the band and window it
+    // picks are re-checkable rather than asserted: every recorded key's delay
+    // and PHAT peak in seven bands over four window lengths.
+    //
+    // ```sh
+    // MIC_CENSUS=1 cargo run --release -p piano-tuner -- mics data/salamander
+    // ```
+    //
+    // What it shows on this library (`DECISIONS.md` 361): peaks of 0.85-1.00
+    // over 40-160 Hz and 0.11-0.44 over 200-4000 Hz, which is why the delay is
+    // read in the bass and over the whole note rather than in the mid over an
+    // onset window, as a direct path normally would be.
+    if std::env::var("MIC_CENSUS").is_ok() {
+        let bands = [
+            (40.0, 160.0),
+            (63.0, 250.0),
+            (63.0, 500.0),
+            (125.0, 500.0),
+            (200.0, 1000.0),
+            (200.0, 4000.0),
+            (1000.0, 6000.0),
+        ];
+        let windows = [0.05, 0.2, 1.0, 3.0];
+        for &window_s in &windows {
+            println!("\n=== window {window_s} s");
+            print!("| key | pan |");
+            for b in &bands {
+                print!(" {:.0}-{:.0} |", b.0, b.1);
+            }
+            println!();
+            for r in &rows {
+                let audio = render_reference(&data, &sfz, r.key, FIT_VELOCITY)?;
+                print!("| {} | {:+.3} |", r.label, r.pan);
+                for &band_hz in &bands {
+                    let l = interchannel_lag(
+                        &audio.channels[0],
+                        &audio.channels[1],
+                        f64::from(SAMPLE_RATE),
+                        &LagConfig {
+                            band_hz,
+                            window_s,
+                            ..LagConfig::default()
+                        },
+                    );
+                    match l {
+                        Ok(l) => print!(" {:+.2}/{:.2} |", 1e3 * l.lag_s, l.confidence),
+                        Err(_) => print!(" — |"),
+                    }
+                }
+                println!();
+            }
+        }
+    }
+
+    // ---- the phrase surface, measured once -------------------------------
+    //
+    // Cached under `realism-bench`'s own fingerprint, so this shares the files
+    // `piano-tuner bench` already wrote and the two tools can never be scoring
+    // two different renders of one phrase.
+    let mut phrase_key = cache::Fingerprint::new();
+    phrase_key
+        .str("realism-bench/reference")
+        .u64(u64::from(SAMPLER_VERSION))
+        .file(&sfz)?
+        .u64(u64::from(SAMPLE_RATE))
+        .u64(u64::from(PHRASE_SET_VERSION));
+    let phrase_dir = cache::reference_dir(&data);
+    let phrases: Vec<PhraseRow> = realism::phrase_set()
+        .into_par_iter()
+        .map(|phrase| -> Result<PhraseRow, piano_tuner::Error> {
+            let cached = |name: &str, events: &[TimedEvent]| -> Result<Audio, piano_tuner::Error> {
+                let mut key = phrase_key;
+                key.str(name).str(phrase.name).f64(phrase.duration_s);
+                let path = phrase_dir.join(format!(
+                    "realism-{}-{name}-{}.wav",
+                    phrase.name,
+                    key.hex()
+                ));
+                cache::audio(&path, || {
+                    let mut sampler = Sampler::new(&sfz)?;
+                    sampler.render(events, phrase.duration_s)
+                })
+            };
+            let reference = cached("reference", &phrase.events)?;
+            let alternate = cached("alt-layer", &layers.shift(&phrase.events))?;
+            Ok(PhraseRow {
+                reference: realism::stereo_image_of(&reference)?,
+                alternate: realism::stereo_image_of(&alternate)?,
+                phrase,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    println!("  and {} phrases of the scoreboard's own set", phrases.len());
+
+    // ---- stage 1: the geometry -------------------------------------------
+    let start = base.voicing.mics.map(|m| MicGeometry {
+        spacing_m: f64::from(m.spacing_m),
+        height_m: f64::from(m.height_m),
+        span_m: f64::from(m.span_m),
+    });
+    let geometry = if wants("geometry") || (set.is_none() && stages.is_empty()) {
+        let lags: Vec<KeyLag> = rows.iter().map(|r| r.lag).collect();
+        let fit = fit_geometry(
+            &lags,
+            &GeometryConfig {
+                height_m: DOCUMENTED_HEIGHT_M,
+                ..GeometryConfig::default()
+            },
+        )?;
+        print_geometry(&rows, &fit, start);
+        fit.geometry
+    } else {
+        start.ok_or("this stage needs a preset that already has [voicing.mics]")?
+    };
+
+    // ---- stage 1b: the coherence *curve*, off the recording alone ---------
+    //
+    // `DECISIONS.md` 357 named the 125-500 Hz shortfall and said what was
+    // missing was measured directivity. Six scoreboard bands are enough to
+    // score a curve and not enough to see one, so this stage prints the
+    // recording's own sixth-octave interchannel profile — and the engine's
+    // beside it — over the same thirty keys, median and quartiles.
+    if wants("profile") {
+        let engine_preset = base.clone();
+        let profile = |a: &Audio| realism::stereo_profile_of(a);
+        let mut reference_rows: Vec<Vec<realism::StereoProfilePoint>> = Vec::new();
+        let mut alternate_rows: Vec<Vec<realism::StereoProfilePoint>> = Vec::new();
+        let mut engine_rows: Vec<Vec<realism::StereoProfilePoint>> = Vec::new();
+        for r in &rows {
+            reference_rows.push(profile(&render_reference(&data, &sfz, r.key, FIT_VELOCITY)?)?);
+            alternate_rows.push(profile(&render_reference(
+                &data,
+                &sfz,
+                r.key,
+                alternate_velocity,
+            )?)?);
+            engine_rows.push(profile(&render_engine(&engine_preset, r.key, FIT_VELOCITY))?);
+        }
+        let stat = |rows: &[Vec<realism::StereoProfilePoint>],
+                    i: usize,
+                    pick: fn(&realism::StereoProfilePoint) -> f64|
+         -> (f64, f64, f64) {
+            let mut v: Vec<f64> = rows
+                .iter()
+                .filter_map(|p| p.get(i))
+                .filter(|p| p.level_db > -60.0)
+                .map(pick)
+                .filter(|x| x.is_finite())
+                .collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if v.is_empty() {
+                return (f64::NAN, f64::NAN, f64::NAN);
+            }
+            let q = |f: f64| v[((v.len() - 1) as f64 * f).round() as usize];
+            (q(0.25), q(0.5), q(0.75))
+        };
+        println!("\n=== the recording's interchannel profile, sixth-octave, {} recorded keys at v{FIT_VELOCITY}", rows.len());
+        println!("| Hz | ref r0 (q1/med/q3) | ref M/S dB | alt r0 | alt M/S | engine r0 | engine M/S | n |");
+        println!("|---:|---:|---:|---:|---:|---:|---:|---:|");
+        for i in 0..reference_rows[0].len() {
+            let hz = reference_rows[0][i].hz;
+            let (rl, rm, rh) = stat(&reference_rows, i, |p| p.r0);
+            let (_, sm, _) = stat(&reference_rows, i, |p| p.mid_side_db);
+            let (_, am, _) = stat(&alternate_rows, i, |p| p.r0);
+            let (_, asm, _) = stat(&alternate_rows, i, |p| p.mid_side_db);
+            let (_, em, _) = stat(&engine_rows, i, |p| p.r0);
+            let (_, esm, _) = stat(&engine_rows, i, |p| p.mid_side_db);
+            let n = reference_rows
+                .iter()
+                .filter(|p| p.get(i).is_some_and(|p| p.level_db > -60.0))
+                .count();
+            println!(
+                "| {hz:.0} | {rl:+.3}/{rm:+.3}/{rh:+.3} | {sm:+.2} | {am:+.3} | {asm:+.2} | {em:+.3} | {esm:+.2} | {n} |"
+            );
+        }
+    }
+
+    // ---- stage 2: how much of the difference reaches the output -----------
+    //
+    // Two searches, and the pair of them is the report. `coherence` holds the
+    // geometry at the delays the recording measured and moves only the two
+    // trims; `image` lets the geometry move as well, on the render score
+    // alone. What separates them is `DECISIONS.md` 357 in numbers: how much of
+    // the recording's band-by-band coherence a pair placed where the delays
+    // say it is can reproduce, against how much a pair placed anywhere can.
+    let measured = MicVoicing {
+        spacing_m: geometry.spacing_m as f32,
+        height_m: geometry.height_m as f32,
+        span_m: geometry.span_m as f32,
+        width: base.voicing.mics.map_or(1.0, |m| m.width),
+        diffuse_coherence: base.voicing.mics.map_or(1.0, |m| m.diffuse_coherence),
+        modal: base.voicing.mics.and_then(|m| m.modal),
+    };
+    let mut voicing = set.unwrap_or(measured);
+    let mut trimmed = None;
+    if wants("coherence") {
+        println!("\ncoherence: width and diffuse_coherence, geometry held at the measured delays");
+        let fit = search(&base, &rows, &phrases, measured, TRIM_KNOBS, false, &Feasible::default());
+        trimmed = Some(fit);
+        voicing = fit;
+    }
+    if wants("image") {
+        println!("\nimage: all four, on the render score alone");
+        let from_measured = search(&base, &rows, &phrases, voicing, IMAGE_KNOBS, false, &Feasible::default());
+        let from_shipped = base.voicing.mics.map(|shipped| {
+            search(
+                &base,
+                &rows,
+                &phrases,
+                MicVoicing {
+                    height_m: DOCUMENTED_HEIGHT_M as f32,
+                    ..shipped
+                },
+                IMAGE_KNOBS,
+                false,
+                &Feasible::default(),
+            )
+        });
+        // The surface is smooth but not convex, so the search is started twice:
+        // at the geometry the delays measured, and at the values it would
+        // replace. A fit that cannot beat the shipped numbers from the shipped
+        // numbers has not been given the chance to.
+        let floor_ms = delay_floor_ms(&rows);
+        let total = |v: MicVoicing| {
+            gate_excess(&columns_for_voicing(&base, &rows, v, FIT_VELOCITY))
+                + gate_excess(&phrase_columns_for_voicing(&base, &phrases, v))
+                + delay_excess(&rows, geometry_of(&v), floor_ms)
+        };
+        let mut best = from_measured;
+        let score = total(best);
+        if let Some(other) = from_shipped {
+            let value = total(other);
+            println!(
+                "  from the measured geometry: {score:.3} bars out; \
+from the shipped values: {value:.3}"
+            );
+            if value < score {
+                best = other;
+            }
+        }
+        voicing = best;
+    }
+    // ---- stage 3: the board's mode-controlled band ------------------------
+    //
+    // Started from what the recording's own profile says rather than from the
+    // middle of the range: the lower edge where the measured `r0` crosses
+    // zero, the upper edge where it comes back, and a lift of two because the
+    // measured mid/side ratio in between is about -3 dB. A search started at a
+    // reading of the data is a search that can be said to have refined a
+    // measurement; one started at a round number is a sweep with a nicer name.
+    if wants("band") || wants("modal") {
+        let joint = wants("band");
+        let knobs = if joint { BAND_KNOBS } else { MODAL_KNOBS };
+        if joint {
+            println!(
+                "\nband: the board's mode-controlled band and the two trims together, \
+geometry held"
+            );
+        } else {
+            println!("\nmodal: the board's mode-controlled band, geometry and trims held");
+        }
+        let read_off = ModalBand {
+            lo_hz: PROFILE_LOBE_START_HZ,
+            hi_hz: PROFILE_LOBE_END_HZ,
+            lift: PROFILE_LOBE_LIFT,
+        };
+        let start = MicVoicing {
+            modal: Some(voicing.modal.unwrap_or(read_off)),
+            ..voicing
+        };
+        // **Relaxed first, then constrained** — the standard order for a
+        // penalty method, and here it is not a formality. `RED_BAND_PENALTY`
+        // is ten bars, which is larger than the whole continuous variation of
+        // the objective, so under it the surface is dominated by an integer
+        // count of red bands and a coarse grid can no longer tell one basin
+        // from another: run this way round from the start, the grid picks
+        // 281-570 Hz x1.7 and the compass sits down at 40.97 bars. Item 363's
+        // own objective finds the basin; the constraint then decides where in
+        // it to stop.
+        let feasible = Feasible::default();
+        let coarse = modal_grid(&base, &rows, &phrases, start, &feasible);
+        println!("  (relaxed: item 363's objective, to find the basin)");
+        let relaxed = search(&base, &rows, &phrases, coarse, knobs, false, &feasible);
+        // A penalty method has to start somewhere it can move. See [`Feasible`].
+        let from = feasible.take().unwrap_or(relaxed);
+        match (from.modal, relaxed.modal) {
+            (Some(f), Some(r)) => println!(
+                "  (constrained: every red band of the gate charged {RED_BAND_PENALTY:.0} bars; \
+starting at the best band the relaxed pass saw pass it, {:.1}-{:.1} Hz x{:.3}, \
+rather than at its own optimum {:.1}-{:.1} Hz x{:.3})",
+                f.lo_hz, f.hi_hz, f.lift, r.lo_hz, r.hi_hz, r.lift
+            ),
+            _ => println!("  (constrained: no band passed the gate in the relaxed pass)"),
+        }
+        let constrained = search(&base, &rows, &phrases, from, knobs, true, &feasible);
+        voicing = modal_refine(&base, &rows, &phrases, constrained);
+    }
+
+    if let (Some(trim), true) = (trimmed, wants("image")) {
+        let held = gate_excess(&columns_for_voicing(&base, &rows, trim, FIT_VELOCITY));
+        let free = gate_excess(&columns_for_voicing(&base, &rows, voicing, FIT_VELOCITY));
+        println!(
+            "\nthe cost of respecting the measured delays: {held:.3} bars out with the \
+geometry held, {free:.3} with it free"
+        );
+    }
+
+    // ---- what it bought ---------------------------------------------------
+    let mut fitted = base.clone();
+    fitted.voicing.mics = Some(voicing);
+    fitted.validate()?;
+
+    println!("\n[voicing.mics] fitted");
+    println!("  spacing_m         {:.4}", voicing.spacing_m);
+    println!("  height_m          {:.4}   (held: readme.txt)", voicing.height_m);
+    println!("  span_m            {:.4}", voicing.span_m);
+    println!("  width             {:.4}", voicing.width);
+    println!("  diffuse_coherence {:.4}", voicing.diffuse_coherence);
+    match voicing.modal {
+        None => println!("  [modal]           absent — the diffuse coherence alone"),
+        Some(b) => println!(
+            "  [modal] lo_hz {:.1}  hi_hz {:.1}  lift {:.4}",
+            b.lo_hz, b.hi_hz, b.lift
+        ),
+    }
+    let floor_ms = delay_floor_ms(&rows);
+    println!(
+        "  against the recording's own delays: {:.3} ms weighted RMS, {:.2} bars out \
+(take-to-take floor {:.3} ms; the delay inversion's own best {:.3} ms; a pair that is not \
+there {:.3} ms; the preset this replaces {:.3} ms)",
+        delay_residual(&rows, geometry_of(&voicing)),
+        delay_excess(&rows, geometry_of(&voicing), floor_ms),
+        floor_ms,
+        delay_residual(&rows, geometry),
+        delay_residual(&rows, MicGeometry::new(0.001, 1.0, 1.0)),
+        base.voicing
+            .mics
+            .map_or(f64::NAN, |m| delay_residual(&rows, geometry_of(&m))),
+    );
+
+    let before = columns_for(&base, &rows, FIT_VELOCITY);
+    let after = columns_for(&fitted, &rows, FIT_VELOCITY);
+    println!(
+        "\nSTEREO columns, {} recorded keys at v{FIT_VELOCITY} — before ({} red, {:.2} bars out, summed |err| {:.3}):\n{}",
+        rows.len(),
+        before.iter().filter(|c| !c.pass).count(),
+        gate_excess(&before),
+        band_error(&before),
+        realism::stereo_report(&before)
+    );
+    println!(
+        "STEREO columns, {} recorded keys at v{FIT_VELOCITY} — after ({} red, {:.2} bars out, summed |err| {:.3}):\n{}",
+        rows.len(),
+        after.iter().filter(|c| !c.pass).count(),
+        gate_excess(&after),
+        band_error(&after),
+        realism::stereo_report(&after)
+    );
+
+    let phrases_before = phrase_columns(&base, &phrases);
+    let phrases_after = phrase_columns(&fitted, &phrases);
+    println!(
+        "STEREO columns, the scoreboard's six phrases — before ({} red, {:.2} bars out) \
+and after ({} red, {:.2} bars out):\n{}\n{}",
+        phrases_before.iter().filter(|c| !c.pass).count(),
+        gate_excess(&phrases_before),
+        phrases_after.iter().filter(|c| !c.pass).count(),
+        gate_excess(&phrases_after),
+        realism::stereo_report(&phrases_before),
+        realism::stereo_report(&phrases_after)
+    );
+
+    if holdout {
+        for velocity in held_out_velocities(&layers) {
+            let held = held_out_rows(&data, &sfz, &layers, &rows, velocity)?;
+            let columns = columns_for(&fitted, &held, velocity);
+            let base_columns = columns_for(&base, &held, velocity);
+            println!(
+                "HELD OUT — v{velocity}, never fitted ({} red after, {} before; {:.2} bars out after, {:.2} before; summed |err| {:.3} after, {:.3} before):\n{}",
+                columns.iter().filter(|c| !c.pass).count(),
+                base_columns.iter().filter(|c| !c.pass).count(),
+                gate_excess(&columns),
+                gate_excess(&base_columns),
+                band_error(&columns),
+                band_error(&base_columns),
+                realism::stereo_report(&columns)
+            );
+        }
+    }
+
+    if let Some(path) = out {
+        fitted.save(&path)?;
+        println!("wrote {}", path.display());
+    } else {
+        println!("(no --out: nothing written)");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Scoring
+// ---------------------------------------------------------------------------
+
+/// One field of `[voicing.mics]`, with the engine's own bounds on it.
+///
+/// The bounds are `soundboard::MAX_MIC_SPACING_M`, `MIC_HEIGHT_M`, `MIC_SPAN_M`,
+/// `MIC_WIDTH` and `MIC_DIFFUSE_COHERENCE`, pulled in a hair so that a fitted
+/// preset is strictly inside what `Preset::validate` accepts rather than on its
+/// edge — a value written at the rail reads as a fit that wanted to keep going,
+/// and this way it is one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Knob {
+    Spacing,
+    Span,
+    Width,
+    Coherence,
+    /// The mode-controlled band's bottom edge, `[voicing.mics.modal].lo_hz`.
+    ModalLo,
+    /// Its top edge.
+    ModalHi,
+    /// How much more difference than sum the pair sees inside it.
+    ModalLift,
+}
+
+/// The trims: what a pair does with its difference, not where it is.
+const TRIM_KNOBS: &[Knob] = &[Knob::Width, Knob::Coherence];
+
+/// Everything but the height, which `data/salamander/readme.txt` states.
+const IMAGE_KNOBS: &[Knob] = &[Knob::Spacing, Knob::Span, Knob::Width, Knob::Coherence];
+
+/// The mode-controlled band alone, with the pair held where the delays put it.
+///
+/// A separate stage rather than three more axes on `IMAGE_KNOBS`, and for the
+/// reason `DECISIONS.md` 362 gives: the geometry is pinned by a *measurement
+/// the engine is not in* — the recording's own interchannel delays — and the
+/// band is not. Letting the search trade one against the other would spend the
+/// pinned half to buy the free one, which is exactly what the free
+/// four-parameter coherence fit did when it walked the spacing to 0.66 m.
+const MODAL_KNOBS: &[Knob] = &[Knob::ModalLo, Knob::ModalHi, Knob::ModalLift];
+
+/// The band **and** the two trims, moved together.
+///
+/// The `coherence` and `modal` stages were separable while the lobe was a gain
+/// on the board's *difference*: `width` scaled the direct difference, the
+/// coherence pole scaled the diffuse one, and the lobe scaled a third signal
+/// that was orthogonal to both. Since `DECISIONS.md` 379 the lobe is an
+/// anti-phase copy of the **sum**, and inside its band the side is
+/// `width/2 · geometry + lift · sum` — one signal built out of two knobs, so
+/// the two are no longer separable and a stage that pretends they are searches
+/// a ridge one axis at a time. Measured, that is not a nicety: run as two
+/// stages, the trims are fitted with no band present at all, which is a fit to
+/// an instrument that is not going to ship.
+///
+/// The geometry stays out for the reason `MODAL_KNOBS` gives — it is pinned by
+/// a measurement the engine is not in — so this is the trims and the band and
+/// nothing else.
+const BAND_KNOBS: &[Knob] = &[
+    Knob::Width,
+    Knob::Coherence,
+    Knob::ModalLo,
+    Knob::ModalHi,
+    Knob::ModalLift,
+];
+
+impl Knob {
+    fn bounds(self) -> (f64, f64) {
+        match self {
+            Knob::Spacing => (0.04, 0.99),
+            Knob::Span => (0.5, 1.5),
+            Knob::Width => (0.05, 1.99),
+            Knob::Coherence => (0.26, 7.9),
+            // The engine bounds the edges at 40 Hz and 2 kHz; the search is
+            // held inside the range the profile actually resolves — above the
+            // lowest recorded fundamental and below the band where every
+            // measured value is already within 0.2 of zero.
+            Knob::ModalLo => (60.0, 400.0),
+            Knob::ModalHi => (200.0, 1_500.0),
+            Knob::ModalLift => (0.05, 5.9),
+        }
+    }
+
+    fn get(self, v: &MicVoicing) -> f64 {
+        f64::from(match self {
+            Knob::Spacing => v.spacing_m,
+            Knob::Span => v.span_m,
+            Knob::Width => v.width,
+            Knob::Coherence => v.diffuse_coherence,
+            Knob::ModalLo => v.modal.map_or(f32::NAN, |b| b.lo_hz),
+            Knob::ModalHi => v.modal.map_or(f32::NAN, |b| b.hi_hz),
+            Knob::ModalLift => v.modal.map_or(f32::NAN, |b| b.lift),
+        })
+    }
+
+    fn set(self, v: &mut MicVoicing, value: f64) {
+        let (lo, hi) = self.bounds();
+        let value = value.clamp(lo, hi) as f32;
+        match self {
+            Knob::Spacing => v.spacing_m = value,
+            Knob::Span => v.span_m = value,
+            Knob::Width => v.width = value,
+            Knob::Coherence => v.diffuse_coherence = value,
+            Knob::ModalLo => {
+                if let Some(b) = &mut v.modal {
+                    // The engine rejects a crossed band, so the search may not
+                    // propose one: an edge that would pass its partner is held
+                    // a semitone short of it.
+                    b.lo_hz = value.min(b.hi_hz / 1.06);
+                }
+            }
+            Knob::ModalHi => {
+                if let Some(b) = &mut v.modal {
+                    b.hi_hz = value.max(b.lo_hz * 1.06);
+                }
+            }
+            Knob::ModalLift => {
+                if let Some(b) = &mut v.modal {
+                    b.lift = value;
+                }
+            }
+        }
+    }
+}
+
+/// A coarse grid over the mode-controlled band before the compass refines it.
+///
+/// **Because the surface has more than one basin and the compass finds the
+/// nearest one.** Started at the reading of the recording's own profile
+/// ([`PROFILE_LOBE_START_HZ`] and its two companions) the compass walks the
+/// band *wider and weaker* — 208 Hz to 875 Hz at a lift of 1.67, 29.66 bars out
+/// — and stops there, while a narrower, stronger band at 190-330 Hz and 2.4
+/// scores **24.39** on the same objective. The two are not on one slope: the
+/// lower edge and the lift trade almost exactly against each other, so a search
+/// that moves one axis at a time sees a ridge between the basins and reads it
+/// as a wall. Sixty-four cells, log-spaced over the range the profile supports,
+/// cost about a tenth of the compass they precede and remove the question.
+///
+/// The cells are the search's own bounds pulled in to where the recording's
+/// sixth-octave profile has structure: it crosses zero going down between 127
+/// and 180 Hz and comes back between 254 and 320, so the lower edge is gridded
+/// over 150-281 Hz and the upper over 280-815; the lift over 1.2-3.4, which
+/// spans "the diffuse taps as they are" to "three times what they are".
+const MODAL_GRID_LO_HZ: [f32; 4] = [150.0, 185.0, 228.0, 281.0];
+const MODAL_GRID_HI_HZ: [f32; 4] = [280.0, 400.0, 570.0, 815.0];
+const MODAL_GRID_LIFT: [f32; 4] = [1.2, 1.7, 2.4, 3.4];
+
+fn modal_grid(
+    preset: &Preset,
+    rows: &[Row],
+    phrases: &[PhraseRow],
+    start: MicVoicing,
+    feasible: &Feasible,
+) -> MicVoicing {
+    // Item 363's objective, not the penalised one: the grid's job is to choose
+    // a basin, and a ten-bar penalty turns the surface into an integer count of
+    // red bands that no coarse grid can read. See the modal stage's own comment.
+    let floor_ms = delay_floor_ms(rows);
+    let objective = |v: MicVoicing| -> f64 {
+        let notes = columns_for_voicing(preset, rows, v, FIT_VELOCITY);
+        let value = gate_excess(&notes)
+            + gate_excess(&phrase_columns_for_voicing(preset, phrases, v))
+            + delay_excess(rows, geometry_of(&v), floor_ms);
+        if notes.iter().all(|c| c.items == 0 || c.pass) {
+            feasible.offer(v, value);
+        }
+        value
+    };
+    let mut best = start;
+    let mut score = objective(start);
+    println!("  grid: the profile's own reading scores {score:.3} bars out");
+    for &lo_hz in &MODAL_GRID_LO_HZ {
+        for &hi_hz in &MODAL_GRID_HI_HZ {
+            for &lift in &MODAL_GRID_LIFT {
+                let candidate = MicVoicing {
+                    modal: Some(ModalBand { lo_hz, hi_hz, lift }),
+                    ..start
+                };
+                let value = objective(candidate);
+                if value < score {
+                    score = value;
+                    best = candidate;
+                    println!(
+                        "  grid: {lo_hz:.0}-{hi_hz:.0} Hz x{lift:.1} -> {score:.3} bars out"
+                    );
+                }
+            }
+        }
+    }
+    best
+}
+
+/// The best point with **no red band on the gate** that any search has seen.
+///
+/// Every candidate the relaxed pass evaluates already has the gate's columns
+/// computed, so noticing which of them are feasible costs nothing — and it is
+/// what makes the constrained pass work at all. The relaxed optimum is a narrow
+/// band at 212-225 Hz with a lift of 4.81, and *every* point within ten per
+/// cent of it on all three axes is red: a penalty method started there cannot
+/// move, which is the ordinary failure of a penalty method started at an
+/// infeasible point. Started instead at the best feasible point the relaxed
+/// pass walked past, it has somewhere to go.
+#[derive(Default)]
+struct Feasible {
+    best: std::cell::Cell<Option<(MicVoicing, f64)>>,
+}
+
+impl Feasible {
+    fn offer(&self, voicing: MicVoicing, score: f64) {
+        if self.best.get().map_or(true, |(_, s)| score < s) {
+            self.best.set(Some((voicing, score)));
+        }
+    }
+
+    fn take(&self) -> Option<MicVoicing> {
+        self.best.get().map(|(v, _)| v)
+    }
+}
+
+/// The mode-controlled band's objective: item 363's two surfaces and its delay
+/// term, with every red band of the recorded-keys surface charged
+/// [`RED_BAND_PENALTY`] on top.
+fn modal_objective<'a>(
+    preset: &'a Preset,
+    rows: &'a [Row],
+    phrases: &'a [PhraseRow],
+) -> impl Fn(MicVoicing) -> f64 + 'a {
+    let floor_ms = delay_floor_ms(rows);
+    move |v: MicVoicing| -> f64 {
+        let notes = columns_for_voicing(preset, rows, v, FIT_VELOCITY);
+        let reds = notes.iter().filter(|c| c.items > 0 && !c.pass).count();
+        gate_excess(&notes)
+            + RED_BAND_PENALTY * reds as f64
+            + gate_excess(&phrase_columns_for_voicing(preset, phrases, v))
+            + delay_excess(rows, geometry_of(&v), floor_ms)
+    }
+}
+
+/// Multiplicative steps the diagonal refinement tries, largest first.
+const MODAL_REFINE_STEPS: [f64; 5] = [1.25, 1.12, 1.06, 1.03, 1.015];
+
+/// The last word on the mode-controlled band: a **diagonal** pattern search —
+/// every combination of up, down and stay on all three knobs at once.
+///
+/// [`search`] moves one axis at a time and then hands a simplex the diagonals.
+/// On this surface neither is enough, and the reason is that the surface has
+/// *steps* in it: a band enters or leaves the readable set as the engine's own
+/// levels move, so the objective is piecewise-flat at the scale the searches
+/// finish at. Measured — the compass and the simplex together settle at
+/// 202-252 Hz x3.48 and 20.467 bars, and 205-245 Hz x3.80, a third of a
+/// semitone away on two axes and 9 % away on the third, scores **20.37** and
+/// takes the notes' gate from one red to none. Twenty-six neighbours at four
+/// step sizes is a maximal positive basis (Torczon 1997): it cannot be caught
+/// by a ridge that is diagonal in any of the three planes, which is the one
+/// failure a compass has by construction, and it costs about a hundred renders.
+fn modal_refine(
+    preset: &Preset,
+    rows: &[Row],
+    phrases: &[PhraseRow],
+    start: MicVoicing,
+) -> MicVoicing {
+    let objective = modal_objective(preset, rows, phrases);
+    let mut best = start;
+    let mut score = objective(best);
+    for step in MODAL_REFINE_STEPS {
+        loop {
+            let mut improved = false;
+            for lo in [1.0 / step, 1.0, step] {
+                for hi in [1.0 / step, 1.0, step] {
+                    for lift in [1.0 / step, 1.0, step] {
+                        if lo == 1.0 && hi == 1.0 && lift == 1.0 {
+                            continue;
+                        }
+                        let mut candidate = best;
+                        Knob::ModalLo.set(&mut candidate, Knob::ModalLo.get(&best) * lo);
+                        Knob::ModalHi.set(&mut candidate, Knob::ModalHi.get(&best) * hi);
+                        Knob::ModalLift.set(&mut candidate, Knob::ModalLift.get(&best) * lift);
+                        let value = objective(candidate);
+                        if value < score - SEARCH_EPSILON {
+                            score = value;
+                            best = candidate;
+                            improved = true;
+                        }
+                    }
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        println!(
+            "  refine x{step:.4}: {} -> {score:.3} bars out",
+            best.modal.map_or_else(
+                || "absent".to_string(),
+                |b| format!("{:.1}-{:.1} Hz x{:.4}", b.lo_hz, b.hi_hz, b.lift)
+            )
+        );
+    }
+    best
+}
+
+/// Bounded pattern search over the free knobs, in log coordinates.
+///
+/// A pattern search rather than a simplex, for one reason: the objective is a
+/// median over thirty renders of a *readable* set of bands, and a band can
+/// enter or leave that set as the engine's own levels move, which puts small
+/// steps in the surface. Nelder-Mead reads a step as curvature and collapses
+/// onto it; a compass search either finds a better point along an axis or
+/// halves its step, and cannot be fooled into converging on a discontinuity.
+/// Log coordinates because every one of these is a positive scale.
+fn search(
+    preset: &Preset,
+    rows: &[Row],
+    phrases: &[PhraseRow],
+    start: MicVoicing,
+    free: &[Knob],
+    hard: bool,
+    feasible: &Feasible,
+) -> MicVoicing {
+    let floor_ms = delay_floor_ms(rows);
+    let plain = |v: MicVoicing| -> f64 {
+        let notes = columns_for_voicing(preset, rows, v, FIT_VELOCITY);
+        let value = gate_excess(&notes)
+            + gate_excess(&phrase_columns_for_voicing(preset, phrases, v))
+            + delay_excess(rows, geometry_of(&v), floor_ms);
+        if notes.iter().all(|c| c.items == 0 || c.pass) {
+            feasible.offer(v, value);
+        }
+        value
+    };
+    // The geometry stages keep item 363's objective exactly; only the
+    // mode-controlled band is fitted under the hard gate, and only after a
+    // relaxed pass has chosen the basin. See [`RED_BAND_PENALTY`].
+    let penalised = modal_objective(preset, rows, phrases);
+    let objective = move |v: MicVoicing| -> f64 {
+        if hard {
+            penalised(v)
+        } else {
+            plain(v)
+        }
+    };
+    let mut best = start;
+    let mut score = objective(best);
+    // Compass, simplex, compass again, until neither moves it. **Because one
+    // round is not convergence on this surface**: a band enters or leaves the
+    // readable set as the engine's own levels move, which puts small steps in
+    // the objective, and the two searches fail on steps in opposite ways — the
+    // compass walks past a diagonal valley, the simplex reads a step as
+    // curvature and contracts onto it. Measured: one round of the
+    // mode-controlled band stopped at 202-252 Hz x3.48 and 20.467 bars, and a
+    // point a whole third of a semitone away — 205-245 Hz x3.80 — scores
+    // **20.37** and takes the notes' gate from one red to none. A fit that
+    // leaves a better point that close to the one it reports has not finished.
+    for round in 0..SEARCH_ROUNDS {
+        let before = score;
+        compass(&objective, &mut best, &mut score, free);
+        polish(&objective, &mut best, &mut score, free);
+        println!("  round {}: {score:.3} bars out", round + 1);
+        if before - score <= SEARCH_EPSILON {
+            break;
+        }
+    }
+    best
+}
+
+/// Rounds of compass-then-simplex [`search`] will run before it gives up on
+/// finding anything more. Three is what the mode-controlled band needed to stop
+/// moving; the loop exits early whenever a round buys less than
+/// [`SEARCH_EPSILON`], which is what usually happens on the second.
+const SEARCH_ROUNDS: usize = 4;
+
+/// One compass pass: axis-aligned, in log coordinates, halving the step.
+fn compass(
+    objective: &impl Fn(MicVoicing) -> f64,
+    best: &mut MicVoicing,
+    score: &mut f64,
+    free: &[Knob],
+) {
+    let mut step = SEARCH_STEP;
+    let mut evaluations = 1usize;
+    while step > SEARCH_FLOOR {
+        let mut improved = false;
+        for &knob in free {
+            for direction in [1.0, -1.0] {
+                let mut candidate = *best;
+                knob.set(&mut candidate, knob.get(best) * (direction * step).exp());
+                if knob.get(&candidate) == knob.get(best) {
+                    continue;
+                }
+                let value = objective(candidate);
+                evaluations += 1;
+                if value < *score - SEARCH_EPSILON {
+                    *score = value;
+                    *best = candidate;
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            step *= 0.5;
+        }
+        println!(
+            "  step {step:.4}: spacing {:.3} span {:.3} width {:.3} coherence {:.3} \
+modal {} -> {score:.3} bars out ({evaluations} sets rendered)",
+            best.spacing_m,
+            best.span_m,
+            best.width,
+            best.diffuse_coherence,
+            best.modal.map_or_else(
+                || "absent".to_string(),
+                |b| format!("{:.0}-{:.0} Hz x{:.3}", b.lo_hz, b.hi_hz, b.lift)
+            )
+        );
+    }
+}
+
+/// A simplex on top of the compass, because the compass cannot walk a diagonal
+/// valley and this surface has one: spacing and width trade almost exactly
+/// against each other in the mid bands, where a wider pair and a quieter
+/// difference make nearly the same side signal — and so, at the other end of
+/// the spectrum, do the mode-controlled band's lower edge and its lift.
+fn polish(
+    objective: &impl Fn(MicVoicing) -> f64,
+    best: &mut MicVoicing,
+    score: &mut f64,
+    free: &[Knob],
+) {
+    let start: Vec<f64> = free.iter().map(|k| k.get(best).ln()).collect();
+    let simplex = NelderMead {
+        max_evaluations: POLISH_EVALUATIONS,
+        tolerance: 1e-4,
+        initial_step: 0.05,
+    };
+    let voicing_at = |p: &[f64]| -> MicVoicing {
+        let mut candidate = *best;
+        for (knob, value) in free.iter().zip(p) {
+            knob.set(&mut candidate, value.exp());
+        }
+        candidate
+    };
+    let minimum = simplex.minimize(&start, |p| objective(voicing_at(p)));
+    let polished = voicing_at(&minimum.point);
+    let value = objective(polished);
+    println!(
+        "  polish: spacing {:.3} span {:.3} width {:.3} coherence {:.3} modal {} \
+-> {value:.3} bars out ({} more sets rendered)",
+        polished.spacing_m,
+        polished.span_m,
+        polished.width,
+        polished.diffuse_coherence,
+        polished.modal.map_or_else(
+            || "absent".to_string(),
+            |b| format!("{:.0}-{:.0} Hz x{:.3}", b.lo_hz, b.hi_hz, b.lift)
+        ),
+        minimum.evaluations
+    );
+    if value < *score - SEARCH_EPSILON {
+        *best = polished;
+        *score = value;
+    }
+}
+
+/// The stereo columns of one candidate `[voicing.mics]`.
+fn columns_for_voicing(
+    preset: &Preset,
+    rows: &[Row],
+    voicing: MicVoicing,
+    velocity: u8,
+) -> Vec<StereoColumn> {
+    let mut candidate = preset.clone();
+    candidate.voicing.mics = Some(voicing);
+    columns_for(&candidate, rows, velocity)
+}
+
+/// The stereo columns of one preset against the phrase set.
+///
+/// No level match, unlike `bench`: a correlation and a mid-over-side ratio are
+/// both invariant to a gain applied to a whole signal, so the two agree band
+/// for band and this saves a pass over six phrases per evaluation.
+fn phrase_columns(preset: &Preset, phrases: &[PhraseRow]) -> Vec<StereoColumn> {
+    let items: Vec<StereoItem> = phrases
+        .par_iter()
+        .map(|p| StereoItem {
+            label: p.phrase.name.to_string(),
+            engine: realism::stereo_image_of(&render_phrase(preset, &p.phrase))
+                .expect("two channels"),
+            reference: p.reference.clone(),
+            alternate: p.alternate.clone(),
+        })
+        .collect();
+    realism::stereo_columns(&items)
+}
+
+fn phrase_columns_for_voicing(
+    preset: &Preset,
+    phrases: &[PhraseRow],
+    voicing: MicVoicing,
+) -> Vec<StereoColumn> {
+    let mut candidate = preset.clone();
+    candidate.voicing.mics = Some(voicing);
+    phrase_columns(&candidate, phrases)
+}
+
+/// The stereo columns of one preset against the reference rows.
+fn columns_for(preset: &Preset, rows: &[Row], velocity: u8) -> Vec<StereoColumn> {
+    let items: Vec<StereoItem> = rows
+        .par_iter()
+        .map(|r| StereoItem {
+            label: r.label.clone(),
+            engine: realism::stereo_image_of(&render_engine(preset, r.key, velocity))
+                .expect("two channels"),
+            reference: r.reference.clone(),
+            alternate: r.alternate.clone(),
+        })
+        .collect();
+    realism::stereo_columns(&items)
+}
+
+/// **The objective: how far outside the recording's own repeatability the
+/// engine is, summed over the bands, in units of that repeatability.**
+///
+/// `sum over bands of max(0, |err| / bar - 1)`. Zero for a band the gate
+/// passes, and growing linearly in the gate's own currency for one it does
+/// not — so a fit that drives this to zero is a fit that turns
+/// `tuner/tests/stereo.rs` green, and nothing else it can do earns anything.
+///
+/// **Not the plain summed `|err|`**, which was the first version and is the
+/// wrong thing by a wide margin. The bars differ by more than an order of
+/// magnitude between bands — 0.009 in 63-125 Hz against 0.120 one octave up —
+/// because the recording repeats itself far more exactly down there. Summing
+/// raw correlations therefore *sells the bass*: measured on this material, a
+/// geometry that takes 63-125 Hz from +0.965 to +0.494 (against the
+/// recording's +0.953) and buys 0.6 of correlation back across 125-500 Hz
+/// scores 1.30 where the bass-true one scores 2.21 — and it is 51 bars out in
+/// the band where the other is 1.3, on the one measurement of the whole
+/// finding that is repeatable to a hundredth. In the gate's units the same two
+/// score 57 and 24, in the right order.
+///
+/// Nothing here is a function of the engine: `bar` is built out of the
+/// reference and its own second take alone, which
+/// `realism::tests::the_stereo_bar_is_built_out_of_the_reference_alone` pins to
+/// twelve decimals. Minimising a distance in units of a threshold that cannot
+/// move is minimising the distance.
+fn gate_excess(columns: &[StereoColumn]) -> f64 {
+    columns
+        .iter()
+        .filter(|c| c.error.is_finite() && c.bar.is_finite() && c.bar > 0.0)
+        .map(|c| (c.error / c.bar - PASS_MARGIN).max(0.0))
+        .sum()
+}
+
+/// The same distance in plain correlation units, summed over the readable
+/// bands. Reported beside [`gate_excess`] — it is the number
+/// `DECISIONS.md` 358 quoted — and never minimised.
+fn band_error(columns: &[StereoColumn]) -> f64 {
+    columns
+        .iter()
+        .filter(|c| c.error.is_finite())
+        .map(|c| c.error)
+        .sum()
+}
+
+/// **The delay half of the objective**: how far the geometry's own predicted
+/// interchannel delays are from the ones the recording carries, in units of
+/// what the recording's two takes of each key disagree by.
+///
+/// The same shape as [`gate_excess`] and for the same reason. A pair is
+/// *where* it is as well as *how coherent* it makes two channels, and a fit
+/// that reads only the second is free to put the capsules anywhere that
+/// happens to decorrelate a band. The floor is measured, not chosen: the same
+/// delay taken on the key's other velocity layer — a second recording of the
+/// same note through the same microphones, which cannot have moved between
+/// takes — so the term is zero exactly when the modelled delays are as close
+/// to the measured ones as the measurement is to itself.
+fn delay_excess(rows: &[Row], geometry: MicGeometry, floor_ms: f64) -> f64 {
+    let bar = (floor_ms * realism::STEREO_ALLOWANCE).max(1e-3);
+    (delay_residual(rows, geometry) / bar - PASS_MARGIN).max(0.0)
+}
+
+/// The delay floor: weighted RMS of `v90 delay − other-layer delay` over the
+/// keys, milliseconds.
+fn delay_floor_ms(rows: &[Row]) -> f64 {
+    let (mut num, mut den) = (0.0, 0.0);
+    for r in rows {
+        let w = r.lag.confidence.min(r.alternate_lag.confidence);
+        num += w * (r.lag.lag_s - r.alternate_lag.lag_s).powi(2);
+        den += w;
+    }
+    1e3 * (num / den).sqrt()
+}
+
+/// Weighted RMS distance, milliseconds, between the delays the recording
+/// carries and the ones a geometry predicts.
+fn delay_residual(rows: &[Row], geometry: MicGeometry) -> f64 {
+    let (mut num, mut den) = (0.0, 0.0);
+    for r in rows {
+        num += r.lag.confidence * (r.lag.lag_s - geometry.itd_s(r.pan)).powi(2);
+        den += r.lag.confidence;
+    }
+    1e3 * (num / den).sqrt()
+}
+
+fn geometry_of(v: &MicVoicing) -> MicGeometry {
+    MicGeometry {
+        spacing_m: f64::from(v.spacing_m),
+        height_m: f64::from(v.height_m),
+        span_m: f64::from(v.span_m),
+    }
+}
+
+fn print_geometry(rows: &[Row], fit: &GeometryFit, start: Option<MicGeometry>) {
+    println!(
+        "\ngeometry from {} measured delays (height held at {:.3} m):",
+        fit.items, fit.geometry.height_m
+    );
+    println!("  spacing_m {:.4}   span_m {:.4}", fit.geometry.spacing_m, fit.geometry.span_m);
+    println!(
+        "  residual {:.3} ms against a no-pair null of {:.3} ms; aspect is {:.1}x worse \
+determined than the spacing; converged {}",
+        fit.residual_ms, fit.null_ms, fit.conditioning, fit.converged
+    );
+    if let Some(start) = start {
+        println!(
+            "  the preset it replaces: spacing_m {:.4}, height_m {:.4}, span_m {:.4} \
+(residual {:.3} ms)",
+            start.spacing_m,
+            start.height_m,
+            start.span_m,
+            delay_residual(rows, start)
+        );
+    }
+    println!("\n| key | pan | measured lag | fitted lag | residual | peak | ILD meas / model |");
+    println!("|---|---:|---:|---:|---:|---:|---:|");
+    for r in rows {
+        println!(
+            "| {} | {:+.3} | {:+.3} ms | {:+.3} ms | {:+.3} ms | {:.2} | {:+.1} / {:+.1} dB |",
+            r.label,
+            r.pan,
+            1e3 * r.lag.lag_s,
+            1e3 * fit.geometry.itd_s(r.pan),
+            1e3 * (r.lag.lag_s - fit.geometry.itd_s(r.pan)),
+            r.lag.confidence,
+            r.lag.ild_db,
+            fit.geometry.ild_db(r.pan),
+        );
+    }
+}
+
+/// The velocity layers the fit never saw: one clearly softer and one clearly
+/// louder than [`FIT_VELOCITY`], picked out of the library's own bands rather
+/// than named, so a differently layered library still gets two.
+fn held_out_velocities(layers: &realism::VelocityLayers) -> Vec<u8> {
+    let bands = layers.bands();
+    let middle = |i: usize| -> u8 {
+        let (lo, hi) = bands[i];
+        (((u16::from(lo) + u16::from(hi)) / 2) as u8).max(1)
+    };
+    let fit_band = layers.band_of(FIT_VELOCITY).unwrap_or(bands.len() / 2);
+    let mut out = Vec::new();
+    if fit_band >= 3 {
+        out.push(middle(fit_band - 3));
+    }
+    if fit_band + 3 < bands.len() {
+        out.push(middle(fit_band + 3));
+    }
+    out
+}
+
+/// The reference side re-measured at a held-out velocity: the same keys, the
+/// recording of that layer, and its own neighbouring layer as the floor.
+fn held_out_rows(
+    data: &std::path::Path,
+    sfz: &std::path::Path,
+    layers: &realism::VelocityLayers,
+    rows: &[Row],
+    velocity: u8,
+) -> Result<Vec<Row>, piano_tuner::Error> {
+    let other = layers.alternate(velocity);
+    rows.par_iter()
+        .map(|r| -> Result<Row, piano_tuner::Error> {
+            let reference = render_reference(data, sfz, r.key, velocity)?;
+            let alternate = render_reference(data, sfz, r.key, other)?;
+            let measured = interchannel_lag(
+                &reference.channels[0],
+                &reference.channels[1],
+                f64::from(SAMPLE_RATE),
+                &LagConfig::default(),
+            )?;
+            Ok(Row {
+                key: r.key,
+                label: r.label.clone(),
+                pan: r.pan,
+                lag: KeyLag {
+                    pan: r.pan,
+                    lag_s: measured.lag_s,
+                    confidence: measured.confidence,
+                    ild_db: measured.ild_db,
+                },
+                alternate_lag: r.alternate_lag,
+                reference: realism::stereo_image_of(&reference)?,
+                alternate: realism::stereo_image_of(&alternate)?,
+            })
+        })
+        .collect()
+}
