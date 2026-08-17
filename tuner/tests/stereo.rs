@@ -79,6 +79,20 @@
 //! trims together, because since the change they build one side signal and are
 //! no longer separable.
 //!
+//! **And then a fifth board, because none of the four columns above is a
+//! spectrum** (`DECISIONS.md` 392-395). `r0`, the peak |r|, its lag and the
+//! mid-over-side ratio are the whole of what this file scored, and all four are
+//! blind to what **one channel** does on its own: correlation is normalised per
+//! channel by construction, and mid-over-side is a sum. So the instrument the
+//! milestone above shipped could leave the mono fold-down bit-identical, pass
+//! every band of the coherence table, and still put one loudspeaker **9 dB up
+//! and the other 21 dB down at a single note's fundamental** — which is what
+//! `soundboard::ModalLobe`'s in-phase inversion did at its unity-gain crossings
+//! (213.0 and 359.6 Hz), and which a listener reported three separate ways
+//! while 696 tests stayed green. `realism::channel_columns` is that fifth
+//! board, `each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts`
+//! is its gate, and `soundboard::MIC_MODAL_DIFFUSION` is what closed it.
+//!
 //! It is still **not** a room: §9's reverberant field is refused by measurement
 //! in item 315 and stays out of scope. What was added is a property of the
 //! board — where its modes begin to put a nodal line between two capsules 12 cm
@@ -276,6 +290,8 @@ struct Measured {
     /// One item per recorded key: engine, recording, and the recording's other
     /// velocity layer.
     items: Vec<StereoItem>,
+    /// The same renders on the per-channel board (`DECISIONS.md` 393).
+    channels: Vec<realism::ChannelItem>,
     /// The same items with the *recording* on the engine's side: the control
     /// that says the columns do not red out on a signal that is right.
     itself: Vec<StereoItem>,
@@ -283,10 +299,12 @@ struct Measured {
     /// engine's side: the control that says the columns catch the defect they
     /// name, on the real material, with the engine out of the picture.
     panned: Vec<StereoItem>,
+    panned_channels: Vec<realism::ChannelItem>,
     /// The shipped preset with `[voicing.mics.modal]` deleted — the instrument
     /// as `DECISIONS.md` 359-367 left it, a capsule pair and nothing else.
     /// The control under the whole of 369-372.
     without_modal: Vec<StereoItem>,
+    without_modal_channels: Vec<realism::ChannelItem>,
 }
 
 /// The recording's side of the comparison: one row per recorded key, the take
@@ -302,6 +320,11 @@ struct Reference {
     /// The recording's own mono sum put back into two channels: the pan-pot
     /// control's engine side.
     panned: StereoImage,
+    /// The same three takes as **per-channel spectral shapes**
+    /// (`realism::channel_shape`), which is the board `DECISIONS.md` 393 added.
+    reference_channels: realism::ChannelShape,
+    alternate_channels: realism::ChannelShape,
+    panned_channels: realism::ChannelShape,
 }
 
 fn references() -> Option<&'static Vec<Reference>> {
@@ -317,6 +340,7 @@ fn references() -> Option<&'static Vec<Reference>> {
             "the floor needs a second layer to be a second recording"
         );
         let image = |a: &Audio| realism::stereo_image_of(a).expect("two channels");
+        let shape = |a: &Audio| realism::channel_shape_of(a).expect("two channels");
         Some(
             recorded
                 .keys()
@@ -324,10 +348,14 @@ fn references() -> Option<&'static Vec<Reference>> {
                 .map(|&key| {
                     let reference = render_reference(&sfz, key, VELOCITY);
                     let alternate = render_reference(&sfz, key, other);
+                    let panned = pan_potted(&reference);
                     Reference {
                         key,
                         label: realism::note_name(key),
-                        panned: image(&pan_potted(&reference)),
+                        panned: image(&panned),
+                        panned_channels: shape(&panned),
+                        reference_channels: shape(&reference),
+                        alternate_channels: shape(&alternate),
                         reference: image(&reference),
                         alternate: image(&alternate),
                     }
@@ -338,18 +366,31 @@ fn references() -> Option<&'static Vec<Reference>> {
     .as_ref()
 }
 
-/// Scores one preset's renders against [`references`].
-fn score(preset: &Preset) -> Vec<StereoItem> {
-    references()
-        .expect("a library")
-        .iter()
-        .map(|r| StereoItem {
-            label: r.label.clone(),
-            engine: realism::stereo_image_of(&render_engine(preset, r.key)).expect("two channels"),
-            reference: r.reference.clone(),
-            alternate: r.alternate.clone(),
-        })
-        .collect()
+/// Scores one preset's renders against [`references`], on both boards, off one
+/// set of renders.
+fn score(preset: &Preset) -> (Vec<StereoItem>, Vec<realism::ChannelItem>) {
+    let rows = references().expect("a library");
+    let rendered: Vec<Audio> = rows.iter().map(|r| render_engine(preset, r.key)).collect();
+    (
+        rows.iter()
+            .zip(&rendered)
+            .map(|(r, audio)| StereoItem {
+                label: r.label.clone(),
+                engine: realism::stereo_image_of(audio).expect("two channels"),
+                reference: r.reference.clone(),
+                alternate: r.alternate.clone(),
+            })
+            .collect(),
+        rows.iter()
+            .zip(&rendered)
+            .map(|(r, audio)| realism::ChannelItem {
+                label: r.label.clone(),
+                engine: realism::channel_shape_of(audio).expect("two channels"),
+                reference: r.reference_channels.clone(),
+                alternate: r.alternate_channels.clone(),
+            })
+            .collect(),
+    )
 }
 
 fn measured() -> Option<&'static Measured> {
@@ -357,7 +398,7 @@ fn measured() -> Option<&'static Measured> {
     ONCE.get_or_init(|| {
         let rows = references()?;
         let preset = shipped_preset();
-        let items = score(&preset);
+        let (items, channels) = score(&preset);
         let side = |pick: fn(&Reference) -> &StereoImage| -> Vec<StereoItem> {
             rows.iter()
                 .map(|r| StereoItem {
@@ -373,11 +414,25 @@ fn measured() -> Option<&'static Measured> {
             modal: None,
             ..m
         });
+        let channel_side = |pick: fn(&Reference) -> &realism::ChannelShape| {
+            rows.iter()
+                .map(|r| realism::ChannelItem {
+                    label: r.label.clone(),
+                    engine: pick(r).clone(),
+                    reference: r.reference_channels.clone(),
+                    alternate: r.alternate_channels.clone(),
+                })
+                .collect::<Vec<realism::ChannelItem>>()
+        };
+        let (without_modal, without_modal_channels) = score(&bare);
         Some(Measured {
             items,
+            channels,
             itself: side(|r| &r.reference),
             panned: side(|r| &r.panned),
-            without_modal: score(&bare),
+            panned_channels: channel_side(|r| &r.panned_channels),
+            without_modal,
+            without_modal_channels,
         })
     })
     .as_ref()
@@ -426,7 +481,7 @@ fn mic_geometry_sweep() {
             }),
         });
         preset.validate().expect("a legal geometry");
-        let columns = realism::stereo_columns(&score(&preset));
+        let columns = realism::stereo_columns(&score(&preset).0);
         let reds = columns.iter().filter(|c| !c.pass).count();
         println!(
             "\n=== mics {setting} — {reds} of {} bands red{}",
@@ -435,7 +490,7 @@ fn mic_geometry_sweep() {
         );
     }
     if spec.is_empty() {
-        let columns = realism::stereo_columns(&score(&shipped_preset()));
+        let columns = realism::stereo_columns(&score(&shipped_preset()).0);
         let reds = columns.iter().filter(|c| !c.pass).count();
         println!(
             "\n=== shipped preset — {reds} of {} bands red{}",
@@ -502,6 +557,213 @@ against a bar of {:.3} (floor {:.3}, scatter {:.3}, x{:.2}), worst key {} at {:.
         red.len(),
         columns.len(),
         report("engine against the recording", &columns)
+    );
+}
+
+/// **The per-channel gate of `DECISIONS.md` 392-394, and the standing record of
+/// what three listening complaints had in common.**
+///
+/// Per band, `realism::channel_columns`: what each loudspeaker's spectrum does
+/// against the take's own mono spectrum, engine against recording, over the
+/// keys the library recorded, against a bar made of the recording's own
+/// disagreement with itself. `realism::ChannelBand`'s own header says what the
+/// statistic is and why the mono boards and the coherence board are both blind
+/// to it.
+///
+/// **Three statistics, not one** (`DECISIONS.md` 395). `dev_L`/`dev_R` are
+/// *shapes* — each channel's band share against the take's own mono share —
+/// and a shape cannot see loudness: the lobe manufactures `2(1 + g²)` of pair
+/// energy against the fold-down's `1`, up to +6.18 dB of it, and moves no
+/// shape at all. So the column carries `pair_balance` beside them, the pair's
+/// own energy against its mono sum, against the recording's own value. And
+/// both of those are medians over thirty keys, so `per_key_error` — the same
+/// distance taken key by key — is asserted too, against the recording's own
+/// key-to-key spread. A board right on the median and wrong at every key is
+/// the C4-shaped failure at key granularity.
+///
+/// **What is asserted, and why it is not all six bands.** The two bands the
+/// **mode-controlled lobe acts in — 125-250 and 250-500 Hz — must pass, and no
+/// band may be further out than a pan-potted engine's own value.** The first
+/// half is this milestone's own work: the lobe is the only thing in the engine
+/// that deliberately puts a per-channel spectral difference there, it read
+/// **2.63 dB against a bar of 1.09** when this column was written, and the
+/// repair is judged on it. The second half is the rest of the compass, where
+/// what the column measures is the pan-pot's board taps and the pair geometry
+/// — jobs of other milestones, in bands the engine is 1-2 dB out in with no
+/// microphone section at all (a pan-potted engine reads 5.68 dB out at
+/// 63-125 Hz). Asserting those absolutely would be asserting a milestone that
+/// has not happened; asserting that the microphone section does not make them
+/// *worse* is exactly the "must not have bought its two bands by spending the
+/// other four" rule the mode-controlled band already carries below.
+#[test]
+fn each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts() {
+    let Some(m) = measured() else {
+        eprintln!("no data/salamander in this tree; skipping the per-channel gate");
+        return;
+    };
+    let columns = realism::channel_columns(&m.channels);
+    let text = format!(
+        "\n{}\nthe same board with no microphone section at all, for comparison:\n{}",
+        realism::channel_report(&columns),
+        realism::channel_report(&realism::channel_columns(&m.panned_channels))
+    );
+    let middle: Vec<&realism::ChannelColumn> = columns
+        .iter()
+        .filter(|c| c.items > 0 && c.lo_hz >= 125.0 && c.hi_hz <= 500.0)
+        .collect();
+    assert_eq!(
+        middle.len(),
+        2,
+        "the two bands the mode-controlled band lives in must both be readable{text}"
+    );
+    for c in &middle {
+        assert!(
+            c.pass,
+            "{}: the two channels' spectra are {:.2} dB from the recording's against a bar of \
+{:.2} (floor {:.2}, scatter {:.2}, x{:.2}) — engine L {:+.2} / R {:+.2} where the recording \
+reads L {:+.2} / R {:+.2}{text}",
+            c.name,
+            c.error,
+            c.bar,
+            c.floor,
+            c.scatter,
+            realism::STEREO_ALLOWANCE,
+            c.engine_left_db,
+            c.engine_right_db,
+            c.reference_left_db,
+            c.reference_right_db,
+            text = text
+        );
+    }
+    // **The loudness half.** `dev_L`/`dev_R` are shapes and cannot see it: the
+    // lobe adds `2(1 + g^2)` of pair energy where the mono fold-down keeps
+    // `1`, and item 392 measured up to +6.18 dB of it with nothing pushing
+    // back. `ChannelColumn::pair_balance` is that energy against the
+    // recording's own, per band, signed, on the same thirty keys — and it is
+    // asserted in the same two bands and against the same pan-pot rule as the
+    // shape half, for the same reasons.
+    for c in &middle {
+        assert!(
+            c.pair_pass,
+            "{}: the two loudspeakers carry {:+.2} dB of pair energy against their own mono \
+fold-down where the recording carries {:+.2} — a balance of {:+.2} dB against a bar of {:.2} \
+(take-to-take {:.2}, key-to-key {:.2}/sqrt(n), x{:.2}){text}",
+            c.name,
+            c.engine_pair_db,
+            c.reference_pair_db,
+            c.pair_balance,
+            c.pair_bar,
+            c.pair_floor,
+            c.pair_scatter,
+            realism::STEREO_ALLOWANCE,
+            text = text
+        );
+    }
+    // **And the per-key half.** Both of the above are medians over thirty keys,
+    // and a board right on the median and wrong at every key is exactly the
+    // C4-shaped failure at key granularity. The bar is the recording's own
+    // key-to-key sigma; `ChannelColumn::per_key_error` says why it is that and
+    // not the take-to-take floor.
+    for c in &middle {
+        assert!(
+            c.per_key_pass,
+            "{}: the two channels' spectra are {:.2} dB from the recording's at the median \
+*key* against a bar of {:.2} (the recording's own key-to-key sigma {:.2}, x{:.2}; its \
+take-to-take floor is {:.2}) — worst key {}{text}",
+            c.name,
+            c.per_key_error,
+            c.per_key_bar,
+            c.scatter,
+            realism::STEREO_ALLOWANCE,
+            c.per_key_floor,
+            c.worst
+                .as_ref()
+                .map_or_else(|| "—".to_string(), |(k, d)| format!("{k} at {d:.2}")),
+            text = text
+        );
+    }
+    let pan = realism::channel_columns(&m.panned_channels);
+    for (c, p) in columns.iter().zip(&pan) {
+        if c.items == 0 || p.items == 0 || !c.error.is_finite() || !p.error.is_finite() {
+            continue;
+        }
+        assert!(
+            c.pair_balance.abs() <= p.pair_balance.abs() + c.pair_bar,
+            "{}: the microphone section takes this band's pair energy from {:+.2} dB out to \
+{:+.2}, which is more than a bar ({:.2}) worse than having no section at all{text}",
+            c.name,
+            p.pair_balance,
+            c.pair_balance,
+            c.pair_bar,
+            text = text
+        );
+        assert!(
+            c.error <= p.error + c.bar,
+            "{}: the microphone section takes this band from {:.2} dB out to {:.2}, which is \
+more than a bar ({:.2}) worse than having no section at all{text}",
+            c.name,
+            p.error,
+            c.error,
+            c.bar,
+            text = text
+        );
+    }
+}
+
+/// **The control the per-channel column needs to be a measurement**: the
+/// mode-controlled lobe deleted, everything else the same.
+///
+/// The lobe is what this milestone repaired, so the column has to be able to
+/// see it — and it has to see it *in the lobe's own two bands* and nowhere
+/// else, or it is measuring something the lobe did not do. What it must not do
+/// is red out on the capsule pair alone in bands the pair never touches.
+#[test]
+fn the_per_channel_column_sees_the_mode_controlled_band_and_only_it() {
+    let Some(m) = measured() else {
+        eprintln!("no data/salamander in this tree; skipping the per-channel control");
+        return;
+    };
+    let with = realism::channel_columns(&m.channels);
+    let without = realism::channel_columns(&m.without_modal_channels);
+    let text = format!(
+        "\nwith the mode-controlled band:\n{}\nwithout it:\n{}",
+        realism::channel_report(&with),
+        realism::channel_report(&without)
+    );
+    let moved: Vec<f64> = with
+        .iter()
+        .zip(&without)
+        .filter(|(a, b)| a.items > 0 && b.items > 0)
+        .map(|(a, b)| (a.engine_left_db - b.engine_left_db).abs())
+        .collect();
+    assert!(
+        !moved.is_empty(),
+        "no band was readable on both sides of the control{text}"
+    );
+    // The lobe's own bands move; the bands it cannot reach do not. `500-2k`
+    // is the first band above it and the loosest statement of the two, because
+    // the fourth-order upper edge is still 12 dB down an octave over `hi_hz`.
+    let inside: f64 = with
+        .iter()
+        .zip(&without)
+        .filter(|(a, _)| a.lo_hz >= 125.0 && a.hi_hz <= 500.0)
+        .map(|(a, b)| (a.engine_left_db - b.engine_left_db).abs())
+        .fold(0.0, f64::max);
+    let outside: f64 = with
+        .iter()
+        .zip(&without)
+        .filter(|(a, _)| a.hi_hz <= 125.0 || a.lo_hz >= 2_000.0)
+        .map(|(a, b)| (a.engine_left_db - b.engine_left_db).abs())
+        .fold(0.0, f64::max);
+    assert!(
+        inside > 0.5,
+        "deleting the mode-controlled band moved its own bands by only {inside:.2} dB — this \
+column cannot be measuring it{text}"
+    );
+    assert!(
+        outside < inside,
+        "deleting the mode-controlled band moved a band it does not live in ({outside:.2} dB) by \
+more than one it does ({inside:.2}){text}"
     );
 }
 

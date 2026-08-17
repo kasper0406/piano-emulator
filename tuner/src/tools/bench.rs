@@ -225,6 +225,16 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 reference: realism::stereo_image_of(&reference).map_err(say)?,
                 alternate: realism::stereo_image_of(&alt).map_err(say)?,
             };
+            // And the per-channel board (`DECISIONS.md` 393), off the same
+            // three signals: a correlation is normalised per channel and a
+            // mid-over-side ratio is a sum, so *Columns S* above cannot see
+            // what either loudspeaker's own spectrum does.
+            let channels = realism::ChannelItem {
+                label: phrase.name.to_string(),
+                engine: realism::channel_shape_of(&engine).map_err(say)?,
+                reference: realism::channel_shape_of(&reference).map_err(say)?,
+                alternate: realism::channel_shape_of(&alt).map_err(say)?,
+            };
 
             draw_page(
                 &out.join(format!("{}_mel.png", phrase.name)),
@@ -255,6 +265,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     floor,
                     transposition,
                     stereo,
+                    channels,
                     struck,
                     transposed_notes,
                 },
@@ -325,6 +336,8 @@ struct Row {
     /// reference's neighbouring velocity layer. Not a mono sum and marked
     /// STEREO everywhere it is printed.
     stereo: StereoItem,
+    /// The same phrase's per-channel spectral shape, three ways.
+    channels: realism::ChannelItem,
     /// How many of the phrase's strikes there are, and how many of them land on
     /// a key the library never recorded.
     struck: usize,
@@ -661,6 +674,7 @@ keys**, which is the material with a real take pair under it (a transposed key's
 layers are two resamplings of one take, not two takes — `DECISIONS.md` 328's argument). The \
 phrases are the held-out reading; the notes are the gate.\n"
     );
+
     let reds: Vec<&StereoColumn> = stereo_columns.iter().filter(|c| !c.pass).collect();
     let _ = writeln!(
         s,
@@ -686,6 +700,39 @@ where the recording reads {:+.3}; its worst phrase is `{}`.",
                 worst.worst.as_ref().map(|w| w.0.as_str()).unwrap_or("?"),
             )
         }
+    );
+
+    // ---- Columns C: what each loudspeaker plays ----
+    let channel_items: Vec<realism::ChannelItem> =
+        rows.iter().map(|r| r.channels.clone()).collect();
+    let channel_columns = realism::channel_columns(&channel_items);
+    let _ = writeln!(
+        s,
+        "\n## Columns C — per-channel spectrum  *(STEREO, not a mono sum)*\n\n\
+`DECISIONS.md` 392-394. Per band, **each channel's share of its own broadband energy minus \
+the same take's mono share of the same band**, `L / R`, in dB. It is a *shape*: a gain on the \
+take cancels, and so does a gain on one channel, so nothing here can be passed or failed by \
+the output level. It is **zero at every band for a pan-potted single note**, because a \
+pan-potted pair's two channels are its mono sum scaled — and the recording's is not zero, \
+because two capsules over a real soundboard hear two spectra.\n\n\
+This is the one dimension neither the mono boards nor *Columns S* can reach. Every board \
+above is a function of `(L+R)/2`; `r0` is normalised per channel by construction and \
+mid-over-side is a sum. So a stereo stage can leave the mono fold-down bit-identical, match \
+the recording's coherence band for band, and still put one loudspeaker 9 dB up and the other \
+21 dB *down* at a single note's fundamental — which is what the virtual pair's \
+mode-controlled lobe did, and what a listener reported three times while 696 tests stayed \
+green. The bar is built exactly as *Columns S*' is: the larger of the recording's \
+take-to-take floor and `scatter/sqrt(n)`, times {STEREO_ALLOWANCE}, and never a function of \
+the engine.\n"
+    );
+    let _ = write!(s, "{}", realism::channel_report(&channel_columns));
+    let _ = writeln!(
+        s,
+        "\n**{} of {} bands are red.** `tuner/tests/stereo.rs` gates these columns on the 30 \
+recorded keys struck alone, and gates the two bands the mode-controlled band lives in \
+absolutely; the phrases here are the held-out reading.\n",
+        channel_columns.iter().filter(|c| !c.pass).count(),
+        channel_columns.len(),
     );
 
     // ---- Columns A and B ----

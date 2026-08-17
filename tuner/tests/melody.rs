@@ -28,7 +28,7 @@
 //! of the melody's own register, played as the same music, held against the
 //! per-take scatter of one recorded key's two velocity layers.
 //!
-//! **`DECISIONS.md` 330 — the tail columns.** The three metrics are measured
+//! **`DECISIONS.md` 330 — the tail columns.** The three evenness metrics are measured
 //! again over 0.5-2.0 s of each note on the line's own pitches played slowly.
 //! The window that was there before ends at 0.40 s, which is enough to see a
 //! `partial_gains` row and cannot see a *decay* row at all — and the regression
@@ -224,9 +224,9 @@ fn measure_phrase(
     let engine = render_engine(preset, phrase);
     let reference = render_reference(sfz, phrase, "reference", &phrase.events);
     let alt = render_reference(sfz, phrase, "alt-layer", &layers.shift(&phrase.events));
-    let engine_notes = melody::measure_line(&engine.mono(), sr, notes, &partial_hz, window);
-    let reference_notes = melody::measure_line(&reference.mono(), sr, notes, &partial_hz, window);
-    let layer_notes = melody::measure_line(&alt.mono(), sr, notes, &partial_hz, window);
+    let engine_notes = melody::measure_line(&engine, sr, notes, &partial_hz, window);
+    let reference_notes = melody::measure_line(&reference, sr, notes, &partial_hz, window);
+    let layer_notes = melody::measure_line(&alt, sr, notes, &partial_hz, window);
     (
         melody::Lines::new(
             melody::per_key(&engine_notes),
@@ -238,7 +238,9 @@ fn measure_phrase(
     )
 }
 
-/// Every column of the gate for one preset: three metrics in two windows.
+/// Every column of the gate for one preset: three evenness metrics in two windows,
+/// and the two balances — `strike` and `channel` — in the window that contains
+/// them.
 fn score(preset: &Preset, sfz: &Path) -> (Vec<Column>, Vec<NoteTexture>, Vec<NoteTexture>) {
     let library = SampleLibrary::from_sfz(sfz).expect("the library reads");
     let layers = VelocityLayers::from_library(&library).expect("the library has velocity layers");
@@ -395,6 +397,30 @@ fn no_note_of_the_lines_tail_wobbles_unlike_the_rest() {
 #[test]
 fn no_note_of_the_lines_tail_is_brighter_than_the_rest() {
     gate("hf", Window::Tail);
+}
+
+/// **The permanent per-channel column, heard as a tune** (`DECISIONS.md`
+/// 392-394).
+///
+/// `channel` is `10 log10((E_L + E_R) / 2 E_M)` per note: what the two
+/// loudspeakers put in the room, against what this note's own mono fold-down
+/// says they do. Every other column of this gate, and every column of every
+/// other board in the repository, is a function of that fold-down — so a stereo
+/// stage can make one note of a melody four decibels louder than its neighbours
+/// in the room, and 696 tests stay green. That is what happened
+/// (`DECISIONS.md` 392): the virtual pair's mode-controlled lobe read **+6.42
+/// dB at C4 against +2.41 at F4 and +3.07 at G4**, a four-decibel spread across
+/// five notes of one tune, with the two channels 9 dB up and 2 dB down at C4
+/// and 6 up / 21 *down* at F4 — none of it in the mono sum, and a listener
+/// picked C4 out of the line three milestones running.
+///
+/// It is a **balance**, like `strike`: the recording has its own value at every
+/// note — two capsules over a real soundboard do hear a note at two levels —
+/// so the question is whether the engine's is the recording's, at the keys the
+/// library recorded, and not whether it is zero.
+#[test]
+fn the_two_loudspeakers_play_this_line_as_the_recording_does() {
+    gate("channel", Window::Head);
 }
 
 /// The tail gate is a statement about a preset, and the statement it was

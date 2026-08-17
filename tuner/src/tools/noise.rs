@@ -131,7 +131,53 @@ pub fn without_strike(preset: &Preset) -> Preset {
     out
 }
 
-fn render_engine(preset: &Preset, key: u8, vel: u8) -> Vec<f32> {
+/// The three signals one render gives: the left channel, the right channel and
+/// the mono sum.
+///
+/// **All three, because the balance is not a mono quantity** (`DECISIONS.md`
+/// 392-394). The mechanism's burst is added to the *mid* like every other
+/// source and reaches both capsules; the note's own fundamental goes through
+/// the mode-controlled lobe and does not. So the ratio of the one to the other
+/// — which is the whole of what this tool measures — is a **different number in
+/// each loudspeaker**, and the mono sum is the one place it cannot be seen.
+/// Measured on the instrument that shipped: over the soprano line's five
+/// pitches, engine minus recording read **−4.30 dB on the mono sum, +5.05 dB
+/// on the left and −2.60 on the right** — the mono reading asks for a *louder*
+/// event where the left channel asks for a much quieter one, and the listener
+/// heard the left channel.
+struct Take {
+    left: Vec<f32>,
+    right: Vec<f32>,
+    mono: Vec<f32>,
+}
+
+impl Take {
+    fn channel(&self, c: usize) -> &[f32] {
+        match c {
+            0 => &self.left,
+            1 => &self.right,
+            _ => &self.mono,
+        }
+    }
+
+    /// The sample-wise difference of two takes, channel by channel — which is
+    /// the event itself, through the board, the master gain and the microphone
+    /// pair. See the module header.
+    fn minus(&self, other: &Take) -> Take {
+        let sub = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(&x, &y)| x - y).collect();
+        Take {
+            left: sub(&self.left, &other.left),
+            right: sub(&self.right, &other.right),
+            mono: sub(&self.mono, &other.mono),
+        }
+    }
+}
+
+/// The three channels the balance is read on, in the order [`Take::channel`]
+/// indexes them.
+const CHANNELS: [&str; 3] = ["L", "R", "mono"];
+
+fn render_engine(preset: &Preset, key: u8, vel: u8) -> Take {
     let events = [
         RenderEvent::new(PREROLL_S as f32, Event::NoteOn { key, vel: u16::from(vel) }),
         RenderEvent::new(
@@ -140,7 +186,8 @@ fn render_engine(preset: &Preset, key: u8, vel: u8) -> Vec<f32> {
         ),
     ];
     let (left, right) = render_to_buffer(preset, &events, RENDER_S as f32);
-    left.iter().zip(&right).map(|(&l, &r)| 0.5 * (l + r)).collect()
+    let mono = left.iter().zip(&right).map(|(&l, &r)| 0.5 * (l + r)).collect();
+    Take { left, right, mono }
 }
 
 fn render_reference(
@@ -249,12 +296,16 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .flat_map(|&key| VELOCITIES.iter().map(move |&vel| (key, vel)))
         .collect();
-    let readings: Vec<BalanceReading> = cells
+    // Three readings per cell — left, right, mono — off **one** pair of
+    // renders. The worse of the two channels is the one that is fitted and the
+    // one that is printed; `mono` is carried beside it so the change of
+    // statistic is visible rather than asserted. See [`Take`].
+    let cell_readings: Vec<[BalanceReading; 3]> = cells
         .par_iter()
-        .map(|&(key, vel)| -> Result<BalanceReading, piano_tuner::Error> {
+        .map(|&(key, vel)| -> Result<[BalanceReading; 3], piano_tuner::Error> {
             let engine = render_engine(&preset, key, vel);
             let tone = render_engine(&quiet, key, vel);
-            let burst: Vec<f32> = engine.iter().zip(&tone).map(|(&a, &b)| a - b).collect();
+            let burst = engine.minus(&tone);
             let mut cell_print = reference_key;
             cell_print.u64(u64::from(key)).u64(u64::from(vel));
             let path = reference_cache.join(format!(
@@ -264,36 +315,79 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let reference = cache::audio(&path, || {
                 with_sampler(&sfz, |s| render_reference(s, key, vel))
             })?;
-            let reference = reference.mono();
-            Ok(balance_reading(
-                key,
-                vel,
-                &reference,
-                note_onset(&reference, SR, PREROLL_S),
-                &tone,
-                &burst,
-                note_onset(&engine, SR, PREROLL_S),
-                SR,
-            ))
+            let reference_mono = reference.mono();
+            // The onsets are read on the mono sums of both sides, once, so
+            // that the three channels are compared over **the same window**:
+            // a per-channel onset search would move the window as well as the
+            // signal and the columns would no longer be a difference.
+            let reference_onset = note_onset(&reference_mono, SR, PREROLL_S);
+            let engine_onset = note_onset(&engine.mono, SR, PREROLL_S);
+            let reference_channel = |c: usize| -> Vec<f32> {
+                match (c, reference.channel_count()) {
+                    (_, 0..=1) => reference_mono.clone(),
+                    (2, _) => reference_mono.clone(),
+                    (c, _) => reference.channels[c].clone(),
+                }
+            };
+            Ok(std::array::from_fn(|c| {
+                balance_reading(
+                    key,
+                    vel,
+                    &reference_channel(c),
+                    reference_onset,
+                    tone.channel(c),
+                    burst.channel(c),
+                    engine_onset,
+                    SR,
+                )
+            }))
         })
         .collect::<Result<Vec<_>, _>>()?;
+
+    /// The reading of the channel the engine is furthest from the recording in.
+    ///
+    /// **The worse, not the average.** A mechanism that is right in one
+    /// loudspeaker and six decibels out in the other is six decibels out; an
+    /// average would call it three, and the ear does not.
+    fn worse(cell: &[BalanceReading; 3]) -> (usize, BalanceReading) {
+        let away = |r: &BalanceReading| (r.engine_db - r.reference_db).abs();
+        if away(&cell[0]) >= away(&cell[1]) {
+            (0, cell[0])
+        } else {
+            (1, cell[1])
+        }
+    }
+
+    // **The correction is fitted on the mono sum, and the channels are
+    // reported beside it.** The event is added to the *mid* like every other
+    // source, so how loud it is, is a mono quantity and a level fitted to one
+    // loudspeaker would put the fold-down wrong by the same amount. What the
+    // channels are for is the *spread*: if the two disagree, the number the
+    // level is fitted to is not the number a listener hears, and the repair is
+    // upstream in `soundboard::MIC_MODAL_DIFFUSION` rather than here
+    // (`DECISIONS.md` 393). This tool's job is to make that visible on every
+    // run, which is what it could not do while it folded down first.
+    let readings: Vec<BalanceReading> = cell_readings.iter().map(|c| c[2]).collect();
 
     println!(
         "\nattack tonality of the first 30 ms, dB — a line spectrum is large, a continuum is zero\n"
     );
     println!(
-        "{:>4} {:>4} {:>9} {:>9} {:>9} {:>9} {:>10}",
-        "key", "vel", "reference", "engine", "tone only", "eng-ref", "offset"
+        "{:>4} {:>4} {:>4} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10}",
+        "key", "vel", "worse", "reference", "engine", "tone only", "eng-ref", "in that ch", "offset"
     );
-    for r in &readings {
+    for (cell, r) in cell_readings.iter().zip(&readings) {
+        let (which, worst) = worse(cell);
         println!(
-            "{:>4} {:>4} {:>9.2} {:>9.2} {:>9.2} {:>+9.2} {:>10}",
+            "{:>4} {:>4} {:>4} {:>9.2} {:>9.2} {:>9.2} {:>+9.2} {:>+9.2} {:>10}",
             r.key,
             r.midi_velocity,
+            CHANNELS[which],
             r.reference_db,
             r.engine_db,
             r.tone_db,
             r.engine_db - r.reference_db,
+            worst.engine_db - worst.reference_db,
             match (r.offset_db, r.verdict) {
                 (Some(db), _) => format!("{db:+.2}"),
                 (None, BalanceVerdict::Floor) => "floor".to_string(),
@@ -316,10 +410,45 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let (imbalance, imbalance_abs) = column(&|r| r.engine_db - r.reference_db);
     let (tone_only, tone_only_abs) = column(&|r| r.tone_db - r.reference_db);
     println!(
-        "\nengine minus reference: median {imbalance:+.2} dB, mean |·| {imbalance_abs:.2} dB \
-         over {} notes",
+        "\nengine minus reference on the mono sum: median {imbalance:+.2} dB, mean |·| \
+         {imbalance_abs:.2} dB over {} notes",
         readings.len()
     );
+    {
+        // The spread the fold-down hides: per cell, how far the worse
+        // loudspeaker is from the recording, and how far the two are from each
+        // other. On the instrument `DECISIONS.md` 392 opened on, the mono sum
+        // read -4.30 dB over the soprano line's pitches while the left channel
+        // read +5.05 and the right -2.60 — the fold-down asked for a *louder*
+        // event where the left channel asked for a much quieter one.
+        let column = |pick: &dyn Fn(&[BalanceReading; 3]) -> f64| -> (f64, f64) {
+            let mut v: Vec<f64> = cell_readings.iter().map(pick).filter(|x| x.is_finite()).collect();
+            v.sort_by(f64::total_cmp);
+            if v.is_empty() {
+                return (f64::NAN, f64::NAN);
+            }
+            (v[v.len() / 2], *v.last().expect("non-empty"))
+        };
+        let (worse_median, worse_max) =
+            column(&|c| (worse(c).1.engine_db - worse(c).1.reference_db).abs());
+        let (split_median, split_max) = column(&|c| (c[0].engine_db - c[1].engine_db).abs());
+        let (ref_split_median, ref_split_max) =
+            column(&|c| (c[0].reference_db - c[1].reference_db).abs());
+        let (l, r) = (
+            cell_readings.iter().filter(|c| worse(c).0 == 0).count(),
+            cell_readings.iter().filter(|c| worse(c).0 == 1).count(),
+        );
+        println!(
+            "  the worse loudspeaker of each note: |engine-ref| median {worse_median:.2} dB, \
+             worst {worse_max:.2} ({l} notes worse in L, {r} in R)"
+        );
+        println!(
+            "  and how far the two loudspeakers are from *each other*: engine median \
+             {split_median:.2} dB, worst {split_max:.2}; the recording's own {ref_split_median:.2} \
+             and {ref_split_max:.2} — this is the number the mono sum cannot carry, and the \
+             engine's must sit inside the recording's"
+        );
+    }
     println!(
         "the same with the event silenced: median {tone_only:+.2} dB, mean |·| {tone_only_abs:.2} dB \
          — the sign says which side of the piano the tonal attack is on"

@@ -300,6 +300,141 @@ impl NelderMead {
     }
 }
 
+impl NelderMead {
+    /// The same search as [`NelderMead::minimize`], visiting the same points in
+    /// the same order and stopping in the same place, with the evaluations of
+    /// one iteration handed over **as a batch**.
+    ///
+    /// # Why this exists
+    ///
+    /// `DECISIONS.md` 392. When one evaluation is a set of thirty renders, a
+    /// simplex is the serial bottleneck of the whole factory: measured on the
+    /// microphone fit, the compass and the grid parallelise perfectly across
+    /// candidates and the simplex does not, and a hundred and twenty serial
+    /// evaluations is eleven minutes of a fourteen-core machine running at
+    /// three and a half cores.
+    ///
+    /// # Why the answer does not move
+    ///
+    /// A Nelder-Mead iteration asks for at most three points — the reflection,
+    /// and then *either* the expansion *or* a contraction, which one depending
+    /// on the reflection's value. This computes all four candidates up front
+    /// and then applies the ordinary decision rule to the values it already
+    /// has, so the vertex that replaces the worst is **the same vertex** the
+    /// serial form would have chosen, bit for bit. `evaluations` counts what
+    /// the serial form would have spent, not what this spent, so
+    /// `max_evaluations` means the same thing and the two stop at the same
+    /// point; the speculative work is thrown away.
+    pub fn minimize_batched<F>(&self, start: &[f64], batch: F) -> Minimum
+    where
+        F: Fn(&[Vec<f64>]) -> Vec<f64> + Sync,
+    {
+        let n = start.len();
+        assert!(n > 0, "nothing to minimize over");
+        let clean = |v: f64| if v.is_finite() { v } else { f64::MAX };
+        let mut evaluations = 0usize;
+
+        // The initial simplex is n + 1 independent points.
+        let mut points: Vec<Vec<f64>> = vec![start.to_vec()];
+        for i in 0..n {
+            let mut point = start.to_vec();
+            point[i] += self.initial_step;
+            points.push(point);
+        }
+        let values = batch(&points);
+        evaluations += points.len();
+        let mut simplex: Vec<(Vec<f64>, f64)> = points
+            .into_iter()
+            .zip(values)
+            .map(|(p, v)| (p, clean(v)))
+            .collect();
+
+        let mut converged = false;
+        while evaluations < self.max_evaluations {
+            simplex.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let (best, worst) = (&simplex[0], &simplex[n]);
+            let spread = simplex
+                .iter()
+                .map(|(p, _)| {
+                    p.iter()
+                        .zip(&best.0)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0, f64::max)
+                })
+                .fold(0.0, f64::max);
+            if spread < self.tolerance
+                && (worst.1 - best.1).abs() <= self.tolerance * (1.0 + best.1.abs())
+            {
+                converged = true;
+                break;
+            }
+            let mut centroid = vec![0.0; n];
+            for (point, _) in &simplex[..n] {
+                for (c, p) in centroid.iter_mut().zip(point) {
+                    *c += p / n as f64;
+                }
+            }
+            let step = |factor: f64| -> Vec<f64> {
+                centroid
+                    .iter()
+                    .zip(&simplex[n].0)
+                    .map(|(c, w)| c + factor * (c - w))
+                    .collect()
+            };
+            // Reflection, expansion, outside contraction, inside contraction —
+            // every point the iteration could possibly ask for.
+            let trial = vec![step(1.0), step(2.0), step(0.5), step(-0.5)];
+            let value = batch(&trial).into_iter().map(clean).collect::<Vec<f64>>();
+            evaluations += trial.len();
+            let (reflected, reflected_value) = (trial[0].clone(), value[0]);
+            if reflected_value < simplex[0].1 {
+                simplex[n] = if value[1] < reflected_value {
+                    (trial[1].clone(), value[1])
+                } else {
+                    (reflected, reflected_value)
+                };
+            } else if reflected_value < simplex[n - 1].1 {
+                simplex[n] = (reflected, reflected_value);
+            } else {
+                let inside = reflected_value >= simplex[n].1;
+                let (contracted, contracted_value) = if inside {
+                    (trial[3].clone(), value[3])
+                } else {
+                    (trial[2].clone(), value[2])
+                };
+                if contracted_value < simplex[n].1.min(reflected_value) {
+                    simplex[n] = (contracted, contracted_value);
+                } else {
+                    // Shrink: n independent points, and so one more batch.
+                    let anchor = simplex[0].0.clone();
+                    let shrunk: Vec<Vec<f64>> = simplex[1..]
+                        .iter()
+                        .map(|(p, _)| {
+                            p.iter().zip(&anchor).map(|(x, b)| b + 0.5 * (x - b)).collect()
+                        })
+                        .collect();
+                    let values = batch(&shrunk);
+                    evaluations += shrunk.len();
+                    for (vertex, (p, v)) in
+                        simplex[1..].iter_mut().zip(shrunk.into_iter().zip(values))
+                    {
+                        *vertex = (p, clean(v));
+                    }
+                }
+            }
+        }
+
+        simplex.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let (point, value) = simplex.swap_remove(0);
+        Minimum {
+            point,
+            value,
+            evaluations,
+            converged,
+        }
+    }
+}
+
 /// Golden-section search for the minimum of a unimodal function on `[lo, hi]`.
 /// Returns the location and value.
 pub fn golden_section<F: FnMut(f64) -> f64>(

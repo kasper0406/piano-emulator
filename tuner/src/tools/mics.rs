@@ -99,7 +99,9 @@ use piano_tuner::estimate::mics::{
     fit_geometry, interchannel_lag, GeometryConfig, GeometryFit, KeyLag, LagConfig, MicGeometry,
 };
 use piano_tuner::numeric::NelderMead;
-use piano_tuner::realism::{self, StereoColumn, StereoImage, StereoItem};
+use piano_tuner::realism::{
+    self, ChannelColumn, ChannelItem, ChannelShape, StereoColumn, StereoImage, StereoItem,
+};
 use piano_tuner::sampler::SAMPLER_VERSION;
 use piano_tuner::realism::{Phrase, PHRASE_SET_VERSION};
 use piano_tuner::sampler::engine_events;
@@ -337,6 +339,11 @@ struct Row {
     alternate_lag: KeyLag,
     reference: StereoImage,
     alternate: StereoImage,
+    /// The same two takes' **per-channel** spectral shape
+    /// (`realism::channel_shape`), which is the board item 393 added and the
+    /// third term of this stage's objective.
+    reference_channels: ChannelShape,
+    alternate_channels: ChannelShape,
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +401,9 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             .cloned()
             .unwrap_or_else(|| "presets/salamander-c5.toml".into()),
     );
-    const STAGES: [&str; 6] = ["geometry", "profile", "coherence", "image", "modal", "band"];
+    const STAGES: [&str; 7] = [
+        "geometry", "profile", "coherence", "image", "modal", "band", "grid",
+    ];
     if let Some(unknown) = stages.iter().find(|s| !STAGES.contains(&s.as_str())) {
         return Err(format!(
             "unknown stage {unknown:?}; stages are {}",
@@ -462,6 +471,8 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 },
                 reference: realism::stereo_image_of(&reference)?,
                 alternate: realism::stereo_image_of(&alternate)?,
+                reference_channels: realism::channel_shape_of(&reference)?,
+                alternate_channels: realism::channel_shape_of(&alternate)?,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -708,6 +719,44 @@ from the shipped values: {value:.3}"
         }
         voicing = best;
     }
+    // ---- the throughput yardstick ----------------------------------------
+    //
+    // `modal_grid` alone: a **fixed** batch of [`MODAL_GRID_LO_HZ`] x
+    // [`MODAL_GRID_HI_HZ`] x [`MODAL_GRID_LIFT`] + 1 candidates, each one thirty
+    // key renders and six phrase renders. It is the one part of the fit whose
+    // cost is the same on every invocation and on every preset, which is what
+    // makes it the thing to time a change to the search's parallelism against —
+    // the compass and the simplex both change how many points they visit when
+    // the surface moves, so a wall time taken on them measures the surface as
+    // much as the machine. `DECISIONS.md` 392.
+    if wants("grid") && !(wants("band") || wants("modal")) {
+        let start = MicVoicing {
+            modal: Some(voicing.modal.unwrap_or(ModalBand {
+                lo_hz: PROFILE_LOBE_START_HZ,
+                hi_hz: PROFILE_LOBE_END_HZ,
+                lift: PROFILE_LOBE_LIFT,
+            })),
+            ..voicing
+        };
+        let feasible = Feasible::default();
+        let clock = std::time::Instant::now();
+        let best = modal_grid(&base, &rows, &phrases, start, &feasible);
+        let elapsed = clock.elapsed().as_secs_f64();
+        let cells = 1 + MODAL_GRID_LO_HZ.len() * MODAL_GRID_HI_HZ.len() * MODAL_GRID_LIFT.len();
+        println!(
+            "  grid: {cells} candidates x ({} keys + {} phrases) in {elapsed:.1} s \
+({:.2} s per candidate, {:.0} renders/s)",
+            rows.len(),
+            phrases.len(),
+            elapsed / cells as f64,
+            (cells * (rows.len() + phrases.len())) as f64 / elapsed,
+        );
+        if let Some(b) = best.modal {
+            println!("  grid best: {:.1}-{:.1} Hz x{:.3}", b.lo_hz, b.hi_hz, b.lift);
+        }
+        return Ok(());
+    }
+
     // ---- stage 3: the board's mode-controlled band ------------------------
     //
     // Started from what the recording's own profile says rather than from the
@@ -806,8 +855,8 @@ there {:.3} ms; the preset this replaces {:.3} ms)",
             .map_or(f64::NAN, |m| delay_residual(&rows, geometry_of(&m))),
     );
 
-    let before = columns_for(&base, &rows, FIT_VELOCITY);
-    let after = columns_for(&fitted, &rows, FIT_VELOCITY);
+    let (before, before_channels) = boards_for(&base, &rows, FIT_VELOCITY);
+    let (after, after_channels) = boards_for(&fitted, &rows, FIT_VELOCITY);
     println!(
         "\nSTEREO columns, {} recorded keys at v{FIT_VELOCITY} — before ({} red, {:.2} bars out, summed |err| {:.3}):\n{}",
         rows.len(),
@@ -823,6 +872,15 @@ there {:.3} ms; the preset this replaces {:.3} ms)",
         gate_excess(&after),
         band_error(&after),
         realism::stereo_report(&after)
+    );
+    println!(
+        "PER-CHANNEL columns, the same renders — before ({} red, {:.2} bars out) and after ({} red, {:.2} bars out):\n{}\n{}",
+        before_channels.iter().filter(|c| !c.pass).count(),
+        channel_excess(&before_channels),
+        after_channels.iter().filter(|c| !c.pass).count(),
+        channel_excess(&after_channels),
+        realism::channel_report(&before_channels),
+        realism::channel_report(&after_channels)
     );
 
     let phrases_before = phrase_columns(&base, &phrases);
@@ -1021,39 +1079,83 @@ fn modal_grid(
     // Item 363's objective, not the penalised one: the grid's job is to choose
     // a basin, and a ten-bar penalty turns the surface into an integer count of
     // red bands that no coarse grid can read. See the modal stage's own comment.
-    let floor_ms = delay_floor_ms(rows);
-    let objective = |v: MicVoicing| -> f64 {
-        let notes = columns_for_voicing(preset, rows, v, FIT_VELOCITY);
-        let value = gate_excess(&notes)
-            + gate_excess(&phrase_columns_for_voicing(preset, phrases, v))
-            + delay_excess(rows, geometry_of(&v), floor_ms);
-        if notes.iter().all(|c| c.items == 0 || c.pass) {
-            feasible.offer(v, value);
-        }
-        value
-    };
-    let mut best = start;
-    let mut score = objective(start);
-    println!("  grid: the profile's own reading scores {score:.3} bars out");
+    let objective = relaxed_objective(preset, rows, phrases, feasible);
+    // **Every cell at once.** The grid is a fixed, independent batch and
+    // nothing in it reads anything a sibling wrote, so it is one `par_iter`
+    // rather than sixty-five serial evaluations of a thirty-way one. See
+    // [`batch`].
+    let mut cells: Vec<MicVoicing> = vec![start];
     for &lo_hz in &MODAL_GRID_LO_HZ {
         for &hi_hz in &MODAL_GRID_HI_HZ {
             for &lift in &MODAL_GRID_LIFT {
-                let candidate = MicVoicing {
+                cells.push(MicVoicing {
                     modal: Some(ModalBand { lo_hz, hi_hz, lift }),
                     ..start
-                };
-                let value = objective(candidate);
-                if value < score {
-                    score = value;
-                    best = candidate;
-                    println!(
-                        "  grid: {lo_hz:.0}-{hi_hz:.0} Hz x{lift:.1} -> {score:.3} bars out"
-                    );
-                }
+                });
             }
         }
     }
+    let scored = batch(&cells, &objective);
+    println!("  grid: the profile's own reading scores {:.3} bars out", scored[0]);
+    let mut best = start;
+    let mut score = scored[0];
+    for (candidate, &value) in cells.iter().zip(&scored).skip(1) {
+        if value < score {
+            score = value;
+            best = *candidate;
+            let b = candidate.modal.expect("a grid cell always has a band");
+            println!(
+                "  grid: {:.0}-{:.0} Hz x{:.1} -> {score:.3} bars out",
+                b.lo_hz, b.hi_hz, b.lift
+            );
+        }
+    }
     best
+}
+
+/// Score a whole batch of candidates at once.
+///
+/// **The one structural thing that made this phase's fits affordable**
+/// (`DECISIONS.md` 392). Every objective evaluation here is already a thirty-way
+/// `par_iter` over the recorded keys and a six-way one over the phrases, and
+/// measured that reaches **3.6 cores of a 14-core machine**: thirty renders is
+/// a short queue with a long tail, and the six phrases at the end of it are a
+/// six-way queue. The searches around it, on the other hand, all evaluate
+/// *independent batches* — sixty-five grid cells, six compass probes, twenty-six
+/// diagonal neighbours — and running the batch in parallel fills the machine
+/// from the outside instead. Rayon's work stealing composes the two: the outer
+/// iterator hands out candidates, the inner ones subdivide whatever is left.
+fn batch(candidates: &[MicVoicing], objective: &(impl Fn(MicVoicing) -> f64 + Sync)) -> Vec<f64> {
+    candidates.par_iter().map(|&v| objective(v)).collect()
+}
+
+/// Item 363's objective — the two surfaces and the delay term, no penalty —
+/// noting every candidate that passes the gate outright. See [`Feasible`].
+fn relaxed_objective<'a>(
+    preset: &'a Preset,
+    rows: &'a [Row],
+    phrases: &'a [PhraseRow],
+    feasible: &'a Feasible,
+) -> impl Fn(MicVoicing) -> f64 + Sync + 'a {
+    let floor_ms = delay_floor_ms(rows);
+    move |v: MicVoicing| -> f64 {
+        let mut candidate = preset.clone();
+        candidate.voicing.mics = Some(v);
+        let (notes, channels) = boards_for(&candidate, rows, FIT_VELOCITY);
+        let value = gate_excess(&notes)
+            + channel_excess(&channels)
+            + pair_excess(&channels)
+            + gate_excess(&phrase_columns_for_voicing(preset, phrases, v))
+            + delay_excess(rows, geometry_of(&v), floor_ms);
+        if notes.iter().all(|c| c.items == 0 || c.pass)
+            && channels
+                .iter()
+                .all(|c| c.items == 0 || (c.pass && (c.pair_pass || !modal_channel_band(c))))
+        {
+            feasible.offer(v, value);
+        }
+        value
+    }
 }
 
 /// The best point with **no red band on the gate** that any search has seen.
@@ -1066,21 +1168,54 @@ fn modal_grid(
 /// move, which is the ordinary failure of a penalty method started at an
 /// infeasible point. Started instead at the best feasible point the relaxed
 /// pass walked past, it has somewhere to go.
+///
+/// A `Mutex` rather than a `Cell` because [`batch`] evaluates candidates on
+/// every core at once; the lock is taken once per *render set*, which is
+/// several seconds of work, so it costs nothing measurable. Ties are broken by
+/// the candidate's own numbers rather than by arrival order, so which thread
+/// gets there first cannot change the answer.
 #[derive(Default)]
 struct Feasible {
-    best: std::cell::Cell<Option<(MicVoicing, f64)>>,
+    best: std::sync::Mutex<Option<(MicVoicing, f64)>>,
 }
 
 impl Feasible {
     fn offer(&self, voicing: MicVoicing, score: f64) {
-        if self.best.get().map_or(true, |(_, s)| score < s) {
-            self.best.set(Some((voicing, score)));
+        let mut slot = self.best.lock().expect("the feasible set is never poisoned");
+        let better = match *slot {
+            None => true,
+            Some((held, s)) => (score, key_of(voicing)) < (s, key_of(held)),
+        };
+        if better {
+            *slot = Some((voicing, score));
         }
     }
 
     fn take(&self) -> Option<MicVoicing> {
-        self.best.get().map(|(v, _)| v)
+        self.best
+            .lock()
+            .expect("the feasible set is never poisoned")
+            .map(|(v, _)| v)
     }
+}
+
+/// A total order on a candidate, used only to break ties deterministically.
+fn key_of(v: MicVoicing) -> [f32; 8] {
+    let b = v.modal.unwrap_or(ModalBand {
+        lo_hz: 0.0,
+        hi_hz: 0.0,
+        lift: 0.0,
+    });
+    [
+        v.spacing_m,
+        v.height_m,
+        v.span_m,
+        v.width,
+        v.diffuse_coherence,
+        b.lo_hz,
+        b.hi_hz,
+        b.lift,
+    ]
 }
 
 /// The mode-controlled band's objective: item 363's two surfaces and its delay
@@ -1090,16 +1225,44 @@ fn modal_objective<'a>(
     preset: &'a Preset,
     rows: &'a [Row],
     phrases: &'a [PhraseRow],
-) -> impl Fn(MicVoicing) -> f64 + 'a {
+) -> impl Fn(MicVoicing) -> f64 + Sync + 'a {
     let floor_ms = delay_floor_ms(rows);
     move |v: MicVoicing| -> f64 {
-        let notes = columns_for_voicing(preset, rows, v, FIT_VELOCITY);
-        let reds = notes.iter().filter(|c| c.items > 0 && !c.pass).count();
+        let mut candidate = preset.clone();
+        candidate.voicing.mics = Some(v);
+        let (notes, channels) = boards_for(&candidate, rows, FIT_VELOCITY);
+        // Both boards of the authoritative surface are charged, and for the
+        // same reason: a red band on either is a statement the recording makes
+        // that the engine does not. The per-channel board is charged only in
+        // the two bands the mode-controlled lobe is allowed to act in — every
+        // other band of it is the pan-pot's and the pair geometry's, which this
+        // stage cannot move and must not be scored on. See
+        // [`MODAL_CHANNEL_BANDS`].
+        let reds = notes.iter().filter(|c| c.items > 0 && !c.pass).count()
+            + channels
+                .iter()
+                .filter(|c| c.items > 0 && modal_channel_band(c) && !(c.pass && c.pair_pass))
+                .count();
         gate_excess(&notes)
+            + channel_excess(&channels)
+            + pair_excess(&channels)
             + RED_BAND_PENALTY * reds as f64
             + gate_excess(&phrase_columns_for_voicing(preset, phrases, v))
             + delay_excess(rows, geometry_of(&v), floor_ms)
     }
+}
+
+/// The bands of the per-channel board the mode-controlled lobe is charged for
+/// being red in: the two it lives in.
+///
+/// `MIC_MODAL_HZ` lets a band be declared anywhere from 40 Hz to 2 kHz, but
+/// the fit's own bounds and the recording's profile put it inside 125-500, and
+/// outside that the per-channel column is measuring the pan-pot and the pair
+/// geometry — neither of which this stage's three knobs can move. Charging ten
+/// bars for a band nothing here can reach would make the objective a constant
+/// plus noise.
+fn modal_channel_band(c: &ChannelColumn) -> bool {
+    c.lo_hz >= 125.0 && c.hi_hz <= 500.0
 }
 
 /// Multiplicative steps the diagonal refinement tries, largest first.
@@ -1130,7 +1293,13 @@ fn modal_refine(
     let mut score = objective(best);
     for step in MODAL_REFINE_STEPS {
         loop {
-            let mut improved = false;
+            // The twenty-six neighbours are a batch, and a batch is one
+            // `par_iter` (see [`batch`]). Taking the *best* of the twenty-six
+            // rather than the first improvement is the textbook form of a
+            // pattern search anyway — it is what makes the positive basis the
+            // thing that decides the step, not the order the loops happen to
+            // be nested in.
+            let mut neighbours = Vec::with_capacity(26);
             for lo in [1.0 / step, 1.0, step] {
                 for hi in [1.0 / step, 1.0, step] {
                     for lift in [1.0 / step, 1.0, step] {
@@ -1141,18 +1310,23 @@ fn modal_refine(
                         Knob::ModalLo.set(&mut candidate, Knob::ModalLo.get(&best) * lo);
                         Knob::ModalHi.set(&mut candidate, Knob::ModalHi.get(&best) * hi);
                         Knob::ModalLift.set(&mut candidate, Knob::ModalLift.get(&best) * lift);
-                        let value = objective(candidate);
-                        if value < score - SEARCH_EPSILON {
-                            score = value;
-                            best = candidate;
-                            improved = true;
-                        }
+                        neighbours.push(candidate);
                     }
                 }
             }
-            if !improved {
+            let scored = batch(&neighbours, &objective);
+            let Some((i, &value)) = scored
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.total_cmp(b.1))
+            else {
+                break;
+            };
+            if value >= score - SEARCH_EPSILON {
                 break;
             }
+            score = value;
+            best = neighbours[i];
         }
         println!(
             "  refine x{step:.4}: {} -> {score:.3} bars out",
@@ -1183,17 +1357,7 @@ fn search(
     hard: bool,
     feasible: &Feasible,
 ) -> MicVoicing {
-    let floor_ms = delay_floor_ms(rows);
-    let plain = |v: MicVoicing| -> f64 {
-        let notes = columns_for_voicing(preset, rows, v, FIT_VELOCITY);
-        let value = gate_excess(&notes)
-            + gate_excess(&phrase_columns_for_voicing(preset, phrases, v))
-            + delay_excess(rows, geometry_of(&v), floor_ms);
-        if notes.iter().all(|c| c.items == 0 || c.pass) {
-            feasible.offer(v, value);
-        }
-        value
-    };
+    let plain = relaxed_objective(preset, rows, phrases, feasible);
     // The geometry stages keep item 363's objective exactly; only the
     // mode-controlled band is fitted under the hard gate, and only after a
     // relaxed pass has chosen the basin. See [`RED_BAND_PENALTY`].
@@ -1237,7 +1401,7 @@ const SEARCH_ROUNDS: usize = 4;
 
 /// One compass pass: axis-aligned, in log coordinates, halving the step.
 fn compass(
-    objective: &impl Fn(MicVoicing) -> f64,
+    objective: &(impl Fn(MicVoicing) -> f64 + Sync),
     best: &mut MicVoicing,
     score: &mut f64,
     free: &[Knob],
@@ -1245,7 +1409,10 @@ fn compass(
     let mut step = SEARCH_STEP;
     let mut evaluations = 1usize;
     while step > SEARCH_FLOOR {
-        let mut improved = false;
+        // One step of the compass is `2 * free.len()` probes around one point,
+        // and they do not depend on one another: [`batch`] runs them at once
+        // and the step takes the best of them.
+        let mut probes: Vec<MicVoicing> = Vec::with_capacity(2 * free.len());
         for &knob in free {
             for direction in [1.0, -1.0] {
                 let mut candidate = *best;
@@ -1253,15 +1420,19 @@ fn compass(
                 if knob.get(&candidate) == knob.get(best) {
                     continue;
                 }
-                let value = objective(candidate);
-                evaluations += 1;
-                if value < *score - SEARCH_EPSILON {
-                    *score = value;
-                    *best = candidate;
-                    improved = true;
-                }
+                probes.push(candidate);
             }
         }
+        let scored = batch(&probes, objective);
+        evaluations += probes.len();
+        let improved = match scored.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)) {
+            Some((i, &value)) if value < *score - SEARCH_EPSILON => {
+                *score = value;
+                *best = probes[i];
+                true
+            }
+            _ => false,
+        };
         if !improved {
             step *= 0.5;
         }
@@ -1286,7 +1457,7 @@ modal {} -> {score:.3} bars out ({evaluations} sets rendered)",
 /// difference make nearly the same side signal — and so, at the other end of
 /// the spectrum, do the mode-controlled band's lower edge and its lift.
 fn polish(
-    objective: &impl Fn(MicVoicing) -> f64,
+    objective: &(impl Fn(MicVoicing) -> f64 + Sync),
     best: &mut MicVoicing,
     score: &mut f64,
     free: &[Knob],
@@ -1304,7 +1475,14 @@ fn polish(
         }
         candidate
     };
-    let minimum = simplex.minimize(&start, |p| objective(voicing_at(p)));
+    // The simplex's own points, a batch at a time: see
+    // [`NelderMead::minimize_batched`]. It visits the same points in the same
+    // order and stops in the same place; what changes is that a set of thirty
+    // renders no longer waits for the set before it.
+    let minimum = simplex.minimize_batched(&start, |points| {
+        let candidates: Vec<MicVoicing> = points.iter().map(|p| voicing_at(p)).collect();
+        batch(&candidates, objective)
+    });
     let polished = voicing_at(&minimum.point);
     let value = objective(polished);
     println!(
@@ -1369,17 +1547,98 @@ fn phrase_columns_for_voicing(
 
 /// The stereo columns of one preset against the reference rows.
 fn columns_for(preset: &Preset, rows: &[Row], velocity: u8) -> Vec<StereoColumn> {
-    let items: Vec<StereoItem> = rows
+    boards_for(preset, rows, velocity).0
+}
+
+/// **Both boards off one set of renders**: the coherence columns
+/// ([`realism::stereo_columns`]) and the per-channel spectral columns
+/// ([`realism::channel_columns`]).
+///
+/// One pass rather than two, because the second board costs a forward FFT pair
+/// on a signal that has just been rendered and rendering is the whole cost —
+/// and because two passes could not be guaranteed to be scoring the same
+/// samples.
+fn boards_for(
+    preset: &Preset,
+    rows: &[Row],
+    velocity: u8,
+) -> (Vec<StereoColumn>, Vec<ChannelColumn>) {
+    let rendered: Vec<(StereoImage, ChannelShape)> = rows
         .par_iter()
-        .map(|r| StereoItem {
+        .map(|r| {
+            let audio = render_engine(preset, r.key, velocity);
+            (
+                realism::stereo_image_of(&audio).expect("two channels"),
+                realism::channel_shape_of(&audio).expect("two channels"),
+            )
+        })
+        .collect();
+    let images: Vec<StereoItem> = rows
+        .iter()
+        .zip(&rendered)
+        .map(|(r, (image, _))| StereoItem {
             label: r.label.clone(),
-            engine: realism::stereo_image_of(&render_engine(preset, r.key, velocity))
-                .expect("two channels"),
+            engine: image.clone(),
             reference: r.reference.clone(),
             alternate: r.alternate.clone(),
         })
         .collect();
-    realism::stereo_columns(&items)
+    let shapes: Vec<ChannelItem> = rows
+        .iter()
+        .zip(&rendered)
+        .map(|(r, (_, shape))| ChannelItem {
+            label: r.label.clone(),
+            engine: shape.clone(),
+            reference: r.reference_channels.clone(),
+            alternate: r.alternate_channels.clone(),
+        })
+        .collect();
+    (
+        realism::stereo_columns(&images),
+        realism::channel_columns(&shapes),
+    )
+}
+
+/// The per-channel board's exceedance, in the same currency [`gate_excess`]
+/// uses: `sum over bands of max(0, |err| / bar - margin)`.
+///
+/// **In the objective from item 393 on, and it is the term that decides where
+/// in the basin the band stops.** The coherence columns cannot see it — `r0`
+/// is normalised per channel and the mid-over-side ratio is a sum — so a fit
+/// made on them alone is free to buy its correlation with a band that puts one
+/// loudspeaker 9 dB up and the other 20 dB down, and the fit that shipped
+/// did exactly that.
+/// **The loudness half of the per-channel board**, in the two bands the lobe
+/// acts in: how far the pair's own energy against the take's mono fold-down is
+/// from the recording's, in units of the recording's repeatability.
+///
+/// It is the one term of this objective that is not a *shape*. `dev_L` and
+/// `dev_R` are both referenced to the take's own mono spectrum, and `r0` and
+/// the mid-over-side ratio are both ratios inside the pair, so a lobe that
+/// doubles the acoustic energy the two loudspeakers put in the room while
+/// leaving the fold-down alone moves none of them — which is exactly what
+/// `DECISIONS.md` 392 found and what three listening complaints heard. Only
+/// the modal bands are charged, for [`modal_channel_band`]'s reason: outside
+/// them this is the pan-pot's and the geometry's number.
+fn pair_excess(columns: &[ChannelColumn]) -> f64 {
+    columns
+        .iter()
+        .filter(|c| {
+            modal_channel_band(c)
+                && c.pair_balance.is_finite()
+                && c.pair_bar.is_finite()
+                && c.pair_bar > 0.0
+        })
+        .map(|c| (c.pair_balance.abs() / c.pair_bar - PASS_MARGIN).max(0.0))
+        .sum()
+}
+
+fn channel_excess(columns: &[ChannelColumn]) -> f64 {
+    columns
+        .iter()
+        .filter(|c| c.error.is_finite() && c.bar.is_finite() && c.bar > 0.0)
+        .map(|c| (c.error / c.bar - PASS_MARGIN).max(0.0))
+        .sum()
 }
 
 /// **The objective: how far outside the recording's own repeatability the
@@ -1565,6 +1824,8 @@ fn held_out_rows(
                 alternate_lag: r.alternate_lag,
                 reference: realism::stereo_image_of(&reference)?,
                 alternate: realism::stereo_image_of(&alternate)?,
+                reference_channels: realism::channel_shape_of(&reference)?,
+                alternate_channels: realism::channel_shape_of(&alternate)?,
             })
         })
         .collect()

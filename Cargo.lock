@@ -322,6 +322,7 @@ dependencies = [
  "hound",
  "piano-emulator",
  "piano-tuner",
+ "rayon",
  "rustfft",
 ]
 

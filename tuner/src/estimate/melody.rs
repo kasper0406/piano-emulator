@@ -26,7 +26,7 @@
 //! rather than the note; the harmony goes for the same reason and one more —
 //! keys 36-55 would put their own texture into the window.
 //!
-//! # The three numbers, per note
+//! # The numbers, per note
 //!
 //! Measured identically on the engine's render and on the recordings', over the
 //! same window of the same note, which is what lets the two lines be quoted
@@ -37,6 +37,17 @@
 //! | `roughness` | [`Series::irregularity`] over the note's own partials, dB | the drawn `notes.partial_gains` row — a jagged series is a *table* by construction, `COMPASS.md`'s own argument |
 //! | `wobble` | median over partials of the RMS of that partial's dB envelope about its own straight-line decay | the drawn `notes.false_beat` splits — a split makes one partial's envelope oscillate where nothing else in the engine can |
 //! | `hf` | 2-6 kHz share of the note's total power, dB | brilliance, at absolute frequency (`DECISIONS.md` 292), because texture that changed a note's colour would be heard as one note being brighter |
+//! | `strike` | attack tonality of the first 30 ms, dB — how loud the mechanism is against the note (`DECISIONS.md` 340-341) | a **balance**, scored against the recording rather than against the line's own trend |
+//! | `channel` | [`pair_over_mono_db`]: `10 log10((E_L + E_R) / 2 E_M)` over the note's window | **the only column here that is not a mono fold-down** (`DECISIONS.md` 392-394) — what the two loudspeakers put in the room against what this note's own mono sum says they do |
+//!
+//! `channel` exists because the other four cannot exist without it. All four
+//! are computed on `(L+R)/2`, as is every other board in this repository, and
+//! so is every number the factory closes on — which means a stereo stage can
+//! make one note of a melody **four decibels louder in the room than its
+//! neighbours** and leave all of them unmoved. That is not hypothetical: the
+//! virtual microphone pair's mode-controlled lobe read +6.42 dB at C4 against
+//! +2.41 at F4, a listener picked C4 out of this very line three milestones
+//! running, and 696 tests were green throughout.
 //!
 //! `wobble` is not [`motion::Motion::beat_depth_db`], which `COMPASS.md` uses,
 //! and it cannot be: `motion.rs` measures over 0.3-3.0 s and a melody gives one
@@ -230,19 +241,21 @@ pub const LADDER_REACH: u8 = 9;
 pub const ALLOWANCE: f64 = 1.25;
 
 /// Names in the order [`NoteTexture::values`] returns them.
-pub const METRICS: [&str; 4] = ["roughness", "wobble", "hf", "strike"];
+pub const METRICS: [&str; 5] = ["roughness", "wobble", "hf", "strike", "channel"];
 
 /// Which of [`METRICS`] is a **balance** rather than an evenness, and is
 /// therefore gated on a different question.
 ///
-/// `DECISIONS.md` 341. The first three ask *does one note of the line stand out
-/// from the rest*, which is the listener's complaint of item 284 and needs no
-/// recording of the note to answer. `strike` asks *is the mechanism as loud
-/// against the note as the piano's is*, which is a comparison with a recording
-/// and only means anything at a key the library recorded — so it is scored on
-/// the recorded ladder and not on the line, and its bar is the distance between
-/// two takes of one recorded key rather than the scatter of the register.
-pub const METRIC_IS_BALANCE: [bool; 4] = [false, false, false, true];
+/// `DECISIONS.md` 341, 394. The first three ask *does one note of the line
+/// stand out from the rest*, which is the listener's complaint of item 284 and
+/// needs no recording of the note to answer. `strike` asks *is the mechanism as
+/// loud against the note as the piano's is* and `channel` asks *do the two
+/// loudspeakers play this note as the piano's two channels do* — both are
+/// comparisons with a recording and only mean anything at a key the library
+/// recorded, so both are scored on the recorded ladder and not on the line, and
+/// their bar is built out of two takes of one recorded key rather than out of
+/// the scatter of the register.
+pub const METRIC_IS_BALANCE: [bool; 5] = [false, false, false, true, true];
 
 /// What `DECISIONS.md` 340's refit moved `[noise.strike]` by, kept here so that
 /// the instrument the `strike` column fails on can be built from the shipped
@@ -257,6 +270,9 @@ pub const STRIKE_VELOCITY_DB_BEFORE: f32 = 24.401_855;
 
 /// The index of `strike` in [`METRICS`].
 pub const STRIKE_METRIC: usize = 3;
+
+/// The index of `channel` in [`METRICS`].
+pub const CHANNEL_METRIC: usize = 4;
 
 // ---------------------------------------------------------------------------
 // The line
@@ -459,7 +475,7 @@ pub fn line_keys() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// The three numbers
+// The numbers, per note
 // ---------------------------------------------------------------------------
 
 /// What one note of the line sounds like, in the three ways this gate reads.
@@ -487,17 +503,38 @@ pub struct NoteTexture {
     /// number in both windows and only the head column is scored — a tail has
     /// no strike in it.
     pub strike_db: f64,
+    /// **What the two loudspeakers do with this note, against what its own mono
+    /// sum does**: `10 log10((E_L + E_R) / 2 E_M)` over the note's window,
+    /// where `E_M` is the energy of `(L+R)/2`.
+    ///
+    /// `DECISIONS.md` 392-394. Zero for any signal whose two channels are its
+    /// mono sum scaled — a pan-potted note reads 0.00 at every key — and the
+    /// recording's own is not zero, because two capsules over a real
+    /// soundboard hear a note at two levels. It is the **loudness** column the
+    /// other four do not have: `roughness`, `wobble` and `hf` are shapes and
+    /// `strike` is a ratio, all four are computed on the mono fold-down, and
+    /// "that note stands out" is a statement about level in the room. On the
+    /// instrument this column was written for it read **+6.42 dB at C4 against
+    /// +2.41 at F4** where the recording's own five pitches sit inside a
+    /// decibel of each other.
+    pub channel_db: f64,
 }
 
 impl NoteTexture {
-    pub fn values(&self) -> [f64; 4] {
-        [self.roughness_db, self.wobble_db, self.hf_db, self.strike_db]
+    pub fn values(&self) -> [f64; 5] {
+        [
+            self.roughness_db,
+            self.wobble_db,
+            self.hf_db,
+            self.strike_db,
+            self.channel_db,
+        ]
     }
 }
 
 /// Which part of a note a column reads.
 ///
-/// The same three metrics, the same code, two windows. [`Window::Head`] is the
+/// The same metrics, the same code, two windows. [`Window::Head`] is the
 /// prompt sound — where a `partial_gains` row and a hammer's colour live.
 /// [`Window::Tail`] is what is left of the note afterwards, which is where a
 /// `partial_sigma_scale` row lives and where the C4 of `DECISIONS.md` 330 was
@@ -533,12 +570,15 @@ impl Window {
 /// difference between the two columns is never a difference in where they
 /// looked.
 pub fn measure_line(
-    mono: &[f32],
+    audio: &Audio,
     sample_rate: f64,
     notes: &[LineNote],
     partial_hz: &dyn Fn(u8) -> Vec<f64>,
     window: Window,
 ) -> Vec<NoteTexture> {
+    let mono = audio.mono();
+    let stereo = (audio.channel_count() >= 2)
+        .then(|| (&audio.channels[0], &audio.channels[1]));
     let (from_s, to_s) = window.span_s();
     let stft = Stft::new(StftConfig::new(HF_WINDOW, HF_WINDOW / 4, HF_WINDOW).expect("valid"))
         .expect("valid");
@@ -546,10 +586,11 @@ pub fn measure_line(
         .iter()
         .filter(|n| n.measurable())
         .map(|note| {
-            let strike = note_onset(mono, sample_rate, note.onset_s);
+            let strike = note_onset(&mono, sample_rate, note.onset_s);
             let lo = ((strike + from_s) * sample_rate) as usize;
             let hi = (((strike + to_s) * sample_rate) as usize).min(mono.len());
-            let slice = &mono[lo.min(hi)..hi];
+            let (lo, hi) = (lo.min(hi), hi);
+            let slice = &mono[lo..hi];
             let hz = partial_hz(note.key);
             let series = Series::measure(slice, &hz, sample_rate);
             NoteTexture {
@@ -558,10 +599,39 @@ pub fn measure_line(
                 roughness_db: series.irregularity(),
                 wobble_db: wobble(slice, sample_rate, &hz, &series),
                 hf_db: hf_share_db(&stft, slice, sample_rate),
-                strike_db: crate::estimate::attack::noise_to_tone_db(mono, strike, sample_rate),
+                strike_db: crate::estimate::attack::noise_to_tone_db(&mono, strike, sample_rate),
+                channel_db: match stereo {
+                    // A signal with one channel *is* its own mono sum, so the
+                    // column is zero rather than absent: it is the same
+                    // statement a pan-pot makes.
+                    None => 0.0,
+                    Some((left, right)) => pair_over_mono_db(
+                        &left[lo.min(left.len())..hi.min(left.len())],
+                        &right[lo.min(right.len())..hi.min(right.len())],
+                        slice,
+                    ),
+                },
             }
         })
         .collect()
+}
+
+/// `10 log10((E_L + E_R) / 2 E_M)` over one window — the column
+/// [`NoteTexture::channel_db`] carries.
+///
+/// The factor of two is what makes a mono-equivalent pair read **0.00**:
+/// `E_L = E_R = E_M` there, so the ratio is one. Above zero the two
+/// loudspeakers between them are radiating more than the mono fold-down says
+/// they are, which is what a side signal is; and every mono board in this
+/// repository is a function of that fold-down, so this is precisely the part
+/// none of them can see.
+pub fn pair_over_mono_db(left: &[f32], right: &[f32], mono: &[f32]) -> f64 {
+    let energy = |s: &[f32]| s.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>();
+    let (pair, mid) = (energy(left) + energy(right), energy(mono));
+    if mid.is_nan() || pair.is_nan() || mid <= 0.0 || pair <= 0.0 {
+        return f64::NAN;
+    }
+    10.0 * (pair / (2.0 * mid)).log10()
 }
 
 /// Where the strike actually is, near where the phrase says it is.
@@ -651,13 +721,13 @@ fn hf_share_db(stft: &Stft, window: &[f32], sample_rate: f64) -> f64 {
 /// Median rather than mean because the notes are played into the tail of the
 /// one before them and how much tail there is depends on where in the phrase a
 /// note falls; the median over six occurrences is the note, not the phrasing.
-pub fn per_key(textures: &[NoteTexture]) -> Vec<(u8, [f64; 4])> {
+pub fn per_key(textures: &[NoteTexture]) -> Vec<(u8, [f64; 5])> {
     let mut keys: Vec<u8> = textures.iter().map(|t| t.key).collect();
     keys.sort_unstable();
     keys.dedup();
     keys.into_iter()
         .map(|key| {
-            let mut out = [0.0; 4];
+            let mut out = [0.0; 5];
             for (m, slot) in out.iter_mut().enumerate() {
                 let mut values: Vec<f64> = textures
                     .iter()
@@ -853,7 +923,7 @@ pub fn compare(
         // once and in the window that contains it.
         .filter(|&(m, _)| !(METRIC_IS_BALANCE[m] && window == Window::Tail))
         .map(|(m, &metric)| {
-            let residuals = |rows: &[(u8, [f64; 4])]| -> Vec<f64> {
+            let residuals = |rows: &[(u8, [f64; 5])]| -> Vec<f64> {
                 let points: Vec<(f64, f64)> =
                     rows.iter().map(|&(k, v)| (f64::from(k), v[m])).collect();
                 let (slope, intercept) = theil_sen(&points);
@@ -957,7 +1027,29 @@ pub fn compare(
                 .map(|p| p.take_delta)
                 .filter(|d| d.is_finite())
                 .collect();
-            let balance_bar = median(&mut takes) * ALLOWANCE;
+            // **Two terms, and the second one is why this bar is honest for a
+            // statistic the recording repeats exactly.** The take-to-take
+            // distance is the right floor when it is the limit of the
+            // measurement — `strike` reads 1.64 dB between two velocity layers
+            // of one key, because how much hammer noise a take has is a
+            // property of that take. `channel` does not: the two layers are the
+            // *same two microphones on the same key*, so the ratio of what they
+            // hear repeats to **0.03 dB**, and a bar of 0.04 dB would be a bar
+            // on the recording's dither. What the question can actually be
+            // asked to is the second term — how well nine keys pin a median
+            // that moves by `sigma` across them — which is
+            // `realism::StereoColumn`'s `uncertainty` exactly, and for the same
+            // reason (`DECISIONS.md` 348, 394). The larger of the two governs,
+            // so nothing about `strike` moves: its register sigma over nine
+            // keys is smaller than its 1.64 dB take floor.
+            let mut spread: Vec<f64> = population_rows
+                .iter()
+                .map(|p| p.reference_residual.abs())
+                .filter(|d| d.is_finite())
+                .collect();
+            let n = spread.len().max(1) as f64;
+            let register_sigma = 1.4826 * median(&mut spread) / n.sqrt();
+            let balance_bar = median(&mut takes).max(register_sigma) * ALLOWANCE;
             let gated_on_balance = METRIC_IS_BALANCE[m];
 
             Column {
@@ -996,16 +1088,16 @@ pub fn compare(
 /// recordings, and the recordings' neighbouring velocity layer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lines {
-    pub engine: Vec<(u8, [f64; 4])>,
-    pub reference: Vec<(u8, [f64; 4])>,
-    pub layer: Vec<(u8, [f64; 4])>,
+    pub engine: Vec<(u8, [f64; 5])>,
+    pub reference: Vec<(u8, [f64; 5])>,
+    pub layer: Vec<(u8, [f64; 5])>,
 }
 
 impl Lines {
     pub fn new(
-        engine: Vec<(u8, [f64; 4])>,
-        reference: Vec<(u8, [f64; 4])>,
-        layer: Vec<(u8, [f64; 4])>,
+        engine: Vec<(u8, [f64; 5])>,
+        reference: Vec<(u8, [f64; 5])>,
+        layer: Vec<(u8, [f64; 5])>,
     ) -> Self {
         Lines {
             engine,
@@ -1285,19 +1377,19 @@ mod tests {
         columns.into_iter().filter(|c| !c.gated_on_balance).collect()
     }
 
-    /// Five pitches, three metrics, on a rising register trend of `slope` per
+    /// Five pitches, every metric alike, on a rising register trend of `slope` per
     /// semitone; `bump` is added to the engine's C4 alone.
     fn lines(bump: f64, slope: f64) -> Lines {
         let keys = [60u8, 62, 64, 65, 67];
-        let reference: Vec<(u8, [f64; 4])> = keys
+        let reference: Vec<(u8, [f64; 5])> = keys
             .iter()
-            .map(|&k| (k, [slope * f64::from(k - 60); 4]))
+            .map(|&k| (k, [slope * f64::from(k - 60); 5]))
             .collect();
         // The neighbouring velocity layer: the piano again, on its own line.
         let layer = reference.clone();
         // The engine is the same line 3 dB smoother — a voicing offset — plus a
         // bump on one note.
-        let mut engine: Vec<(u8, [f64; 4])> = reference
+        let mut engine: Vec<(u8, [f64; 5])> = reference
             .iter()
             .map(|&(k, v)| (k, v.map(|x| x - 3.0)))
             .collect();
@@ -1314,14 +1406,14 @@ mod tests {
         // interpolation lands, and the median offset is still zero.
         const PATTERN: [f64; 9] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.0];
         let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
-        let engine: Vec<(u8, [f64; 4])> = keys
+        let engine: Vec<(u8, [f64; 5])> = keys
             .iter()
-            .map(|&k| (k, [slope * (f64::from(k) - 60.0) - offset; 4]))
+            .map(|&k| (k, [slope * (f64::from(k) - 60.0) - offset; 5]))
             .collect();
-        let reference: Vec<(u8, [f64; 4])> = keys
+        let reference: Vec<(u8, [f64; 5])> = keys
             .iter()
             .zip(PATTERN)
-            .map(|(&k, p)| (k, [slope * (f64::from(k) - 60.0) + scatter * p; 4]))
+            .map(|(&k, p)| (k, [slope * (f64::from(k) - 60.0) + scatter * p; 5]))
             .collect();
         let mut layer = reference.clone();
         layer[5].1 = layer[5].1.map(|x| x + take);
@@ -1402,10 +1494,10 @@ mod tests {
         // a median over nine reads that as zero.
         let takes = |offset: f64, take: f64| -> Lines {
             let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
-            let engine: Vec<(u8, [f64; 4])> =
-                keys.iter().map(|&k| (k, [-offset; 4])).collect();
-            let reference: Vec<(u8, [f64; 4])> = keys.iter().map(|&k| (k, [0.0; 4])).collect();
-            let layer: Vec<(u8, [f64; 4])> = keys.iter().map(|&k| (k, [take; 4])).collect();
+            let engine: Vec<(u8, [f64; 5])> =
+                keys.iter().map(|&k| (k, [-offset; 5])).collect();
+            let reference: Vec<(u8, [f64; 5])> = keys.iter().map(|&k| (k, [0.0; 5])).collect();
+            let layer: Vec<(u8, [f64; 5])> = keys.iter().map(|&k| (k, [take; 5])).collect();
             Lines::new(engine, reference, layer)
         };
         let line = lines(4.0, 0.0);
@@ -1436,15 +1528,34 @@ mod tests {
         assert!(off.balance < 0.0);
     }
 
+    /// **A tail carries none of the balance metrics**, and the count is
+    /// derived from [`METRIC_IS_BALANCE`] rather than written down, because
+    /// the version of this test that wrote `METRICS.len() - 1` went red the
+    /// day item 394 added a second balance metric — `channel` — and stayed red
+    /// while saying nothing about the rule it was there to pin.
+    ///
+    /// The rule is the one at [`compare`]'s own filter: a balance metric is
+    /// scored against the recording's own value at the same note, and the tail
+    /// window is 0.5-2.0 s after a strike, where neither a hammer's burst nor
+    /// two capsules' view of one is still the thing being measured.
     #[test]
     fn a_tail_has_no_strike_in_it() {
         let line = lines(0.0, 0.0);
         let pop = population(0.0, 0.0, 0.0, 0.0);
         let head = compare(Window::Head, &line, &pop, &salamander_keys());
         let tail = compare(Window::Tail, &line, &pop, &salamander_keys());
+        let balances = METRIC_IS_BALANCE.iter().filter(|&&b| b).count();
+        assert!(balances >= 2, "this test stops meaning anything at one");
         assert_eq!(head.len(), METRICS.len());
-        assert_eq!(tail.len(), METRICS.len() - 1);
-        assert!(tail.iter().all(|c| c.metric != "strike"));
+        assert_eq!(tail.len(), METRICS.len() - balances);
+        for (m, &is_balance) in METRIC_IS_BALANCE.iter().enumerate() {
+            assert_eq!(
+                tail.iter().any(|c| c.metric == METRICS[m]),
+                !is_balance,
+                "{} is in the tail and should not be, or is not and should be",
+                METRICS[m]
+            );
+        }
     }
 
     #[test]

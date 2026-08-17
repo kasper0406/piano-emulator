@@ -3082,6 +3082,469 @@ engine peak \\|r\\| @ lag | reference peak \\|r\\| @ lag | engine M/S | referenc
     s
 }
 
+// ---------------------------------------------------------------------------
+// Per-channel spectral fidelity
+// ---------------------------------------------------------------------------
+
+/// **What each loudspeaker plays, as a spectrum, against what the recording's
+/// own two channels play** — the dimension every other board in this repository
+/// is blind to (`DECISIONS.md` 392-393).
+///
+/// # Why it had to exist
+///
+/// Every scoreboard here scores a **mono sum**, deliberately, and
+/// [`stereo_image`] — the one exception — scores a *correlation*: `r0`, the peak
+/// |r| and its lag, and the mid-over-side ratio. None of the four is a
+/// **spectrum of one channel**, and a correlation is blind to level by
+/// construction (it is normalised per channel). So a stage that leaves the mono
+/// sum bit-identical and matches `r0` band for band can still put one channel
+/// 9 dB up and the other 20 dB down at a particular frequency, and *nothing*
+/// scores it. That is not hypothetical: the virtual microphone pair's
+/// mode-controlled lobe did exactly that, a listener heard it three separate
+/// ways — a melody note standing out, the hammers too loud, the reference more
+/// brilliant — and all three were invisible to 696 green tests.
+///
+/// # The statistic
+///
+/// Per band, per channel, **the channel's own share of its own broadband
+/// energy, minus the same take's mono share of the same band**:
+///
+/// ```text
+/// dev_L(b) = 10 log10( E_L(b) / E_L ) − 10 log10( E_M(b) / E_M )      M = (L+R)/2
+/// ```
+///
+/// Three properties, and each one is load-bearing:
+///
+/// * **It is a shape, not a level.** A gain on the whole take cancels, and so
+///   does a gain on one channel — both terms are referenced to their own
+///   broadband. So it needs no level match, and it cannot be passed or failed
+///   by the output gain, which is fitted elsewhere.
+/// * **It is exactly zero for a pan-pot**, at every band, because a pan-potted
+///   pair's two channels *are* the mono sum scaled. So the number is a pure
+///   measure of what a stereo stage did to each channel's spectrum, referenced
+///   to the thing every other board already scores.
+/// * **The recording has its own, and it is not zero** — two capsules over a
+///   real soundboard see different spectra. So the target is the recording's
+///   value, and the bar is the recording disagreeing with itself, exactly as in
+///   [`stereo_columns`]. Nothing here is fitted to the engine.
+///
+/// Measured on the chords phrase at 250-500 Hz the three takes read: engine
+/// **+4.49**, recording **+1.34**, and a pan-pot **+0.70** — and the engine's
+/// own mono is identical to the pan-pot's sample for sample, which is the whole
+/// point.
+#[derive(Clone, Copy, Debug)]
+pub struct ChannelBand {
+    pub name: &'static str,
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    /// `dev_L`, dB: the left channel's spectral shape against the take's own
+    /// mono shape, in this band.
+    pub dev_left_db: f64,
+    /// `dev_R`, the same for the right channel.
+    pub dev_right_db: f64,
+    /// The two channels' own level difference in this band, dB (`L − R`).
+    ///
+    /// Not scored — it is a *position*, and where a note sits between two
+    /// capsules is the pan law's business — but printed, because it is the
+    /// number that separates "both channels lifted" from "one channel nulled",
+    /// and those are different repairs.
+    pub balance_db: f64,
+    /// **What the two loudspeakers put in the room against what this take's
+    /// own mono fold-down says they do**, dB: `10 log10((E_L + E_R) / 2 E_M)`,
+    /// in this band.
+    ///
+    /// It is [`estimate::melody::pair_over_mono_db`] per band rather than per
+    /// note, and it is the *loudness* dimension `dev_L`/`dev_R` cannot see:
+    /// both of those are shapes, referenced to the take's own mono spectrum, so
+    /// a stage that doubles the pair's energy at one frequency while leaving
+    /// the fold-down alone moves neither. Zero for any pan-potted signal, and
+    /// **not** zero for the recording — two capsules over a real plate do carry
+    /// more energy than their sum (`DECISIONS.md` 392, 395).
+    pub pair_db: f64,
+    /// This band's share of the whole take's energy, dB; see
+    /// [`STEREO_BAND_FLOOR_DB`].
+    pub level_db: f64,
+}
+
+impl ChannelBand {
+    /// Is there enough in this band for the ratio of two energies to mean
+    /// anything?
+    pub fn readable(&self) -> bool {
+        self.level_db.is_finite()
+            && self.level_db > STEREO_BAND_FLOOR_DB
+            && self.dev_left_db.is_finite()
+            && self.dev_right_db.is_finite()
+    }
+
+    /// The worse of the two channels, which is what the column scores: a stage
+    /// that ruins one loudspeaker and leaves the other alone has ruined the
+    /// image, and an average over the two would forgive it by half.
+    pub fn worse_db(&self) -> f64 {
+        if self.dev_left_db.abs() >= self.dev_right_db.abs() {
+            self.dev_left_db
+        } else {
+            self.dev_right_db
+        }
+    }
+}
+
+/// One take's per-channel spectral shape, band by band.
+#[derive(Clone, Debug)]
+pub struct ChannelShape {
+    pub broadband: ChannelBand,
+    pub bands: Vec<ChannelBand>,
+}
+
+fn channel_band(
+    a: &[Complex32],
+    b: &[Complex32],
+    sample_rate: f64,
+    band: Option<(&'static str, f64, f64)>,
+    totals: Option<([f64; 3], f64)>,
+) -> (ChannelBand, [f64; 3], f64) {
+    let n = a.len();
+    let mut acc = [0.0f64; 3];
+    let mut add = |j: usize| {
+        let (x, y) = (a[j], b[j]);
+        acc[0] += f64::from(x.norm_sqr());
+        acc[1] += f64::from(y.norm_sqr());
+        acc[2] += f64::from(((x + y) * 0.5).norm_sqr());
+    };
+    match band {
+        None => {
+            for j in 0..n {
+                add(j);
+            }
+        }
+        Some((_, lo, hi)) => {
+            let bin = |hz: f64| (hz * n as f64 / sample_rate).round() as usize;
+            let (blo, bhi) = (bin(lo).max(1), bin(hi).min(n / 2));
+            if bhi >= blo {
+                for j in blo..=bhi {
+                    add(j);
+                    if n - j != j {
+                        add(n - j);
+                    }
+                }
+            }
+        }
+    }
+    let scale = 1.0 / n as f64;
+    let e = [acc[0] * scale, acc[1] * scale, acc[2] * scale];
+    let (name, lo, hi) = band.unwrap_or(("broadband", 0.0, sample_rate / 2.0));
+    let pair = e[0] + e[1];
+    let (whole, whole_pair) = totals.unwrap_or((e, pair));
+    // Every one of these is a ratio of a band's energy to the *same signal's*
+    // whole energy, so a gain on that signal — on the take, or on one channel
+    // alone — cancels in both terms of the difference.
+    let share = |i: usize| 10.0 * (e[i] / whole[i].max(1e-300)).log10();
+    let (sl, sr, sm) = (share(0), share(1), share(2));
+    (
+        ChannelBand {
+            name,
+            lo_hz: lo,
+            hi_hz: hi,
+            dev_left_db: sl - sm,
+            dev_right_db: sr - sm,
+            pair_db: 10.0 * (pair / (2.0 * e[2]).max(1e-300)).log10(),
+            balance_db: 10.0 * (e[0] / e[1].max(1e-300)).log10(),
+            level_db: 10.0 * (pair / whole_pair.max(1e-300)).log10(),
+        },
+        e,
+        pair,
+    )
+}
+
+/// The per-channel spectral shape of one stereo signal: broadband and per
+/// [`STEREO_BANDS`], the same band set the rest of the stereo work scores on.
+pub fn channel_shape(left: &[f32], right: &[f32], sample_rate: f64) -> Result<ChannelShape> {
+    if left.is_empty() || right.is_empty() {
+        return Err(Error::Config("a channel shape needs two channels".into()));
+    }
+    // No lag search here and so no inverse transform: half the size
+    // [`stereo_image`] needs, and one forward pair is the whole cost.
+    let n = left.len().max(right.len()).next_power_of_two();
+    let mut planner = FftPlanner::<f32>::new();
+    let a = stereo_spectrum(left, n, &mut planner);
+    let b = stereo_spectrum(right, n, &mut planner);
+    let (broadband, totals, total_pair) = channel_band(&a, &b, sample_rate, None, None);
+    let bands = STEREO_BANDS
+        .iter()
+        .map(|&band| channel_band(&a, &b, sample_rate, Some(band), Some((totals, total_pair))).0)
+        .collect();
+    Ok(ChannelShape { broadband, bands })
+}
+
+/// [`channel_shape`] of an [`Audio`]'s first two channels.
+pub fn channel_shape_of(audio: &Audio) -> Result<ChannelShape> {
+    if audio.channel_count() < 2 {
+        return Err(Error::Config("a channel shape needs two channels".into()));
+    }
+    channel_shape(
+        &audio.channels[0],
+        &audio.channels[1],
+        f64::from(audio.sample_rate),
+    )
+}
+
+/// One thing — a phrase, or a key — measured three ways, as [`StereoItem`] is.
+#[derive(Clone, Debug)]
+pub struct ChannelItem {
+    pub label: String,
+    pub engine: ChannelShape,
+    pub reference: ChannelShape,
+    pub alternate: ChannelShape,
+}
+
+/// One band of the per-channel scoreboard, pooled over the items.
+#[derive(Clone, Debug)]
+pub struct ChannelColumn {
+    pub band: usize,
+    pub name: &'static str,
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    /// Median `dev_L` and `dev_R` over the items, all three takes.
+    pub engine_left_db: f64,
+    pub engine_right_db: f64,
+    pub reference_left_db: f64,
+    pub reference_right_db: f64,
+    pub alternate_left_db: f64,
+    pub alternate_right_db: f64,
+    /// **The score**: the worse of the two channels' `|engine − reference|`,
+    /// on the medians.
+    pub error: f64,
+    /// **The floor**: the identical statistic between the recording and its own
+    /// second take.
+    pub floor: f64,
+    /// Robust sigma of the reference's own worse-channel value across the items.
+    pub scatter: f64,
+    /// `scatter / sqrt(items)`.
+    pub uncertainty: f64,
+    /// `max(floor, uncertainty) · `[`STEREO_ALLOWANCE`].
+    pub bar: f64,
+    /// **The per-item distance**: the same worse-of-two-channels rule applied
+    /// key by key and then taken at the median, so a band that is right on
+    /// average and wrong at every key is visible here and nowhere else. This is
+    /// the column the melody's C4 lived in.
+    ///
+    /// It is gated — in the lobe's own two bands, and against
+    /// [`ChannelColumn::scatter`] rather than against [`Self::per_key_floor`].
+    /// The floor is the recording against its own second take, **0.11-0.19 dB**:
+    /// the same key through the same two capsules twice, which repeats almost
+    /// exactly. No microphone model with three fitted numbers can reproduce
+    /// *which* plate mode falls where at every one of thirty keys, and a bar
+    /// that demanded it would be a gate nobody could pass and therefore no gate
+    /// at all. What the recording's own **key-to-key** sigma is, on the other
+    /// hand, is a real ceiling and a measured one: it says the engine's
+    /// per-key disagreement with the recording must not exceed the spread the
+    /// recording itself has across keys. A lobe sitting half a cent from a
+    /// melody note (`DECISIONS.md` 392) leaves that ceiling; a per-key lottery
+    /// of the recording's own size does not. `DECISIONS.md` 395.
+    pub per_key_error: f64,
+    pub per_key_floor: f64,
+    /// `scatter · `[`STEREO_ALLOWANCE`] — the bar [`Self::per_key_error`] is
+    /// read against, and the reason is in that field's own comment.
+    pub per_key_bar: f64,
+    pub per_key_pass: bool,
+    /// Median [`ChannelBand::pair_db`] over the items, all three takes.
+    pub engine_pair_db: f64,
+    pub reference_pair_db: f64,
+    pub alternate_pair_db: f64,
+    /// **The loudness score**: the median over the items of the engine's
+    /// `pair_db` less the recording's, *signed*, because the recording has its
+    /// own value at every key and the question is whether the engine's is the
+    /// recording's — the `strike`/`channel` balance construction of
+    /// `estimate::melody`, on thirty keys instead of nine.
+    pub pair_balance: f64,
+    /// The same statistic between the recording and its own second take.
+    pub pair_floor: f64,
+    /// Robust sigma of the recording's own `pair_db` across the items.
+    pub pair_scatter: f64,
+    /// `max(pair_floor, pair_scatter / sqrt(items)) · `[`STEREO_ALLOWANCE`].
+    pub pair_bar: f64,
+    pub pair_pass: bool,
+    pub pass: bool,
+    pub items: usize,
+    pub worst: Option<(String, f64)>,
+}
+
+/// The per-channel scoreboard: one row per band, each loudspeaker's spectrum
+/// against the recording's own, with the recording's disagreement with itself
+/// beside it.
+///
+/// The construction is [`stereo_columns`]' exactly — median against median, bar
+/// out of the reference and its alternate take alone — so the two boards are
+/// read the same way and neither can be fitted to.
+pub fn channel_columns(items: &[ChannelItem]) -> Vec<ChannelColumn> {
+    STEREO_BANDS
+        .iter()
+        .enumerate()
+        .map(|(b, &(name, lo, hi))| {
+            let readable: Vec<&ChannelItem> = items
+                .iter()
+                .filter(|it| {
+                    it.engine.bands[b].readable()
+                        && it.reference.bands[b].readable()
+                        && it.alternate.bands[b].readable()
+                })
+                .collect();
+            let pick = |f: fn(&ChannelBand) -> f64, side: fn(&ChannelItem) -> &ChannelShape| {
+                readable
+                    .iter()
+                    .map(|it| f(&side(it).bands[b]))
+                    .collect::<Vec<f64>>()
+            };
+            fn engine(it: &ChannelItem) -> &ChannelShape {
+                &it.engine
+            }
+            fn reference(it: &ChannelItem) -> &ChannelShape {
+                &it.reference
+            }
+            fn alternate(it: &ChannelItem) -> &ChannelShape {
+                &it.alternate
+            }
+            let el = stereo_median(&pick(|x| x.dev_left_db, engine));
+            let er = stereo_median(&pick(|x| x.dev_right_db, engine));
+            let rl = stereo_median(&pick(|x| x.dev_left_db, reference));
+            let rr = stereo_median(&pick(|x| x.dev_right_db, reference));
+            let al = stereo_median(&pick(|x| x.dev_left_db, alternate));
+            let ar = stereo_median(&pick(|x| x.dev_right_db, alternate));
+            let error = (el - rl).abs().max((er - rr).abs());
+            let floor = (al - rl).abs().max((ar - rr).abs());
+            // The per-item distance uses the same "worse channel" rule item by
+            // item, so a key that is wrong in the left and a key that is wrong
+            // in the right both count.
+            let per_item = |side: fn(&ChannelItem) -> &ChannelShape| -> Vec<f64> {
+                readable
+                    .iter()
+                    .map(|it| {
+                        let x = side(it).bands[b];
+                        let r = it.reference.bands[b];
+                        (x.dev_left_db - r.dev_left_db)
+                            .abs()
+                            .max((x.dev_right_db - r.dev_right_db).abs())
+                    })
+                    .collect()
+            };
+            let errors = per_item(engine);
+            let floors = per_item(alternate);
+            // The loudness column: signed, per item, against the recording's
+            // own value at that key.
+            let pair_of = |side: fn(&ChannelItem) -> &ChannelShape| -> Vec<f64> {
+                readable
+                    .iter()
+                    .map(|it| side(it).bands[b].pair_db - it.reference.bands[b].pair_db)
+                    .collect()
+            };
+            let pair_balance = stereo_median(&pair_of(engine));
+            let pair_floor = stereo_median(&pair_of(alternate)).abs();
+            let pair_scatter = stereo_sigma(&pick(|x| x.pair_db, reference));
+            let pair_bar = pair_floor.max(if readable.is_empty() {
+                f64::NAN
+            } else {
+                pair_scatter / (readable.len() as f64).sqrt()
+            }) * STEREO_ALLOWANCE;
+            let scatter = stereo_sigma(&pick(ChannelBand::worse_db, reference));
+            let uncertainty = if readable.is_empty() {
+                f64::NAN
+            } else {
+                scatter / (readable.len() as f64).sqrt()
+            };
+            let bar = floor.max(uncertainty) * STEREO_ALLOWANCE;
+            let worst = errors
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, &d)| (readable[i].label.clone(), d));
+            ChannelColumn {
+                band: b,
+                name,
+                lo_hz: lo,
+                hi_hz: hi,
+                engine_left_db: el,
+                engine_right_db: er,
+                reference_left_db: rl,
+                reference_right_db: rr,
+                alternate_left_db: al,
+                alternate_right_db: ar,
+                error,
+                floor,
+                scatter,
+                uncertainty,
+                bar,
+                per_key_error: stereo_median(&errors),
+                per_key_floor: stereo_median(&floors),
+                per_key_bar: scatter * STEREO_ALLOWANCE,
+                per_key_pass: {
+                    let e = stereo_median(&errors);
+                    e.is_finite() && scatter.is_finite() && e <= scatter * STEREO_ALLOWANCE
+                },
+                engine_pair_db: stereo_median(&pick(|x| x.pair_db, engine)),
+                reference_pair_db: stereo_median(&pick(|x| x.pair_db, reference)),
+                alternate_pair_db: stereo_median(&pick(|x| x.pair_db, alternate)),
+                pair_balance,
+                pair_floor,
+                pair_scatter,
+                pair_bar,
+                pair_pass: pair_balance.is_finite()
+                    && pair_bar.is_finite()
+                    && pair_balance.abs() <= pair_bar,
+                pass: error.is_finite() && bar.is_finite() && error <= bar,
+                items: readable.len(),
+                worst,
+            }
+        })
+        .collect()
+}
+
+/// The per-channel table, as the boards print it and as the gate prints itself
+/// when it fails. One writer, for the reason [`stereo_report`] has one.
+pub fn channel_report(columns: &[ChannelColumn]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "| band | engine L / R | reference L / R | alternate L / R | \\|err\\| | bar | floor | \
+scatter | per-item \\|err\\| / floor | pair E / R | balance | bar | worst | n |"
+    );
+    let _ = writeln!(
+        s,
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
+    );
+    for c in columns {
+        let _ = writeln!(
+            s,
+            "| `{}` | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:.2} | {:.2}{} | \
+{:.2} | {:.2} | {:.2}{} / {:.2} | {:+.2} / {:+.2} | {:+.2}{} | {:.2} | {} | {} |",
+            c.name,
+            c.engine_left_db,
+            c.engine_right_db,
+            c.reference_left_db,
+            c.reference_right_db,
+            c.alternate_left_db,
+            c.alternate_right_db,
+            c.error,
+            c.bar,
+            if c.pass { "" } else { " **RED**" },
+            c.floor,
+            c.scatter,
+            c.per_key_error,
+            if c.per_key_pass { "" } else { "!" },
+            c.per_key_floor,
+            c.engine_pair_db,
+            c.reference_pair_db,
+            c.pair_balance,
+            if c.pair_pass { "" } else { " **RED**" },
+            c.pair_bar,
+            c.worst
+                .as_ref()
+                .map_or_else(|| "—".to_string(), |(k, d)| format!("{k} {d:.2}")),
+            c.items
+        );
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

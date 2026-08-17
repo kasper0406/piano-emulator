@@ -150,7 +150,8 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     let report = format!(
         "# The stereo image, heard\n\n\
-         *`piano-tuner stereo` — `PHYSICS.md` §8, `DECISIONS.md` 313-317 and 346-379.*\n\n\
+         *`piano-tuner stereo` — `PHYSICS.md` §8, `DECISIONS.md` 313-317, 346-379\n\
+         and 392-395.*\n\n\
          Every other board in `renders/` scores a **mono sum**, on purpose: a stereo\n\
          distance would mostly measure somebody else's microphones. This one is the\n\
          exception, and it exists because the largest single difference ever measured\n\
@@ -168,6 +169,15 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
          where the recording is **negative** — its difference is larger than its sum,\n\
          which is a soundboard's modes seen from two capsules that straddle a nodal\n\
          line, and which a mono fold-down throws away.\n\n\
+         The **fourth** table under each piece is `realism::channel_shape`, and it is\n\
+         there because the three above it are not enough: a correlation is normalised\n\
+         per channel and a mid-over-side ratio is a sum, so all three are blind to\n\
+         what one loudspeaker's own spectrum does. A stage can leave the mono sum\n\
+         bit-identical, match the recording's coherence band for band, and still put\n\
+         one speaker 9 dB up and the other 21 dB *down* at a single note's\n\
+         fundamental — which is what the mode-controlled band did until item 393, and\n\
+         what a listener reported three separate ways while every gate stayed green\n\
+         (item 392).\n\n\
          {sections}"
     );
     std::fs::write(out.join("STEREO.md"), &report)?;
@@ -221,6 +231,31 @@ fn section(phrase: &Phrase, takes: &[Take]) -> String {
         let _ = write!(s, "| {} |", take.title);
         for band in &image.bands {
             let _ = write!(s, " {:.2} @ {:+.2} |", band.peak_r.abs(), band.lag_ms);
+        }
+        let _ = writeln!(s);
+    }
+
+    // **What each loudspeaker plays**, which none of the three tables above
+    // can say: they are a correlation, a lag and a sum, and all three are
+    // blind to one channel's spectrum. See `realism::ChannelBand`.
+    let _ = write!(
+        s,
+        "\nPer-channel spectrum, dB — each channel's share of its own broadband \
+         energy minus the same take's mono share, `L / R`. **A pan-pot of one note \
+         reads 0.0 / 0.0**; anything else is what the stereo stage did to each \
+         loudspeaker, and it is the column three listening complaints turned out \
+         to live in (`DECISIONS.md` 392-394):\n\n\
+         | take | 63-125 | 125-250 | 250-500 | 500-2k | 2k-6k | 6k-12k |\n\
+         |---|---:|---:|---:|---:|---:|---:|\n"
+    );
+    let shapes: Vec<realism::ChannelShape> = takes
+        .iter()
+        .map(|t| realism::channel_shape_of(&t.audio).expect("two channels"))
+        .collect();
+    for (take, shape) in takes.iter().zip(&shapes) {
+        let _ = write!(s, "| {} |", take.title);
+        for band in &shape.bands {
+            let _ = write!(s, " {:+.2} / {:+.2} |", band.dev_left_db, band.dev_right_db);
         }
         let _ = writeln!(s);
     }

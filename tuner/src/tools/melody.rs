@@ -341,9 +341,9 @@ fn measure_phrase(
     let engine = render_engine(preset, phrase);
     let reference = render_reference(sfz, data, phrase, "reference", &phrase.events)?;
     let alt = render_reference(sfz, data, phrase, "alt-layer", &layers.shift(&phrase.events))?;
-    let engine_notes = melody::measure_line(&engine.mono(), sr, notes, &partial_hz, window);
-    let reference_notes = melody::measure_line(&reference.mono(), sr, notes, &partial_hz, window);
-    let layer_notes = melody::measure_line(&alt.mono(), sr, notes, &partial_hz, window);
+    let engine_notes = melody::measure_line(&engine, sr, notes, &partial_hz, window);
+    let reference_notes = melody::measure_line(&reference, sr, notes, &partial_hz, window);
+    let layer_notes = melody::measure_line(&alt, sr, notes, &partial_hz, window);
     Ok((
         melody::Lines::new(
             melody::per_key(&engine_notes),
@@ -518,20 +518,32 @@ engine.\n\n\
     }
     let _ = write!(
         out,
-        "\n## The balance\n\n\
-`DECISIONS.md` 341. `strike` asks a different question from the three above it, \
-so it is gated on a different number. The three ask *does one note of the line \
-stand out from the rest*, which the engine answers on its own and which needs no \
-recording of the note. This one asks *is the mechanism as loud against the note \
-as the piano's is against the same note*, which is a comparison with a recording \
-and therefore only means anything at a key the library recorded — so it is \
-scored on the **recorded ladder** and not on the line at all, as the median over \
-those keys of `engine - recording`.\n\n\
-Its bar is the median distance between **two takes of one recorded key** (the \
-same key out of the neighbouring velocity layer) times {:.2} — the same \
-velocity-layer floor `REALISM.md` quotes beside every cell, as a median because \
-the statistic it bounds is one. The evenness numbers are printed beside it and \
-are not gated.\n\n\
+        "\n## The balances\n\n\
+`DECISIONS.md` 341, 394. `strike` and `channel` ask a different question from \
+the three above them, so they are gated on a different number. The three ask \
+*does one note of the line stand out from the rest*, which the engine answers on \
+its own and which needs no recording of the note. These two ask *is the \
+mechanism as loud against the note as the piano's is* and *do the two \
+loudspeakers play this note as the piano's two channels do* — both comparisons \
+with a recording, and therefore only meaningful at a key the library recorded, \
+so both are scored on the **recorded ladder** and not on the line at all, as the \
+median over those keys of `engine - recording`.\n\n\
+`channel` is `10 log10((E_L + E_R) / 2 E_M)`: what the two loudspeakers put in \
+the room against what this note's own mono fold-down says they do. **It is the \
+only column on this board, or on any board in this repository, that is not a \
+function of that fold-down** — which is why a stereo stage could make C4 four \
+decibels louder in the room than its neighbours with every gate green \
+(`DECISIONS.md` 392).\n\n\
+The bar is the larger of two things, times {:.2}: the median distance between \
+**two takes of one recorded key** (the same key out of the neighbouring velocity \
+layer), which is the same velocity-layer floor `REALISM.md` quotes beside every \
+cell; and `1.4826·MAD / sqrt(n)` over the ladder, which is how well nine keys \
+pin a median that moves across them. The second term is there because the first \
+is not a floor for every statistic: `strike` reads 1.64 dB between two layers of \
+one key and `channel` reads **0.03**, because the two layers are the same two \
+microphones on the same key, and a bar of 0.04 dB would be a bar on the \
+recording's dither. The evenness numbers are printed beside both and are not \
+gated.\n\n\
 | metric | window | balance | bar | one key's two takes | verdict | evenness | at | of |\n\
 |---|---|--:|--:|--:|---|--:|---|--:|\n",
         melody::ALLOWANCE,

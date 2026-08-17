@@ -343,6 +343,17 @@ worse than the honest pan-pot it replaces, and there is no shortcut: the TU Berl
 ([arXiv:2307.02110](https://arxiv.org/abs/2307.02110)) covers 41 instruments and contains **no piano**. BiVib's three
 lid configurations (§5) are the nearest usable measurement.
 
+**What a stereo stage has to be scored on, learnt the hard way.** A mid-plus-side construction can leave the mono
+fold-down bit-identical *and* match the recording's interchannel correlation band for band *and* still be wrong, because
+neither of those is a per-channel spectrum: `r0` is normalised per channel by construction and mid-over-side is a sum.
+The mode-controlled band shipped in that state and a listener found it three separate ways — one melody note standing
+out, the mechanism too loud, the reference brighter — while 696 tests stayed green (`DECISIONS.md` 392). The column that
+sees it is `realism::channel_shape`, and the measurement that constrains the *mechanism* is the recording's own
+`| |L| − |R| |`: **2.5-4.5 dB median across 100-800 Hz, and no larger in the band where its two channels anti-correlate
+than where they agree**. A real pair over a mode-controlled plate has a large per-channel comb and no per-channel bias,
+so anything built here must be a decorrelation whose statistics match that, not an inversion that carves a fixed notch
+(items 393-394).
+
 **Evidence.** This is where `TUNING.md`'s stage-2 recording-chain absorber lands. Today that absorber is a 40-band
 static EQ that will happily swallow mic placement, lid and room in one curve. Splitting it into *mic geometry* +
 *room* (§9) and letting CMA-ES fit the geometry is strictly better: geometry has priors, an anonymous EQ has none.
