@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The appex's registration. PluginKit reads this; a host reads what PluginKit
+  publishes from it. The four-character codes are repeated in
+  `app/Shared/PianoIdentity.swift`, and `app/build.sh` fails the build if the
+  two disagree.
+
+  `sandboxSafe` is claimed honestly: an instrument that reads its presets from
+  its own bundle wants no filesystem, no network and no IOKit
+  (`DISTRIBUTION.md` §Plugin formats). App extensions must be sandboxed anyway
+  — PluginKit rejects a non-sandboxed appex outright — and the entitlements
+  beside this file say the same thing.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Piano Emulator</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT licence. Free and open source.</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>AudioComponents</key>
+			<array>
+				<dict>
+					<key>description</key>
+					<string>Physically modelled grand piano — modal synthesis, no samples</string>
+					<key>factoryFunction</key>
+					<string>PianoEmulatorAU.AudioUnitViewController</string>
+					<key>manufacturer</key>
+					<string>KsNi</string>
+					<key>name</key>
+					<string>Kasper Nielsen: Piano Emulator</string>
+					<key>sandboxSafe</key>
+					<true/>
+					<key>subtype</key>
+					<string>Pemu</string>
+					<key>tags</key>
+					<array>
+						<string>Synthesizer</string>
+						<string>Piano</string>
+					</array>
+					<key>type</key>
+					<string>aumu</string>
+					<key>version</key>
+					<integer>65536</integer>
+				</dict>
+			</array>
+		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.AudioUnit-UI</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>PianoEmulatorAU.AudioUnitViewController</string>
+	</dict>
+</dict>
+</plist>

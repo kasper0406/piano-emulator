@@ -1,0 +1,14 @@
+// The C ABI, as a Clang module, so Swift can `import CPianoEmulator`.
+//
+// `piano_emulator.h` is NOT copied here: it is referenced where it lives, in
+// `ffi/include/`, so there is exactly one header and a change to the Rust that
+// regenerates it cannot leave a stale copy behind for the Swift to compile
+// against. `pe_shim.h` is the only C written for the Swift side — see its own
+// comment for why it exists at all.
+//
+// SPDX-License-Identifier: MIT
+module CPianoEmulator {
+    header "../../../ffi/include/piano_emulator.h"
+    header "pe_shim.h"
+    export *
+}

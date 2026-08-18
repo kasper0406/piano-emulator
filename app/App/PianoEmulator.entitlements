@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The container app's sandbox. It reads its presets out of its own bundle, plays
+  audio out, and takes MIDI in through Core MIDI's server — none of which needs
+  an exception. There is no network entitlement, no user-selected-files
+  entitlement and no App Group: `SHIPPING.md`'s posture is free and offline, and
+  `DISTRIBUTION.md`'s App Group was for a preset importer that is M4's, not
+  this milestone's.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+</dict>
+</plist>

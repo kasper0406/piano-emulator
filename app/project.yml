@@ -1,0 +1,157 @@
+# project.yml — the Xcode project, generated rather than committed.
+#
+# XcodeGen (vendored honestly: `brew install xcodegen`, version 2.45 here)
+# builds `PianoEmulator.xcodeproj` from this file. The generated project is
+# gitignored, because a 4000-line pbxproj is not a thing a reviewer can read and
+# this is: three targets, one static library, one module map.
+#
+#   PianoEmulator     the container app — SwiftUI, hosts its own appex
+#   PianoEmulatorAU   the AUv3 app extension (aumu Pemu KsNi, sandboxSafe)
+#   ParityHarness     a command-line tool that renders through the AU's own
+#                     render block and hashes the result — no GUI, no host
+#
+# All three link `target/dist/libpiano_emulator_ffi.a` and see the C ABI through
+# `Support/CPianoEmulator/module.modulemap`. `build.sh` builds that library
+# first; nothing here can.
+#
+# SPDX-License-Identifier: MIT
+
+name: PianoEmulator
+
+options:
+  bundleIdPrefix: com.kaspernielsen
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "14.0"
+  developmentLanguage: en
+  groupSortPosition: top
+
+settings:
+  base:
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # The C ABI, as a Clang module. The header itself is not copied — see the
+    # module map.
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/Support/CPianoEmulator
+    HEADER_SEARCH_PATHS: $(SRCROOT)/Support/CPianoEmulator $(SRCROOT)/../ffi/include
+    LIBRARY_SEARCH_PATHS: $(SRCROOT)/../target/dist
+    # `cargo rustc -- --print native-static-libs` on the staticlib asks for
+    # exactly these; the frameworks come in with `cpal` and `coremidi`.
+    OTHER_LDFLAGS:
+      - -lpiano_emulator_ffi
+      - -lobjc
+      - -liconv
+      - -framework
+      - Foundation
+      - -framework
+      - CoreFoundation
+      - -framework
+      - CoreMIDI
+      - -framework
+      - CoreAudio
+      - -framework
+      - AudioUnit
+    # Ad-hoc, so the built app launches and PluginKit will look at it. A real
+    # signature is a separate step and lives in `build.sh`'s comment.
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO
+    # Without this Xcode injects `get-task-allow` into every ad-hoc signature,
+    # and the entitlements would then not be the two files in this directory.
+    # They are the claim `sandboxSafe = true` rests on, so they are exactly what
+    # is signed.
+    CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+    CLANG_ENABLE_MODULES: YES
+    GCC_C_LANGUAGE_STANDARD: c11
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+    GCC_TREAT_WARNINGS_AS_ERRORS: NO
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  PianoEmulatorAU:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: AUv3/Sources
+      - path: Shared
+      - path: ../presets/default.toml
+        buildPhase: resources
+      - path: ../presets/salamander-c5.toml
+        buildPhase: resources
+      - path: Support/CPianoEmulator
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_NAME: PianoEmulatorAU
+        PRODUCT_BUNDLE_IDENTIFIER: com.kaspernielsen.PianoEmulator.AUv3
+        INFOPLIST_FILE: AUv3/Info.plist
+        CODE_SIGN_ENTITLEMENTS: AUv3/PianoEmulatorAU.entitlements
+        SKIP_INSTALL: YES
+    dependencies:
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudioKit.framework
+
+  PianoEmulator:
+    type: application
+    platform: macOS
+    sources:
+      - path: App/Sources
+      - path: Shared
+      - path: ../presets/default.toml
+        buildPhase: resources
+      - path: ../presets/salamander-c5.toml
+        buildPhase: resources
+      - path: Support/CPianoEmulator
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_NAME: Piano Emulator
+        PRODUCT_MODULE_NAME: PianoEmulator
+        PRODUCT_BUNDLE_IDENTIFIER: com.kaspernielsen.PianoEmulator
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/PianoEmulator.entitlements
+        ENABLE_PREVIEWS: NO
+    dependencies:
+      - target: PianoEmulatorAU
+        embed: true
+        codeSign: true
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+
+  ParityHarness:
+    type: tool
+    platform: macOS
+    sources:
+      - path: ParityHarness
+      - path: Shared
+      - path: Support/CPianoEmulator
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_NAME: parity-harness
+        PRODUCT_MODULE_NAME: ParityHarness
+        SWIFT_STRICT_CONCURRENCY: minimal
+        CODE_SIGN_ENTITLEMENTS: ""
+    dependencies:
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+
+schemes:
+  PianoEmulator:
+    build:
+      targets:
+        PianoEmulator: all
+    run:
+      config: Debug
+  ParityHarness:
+    build:
+      targets:
+        ParityHarness: all
+    run:
+      config: Debug
