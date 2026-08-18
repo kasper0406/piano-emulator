@@ -226,7 +226,31 @@ const PROFILE_LOBE_LIFT: f32 = 1.5;
 // Material
 // ---------------------------------------------------------------------------
 
+/// The engine-render cache for this invocation, opened once by [`run`] before
+/// anything renders (`DECISIONS.md` 398). A `None` handle renders every time,
+/// which is what every other caller of `renders::` gets and is the behaviour
+/// this replaces.
+static ENGINE_CACHE: std::sync::OnceLock<piano_tuner::renders::EngineRenders> =
+    std::sync::OnceLock::new();
+
 fn render_engine(preset: &Preset, key: u8, velocity: u8) -> Audio {
+    // **Content-keyed on the whole input**, so a hit is the answer to exactly
+    // this question or it is not read: the preset's own TOML bytes, the engine
+    // fingerprinted by what it sounds like, and the material (`renders::`,
+    // `DECISIONS.md` 398). Measured on this file's own throughput yardstick —
+    // `--stage grid`, a fixed 65 candidates x (30 keys + 6 phrases) — **132.2 s
+    // cold against 92.7 s warm**, 2.03 s per candidate against 1.43. That is
+    // **1.43x** and not item 398's 8.3x, because only the *key* renders go
+    // through here: the six phrases per candidate are a different shape from
+    // `renders::NoteSpec` and are still rendered every time, and they are the
+    // long ones. Caching them is the obvious next thing and it is a change to
+    // `renders::`, not to this file.
+    if let Some(cache) = ENGINE_CACHE.get() {
+        return cache.note(
+            preset,
+            piano_tuner::renders::NoteSpec::new(key, velocity, PREROLL_S + RENDER_S, PREROLL),
+        );
+    }
     let events = [RenderEvent::new(
         PREROLL_S as f32,
         Event::NoteOn {
@@ -421,6 +445,9 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(2);
     }
+    // The engine-render cache, rooted beside the reference one. Opened before
+    // anything renders, so every render in this invocation goes through it.
+    let _ = ENGINE_CACHE.set(piano_tuner::renders::EngineRenders::at_data_root(&data));
     let base = Preset::load(&preset_path)?;
     let library = SampleLibrary::from_sfz(&sfz)?;
     let recorded = realism::RecordedKeys::from_library(&library)?;

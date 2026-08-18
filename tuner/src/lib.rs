@@ -45,6 +45,7 @@ pub mod numeric;
 pub mod pipeline;
 pub mod preset;
 pub mod realism;
+pub mod renders;
 pub mod residual;
 pub mod sampler;
 pub mod response;

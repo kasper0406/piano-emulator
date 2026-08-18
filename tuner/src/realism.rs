@@ -2430,6 +2430,53 @@ pub const STEREO_BANDS: [(&str, f64, f64); 6] = [
     ("6k-12k", 6_000.0, 12_000.0),
 ];
 
+/// **Sixth-octave bands over 100-800 Hz**: the resolution the mode-controlled
+/// band's own shape lives at.
+///
+/// [`STEREO_BANDS`] is one octave wide and that is right for everything it was
+/// built for — a correlation needs a band with several partials in it, and the
+/// six of them are `estimate::chain`'s own set. It is **too coarse for one
+/// thing**, and `DECISIONS.md` 403 is what that cost: a nodal band 0.96 octaves
+/// wide sits inside two scoreboard bands that are an octave each, so an angle
+/// that is right at the bottom of the band and eight decibels too large at the
+/// top averages out to a column that reads `-0.09` against a bar of `0.49` and
+/// calls itself green. The recording's own profile is not flat across an octave
+/// there either — its pair-over-mono runs `+9.4 dB at 180 Hz` down to `+1.7 at
+/// 320` — so an octave column is asking the engine to match an average of a
+/// shape rather than the shape.
+///
+/// A sixth of an octave is the resolution `forensics/src/bin/mono_mechanism.rs`
+/// measured the recording's profile at, and it is the coarsest one that
+/// resolves the two features the profile has: the fall through zero between 127
+/// and 180 Hz and the return between 254 and 320. The bands are geometric,
+/// centred on `100 x 2^(k/6)`, and their edges meet.
+///
+/// [`STEREO_BAND_FLOOR_DB`] is unchanged for them. A sixth-octave band holds
+/// about 8 dB less than an octave one on a flat spectrum, which is nowhere near
+/// the 60 dB the floor is there to exclude; what the floor removes is a band a
+/// signal has *nothing* in, and that is a property of the signal.
+pub const STEREO_FINE_BANDS: [(&str, f64, f64); 19] = [
+    ("100", 94.4, 106.0),
+    ("112", 105.9, 118.9),
+    ("126", 118.9, 133.5),
+    ("141", 133.4, 149.8),
+    ("159", 149.8, 168.2),
+    ("178", 168.2, 188.8),
+    ("200", 188.8, 211.9),
+    ("224", 211.9, 237.8),
+    ("252", 237.8, 266.9),
+    ("283", 266.9, 299.7),
+    ("317", 299.6, 336.3),
+    ("356", 336.3, 377.6),
+    ("400", 377.6, 423.8),
+    ("449", 423.8, 475.7),
+    ("504", 475.7, 533.9),
+    ("566", 533.9, 599.3),
+    ("635", 599.3, 672.7),
+    ("713", 672.7, 755.0),
+    ("800", 755.0, 847.4),
+];
+
 /// Silence before the strike in a single-key stereo render, in **samples**.
 ///
 /// Where the window a stereo image is read over *starts* is not a free choice,
@@ -3161,6 +3208,23 @@ pub struct ChannelBand {
     /// **not** zero for the recording — two capsules over a real plate do carry
     /// more energy than their sum (`DECISIONS.md` 392, 395).
     pub pair_db: f64,
+    /// **This band's share of the take's own mono fold-down**, dB:
+    /// `10 log10(E_M(b) / E_M)` with `M = (L + R)/2`.
+    ///
+    /// The plain mono spectral shape — the statistic every other board in this
+    /// repository is a form of — measured here on the same renders and against
+    /// the same recording as the per-channel columns, so that a stereo stage's
+    /// cost to the fold-down is visible *on the stereo board* rather than only
+    /// three boards away.
+    ///
+    /// It exists because the mode-controlled band stopped being free. Until
+    /// `DECISIONS.md` 392 the microphone section left `(L + R)/2` bit-identical
+    /// at every setting, so no mono statistic could move and none was needed
+    /// here; a nodal line that costs the mono sum what the pair gains
+    /// (`soundboard::ModalRotation`) makes it the other half of the trade, and a
+    /// fit that could see `pair_db` and not this one would buy the per-channel
+    /// board with the fold-down and call it progress.
+    pub mono_db: f64,
     /// This band's share of the whole take's energy, dB; see
     /// [`STEREO_BAND_FLOOR_DB`].
     pub level_db: f64,
@@ -3192,7 +3256,13 @@ impl ChannelBand {
 #[derive(Clone, Debug)]
 pub struct ChannelShape {
     pub broadband: ChannelBand,
+    /// Per [`STEREO_BANDS`].
     pub bands: Vec<ChannelBand>,
+    /// Per [`STEREO_FINE_BANDS`] — the same statistics at the resolution the
+    /// mode-controlled band's own shape lives at. Computed from the same two
+    /// spectra and against the same broadband totals, so a fine row and a
+    /// coarse row are the same measurement read at two widths.
+    pub fine: Vec<ChannelBand>,
 }
 
 fn channel_band(
@@ -3247,6 +3317,7 @@ fn channel_band(
             dev_left_db: sl - sm,
             dev_right_db: sr - sm,
             pair_db: 10.0 * (pair / (2.0 * e[2]).max(1e-300)).log10(),
+            mono_db: 10.0 * (e[2] / whole[2].max(1e-300)).log10(),
             balance_db: 10.0 * (e[0] / e[1].max(1e-300)).log10(),
             level_db: 10.0 * (pair / whole_pair.max(1e-300)).log10(),
         },
@@ -3272,7 +3343,15 @@ pub fn channel_shape(left: &[f32], right: &[f32], sample_rate: f64) -> Result<Ch
         .iter()
         .map(|&band| channel_band(&a, &b, sample_rate, Some(band), Some((totals, total_pair))).0)
         .collect();
-    Ok(ChannelShape { broadband, bands })
+    let fine = STEREO_FINE_BANDS
+        .iter()
+        .map(|&band| channel_band(&a, &b, sample_rate, Some(band), Some((totals, total_pair))).0)
+        .collect();
+    Ok(ChannelShape {
+        broadband,
+        bands,
+        fine,
+    })
 }
 
 /// [`channel_shape`] of an [`Audio`]'s first two channels.
@@ -3363,6 +3442,19 @@ pub struct ChannelColumn {
     /// `max(pair_floor, pair_scatter / sqrt(items)) · `[`STEREO_ALLOWANCE`].
     pub pair_bar: f64,
     pub pair_pass: bool,
+    /// Median [`ChannelBand::mono_db`] over the items, engine and recording.
+    pub engine_mono_db: f64,
+    pub reference_mono_db: f64,
+    /// **The fold-down score**: the median over the items of the engine's mono
+    /// share less the recording's, *signed*. Built exactly as
+    /// [`Self::pair_balance`] is, on the same items, so the two halves of what a
+    /// nodal line does — what the pair gains and what the sum loses — are read
+    /// in the same units against the same kind of bar.
+    pub mono_balance: f64,
+    pub mono_floor: f64,
+    pub mono_scatter: f64,
+    pub mono_bar: f64,
+    pub mono_pass: bool,
     pub pass: bool,
     pub items: usize,
     pub worst: Option<(String, f64)>,
@@ -3376,22 +3468,48 @@ pub struct ChannelColumn {
 /// out of the reference and its alternate take alone — so the two boards are
 /// read the same way and neither can be fitted to.
 pub fn channel_columns(items: &[ChannelItem]) -> Vec<ChannelColumn> {
-    STEREO_BANDS
+    channel_columns_over(items, &STEREO_BANDS, |s| &s.bands)
+}
+
+/// **The same board at sixth-octave resolution**, over [`STEREO_FINE_BANDS`].
+///
+/// Every column here is the identical statistic to [`channel_columns`]' — the
+/// same medians, the same bars out of the recording's own second take and its
+/// own key-to-key spread — read over a band a sixth of an octave wide instead
+/// of a whole one. It exists because two of the three things the per-channel
+/// board scores are *shapes over frequency* and an octave is wider than the
+/// shape: `DECISIONS.md` 403 measures the mode-controlled band overshooting the
+/// recording's pair-over-mono by up to 8 dB at the top of its own band while
+/// the octave column that contains it reads inside its bar, and the fold-down's
+/// cost hiding in the same average.
+pub fn channel_fine_columns(items: &[ChannelItem]) -> Vec<ChannelColumn> {
+    channel_columns_over(items, &STEREO_FINE_BANDS, |s| &s.fine)
+}
+
+/// One board over one band set. The two public boards differ only in which
+/// bands they read and which of [`ChannelShape`]'s two lists they read them
+/// from, so there is one implementation and no way for them to drift apart.
+fn channel_columns_over(
+    items: &[ChannelItem],
+    table: &[(&'static str, f64, f64)],
+    of: fn(&ChannelShape) -> &Vec<ChannelBand>,
+) -> Vec<ChannelColumn> {
+    table
         .iter()
         .enumerate()
         .map(|(b, &(name, lo, hi))| {
             let readable: Vec<&ChannelItem> = items
                 .iter()
                 .filter(|it| {
-                    it.engine.bands[b].readable()
-                        && it.reference.bands[b].readable()
-                        && it.alternate.bands[b].readable()
+                    of(&it.engine)[b].readable()
+                        && of(&it.reference)[b].readable()
+                        && of(&it.alternate)[b].readable()
                 })
                 .collect();
             let pick = |f: fn(&ChannelBand) -> f64, side: fn(&ChannelItem) -> &ChannelShape| {
                 readable
                     .iter()
-                    .map(|it| f(&side(it).bands[b]))
+                    .map(|it| f(&of(side(it))[b]))
                     .collect::<Vec<f64>>()
             };
             fn engine(it: &ChannelItem) -> &ChannelShape {
@@ -3418,8 +3536,8 @@ pub fn channel_columns(items: &[ChannelItem]) -> Vec<ChannelColumn> {
                 readable
                     .iter()
                     .map(|it| {
-                        let x = side(it).bands[b];
-                        let r = it.reference.bands[b];
+                        let x = of(side(it))[b];
+                        let r = of(&it.reference)[b];
                         (x.dev_left_db - r.dev_left_db)
                             .abs()
                             .max((x.dev_right_db - r.dev_right_db).abs())
@@ -3433,9 +3551,23 @@ pub fn channel_columns(items: &[ChannelItem]) -> Vec<ChannelColumn> {
             let pair_of = |side: fn(&ChannelItem) -> &ChannelShape| -> Vec<f64> {
                 readable
                     .iter()
-                    .map(|it| side(it).bands[b].pair_db - it.reference.bands[b].pair_db)
+                    .map(|it| of(side(it))[b].pair_db - of(&it.reference)[b].pair_db)
                     .collect()
             };
+            let mono_of = |side: fn(&ChannelItem) -> &ChannelShape| -> Vec<f64> {
+                readable
+                    .iter()
+                    .map(|it| of(side(it))[b].mono_db - of(&it.reference)[b].mono_db)
+                    .collect()
+            };
+            let mono_balance = stereo_median(&mono_of(engine));
+            let mono_floor = stereo_median(&mono_of(alternate)).abs();
+            let mono_scatter = stereo_sigma(&pick(|x| x.mono_db, reference));
+            let mono_bar = mono_floor.max(if readable.is_empty() {
+                f64::NAN
+            } else {
+                mono_scatter / (readable.len() as f64).sqrt()
+            }) * STEREO_ALLOWANCE;
             let pair_balance = stereo_median(&pair_of(engine));
             let pair_floor = stereo_median(&pair_of(alternate)).abs();
             let pair_scatter = stereo_sigma(&pick(|x| x.pair_db, reference));
@@ -3489,6 +3621,15 @@ pub fn channel_columns(items: &[ChannelItem]) -> Vec<ChannelColumn> {
                 pair_pass: pair_balance.is_finite()
                     && pair_bar.is_finite()
                     && pair_balance.abs() <= pair_bar,
+                engine_mono_db: stereo_median(&pick(|x| x.mono_db, engine)),
+                reference_mono_db: stereo_median(&pick(|x| x.mono_db, reference)),
+                mono_balance,
+                mono_floor,
+                mono_scatter,
+                mono_bar,
+                mono_pass: mono_balance.is_finite()
+                    && mono_bar.is_finite()
+                    && mono_balance.abs() <= mono_bar,
                 pass: error.is_finite() && bar.is_finite() && error <= bar,
                 items: readable.len(),
                 worst,
@@ -3505,17 +3646,19 @@ pub fn channel_report(columns: &[ChannelColumn]) -> String {
     let _ = writeln!(
         s,
         "| band | engine L / R | reference L / R | alternate L / R | \\|err\\| | bar | floor | \
-scatter | per-item \\|err\\| / floor | pair E / R | balance | bar | worst | n |"
+scatter | per-item \\|err\\| / floor | pair E / R | balance | bar | mono E / R | balance | bar | \
+worst | n |"
     );
     let _ = writeln!(
         s,
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
     );
     for c in columns {
         let _ = writeln!(
             s,
             "| `{}` | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:.2} | {:.2}{} | \
-{:.2} | {:.2} | {:.2}{} / {:.2} | {:+.2} / {:+.2} | {:+.2}{} | {:.2} | {} | {} |",
+{:.2} | {:.2} | {:.2}{} / {:.2} | {:+.2} / {:+.2} | {:+.2}{} | {:.2} | {:+.2} / {:+.2} | \
+{:+.2}{} | {:.2} | {} | {} |",
             c.name,
             c.engine_left_db,
             c.engine_right_db,
@@ -3536,6 +3679,11 @@ scatter | per-item \\|err\\| / floor | pair E / R | balance | bar | worst | n |"
             c.pair_balance,
             if c.pair_pass { "" } else { " **RED**" },
             c.pair_bar,
+            c.engine_mono_db,
+            c.reference_mono_db,
+            c.mono_balance,
+            if c.mono_pass { "" } else { " **RED**" },
+            c.mono_bar,
             c.worst
                 .as_ref()
                 .map_or_else(|| "—".to_string(), |(k, d)| format!("{k} {d:.2}")),

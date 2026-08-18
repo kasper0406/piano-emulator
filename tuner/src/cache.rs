@@ -294,6 +294,15 @@ pub fn calibration_dir(repo: &Path) -> PathBuf {
     repo.join("data").join("cache").join("calibration")
 }
 
+/// `<root>/cache/engine` for a data root of `<root>/salamander` — the
+/// **engine** renders, beside the reference ones. See [`crate::renders`].
+pub fn engine_dir(data: &Path) -> PathBuf {
+    data.parent()
+        .unwrap_or_else(|| Path::new("data"))
+        .join("cache")
+        .join("engine")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

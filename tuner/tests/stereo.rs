@@ -607,6 +607,30 @@ fn each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts() {
         realism::channel_report(&columns),
         realism::channel_report(&realism::channel_columns(&m.panned_channels))
     );
+    // **The same board at a sixth of an octave, printed first** — the resolution
+    // the mode-controlled band's own shape lives at (`realism::STEREO_FINE_BANDS`,
+    // `DECISIONS.md` 404). `pair_db` and `mono_db` are shapes over frequency,
+    // the band is 0.96 octaves wide, and the two scoreboard bands that contain
+    // it are an octave each — so an angle that is right at the band's bottom
+    // edge and eight decibels too large at its top averages into a column
+    // reading inside its bar. This board cannot average that away, and the
+    // control beside it is the same preset with `[voicing.mics.modal]` deleted,
+    // whose fold-down is the pan-pot's own to `f32` rounding: its distance from
+    // the recording **is** the headroom a nodal line has to spend.
+    //
+    // It is printed **before** the assertions and not asserted itself: this
+    // gate is the project's third documented red, so anything asserted under it
+    // never runs, and the point of this board is to be readable on exactly the
+    // run that fails. `DECISIONS.md` 404-406 is what it measured and what that
+    // refuted.
+    let fine = realism::channel_fine_columns(&m.channels);
+    let fine_bare = realism::channel_fine_columns(&m.without_modal_channels);
+    println!(
+        "the per-channel board at a sixth of an octave:\n{}\nand the same with the \
+mode-controlled band deleted, which is the headroom the fold-down has:\n{}",
+        realism::channel_report(&fine),
+        realism::channel_report(&fine_bare)
+    );
     let middle: Vec<&realism::ChannelColumn> = columns
         .iter()
         .filter(|c| c.items > 0 && c.lo_hz >= 125.0 && c.hi_hz <= 500.0)
