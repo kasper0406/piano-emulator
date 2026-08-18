@@ -81,10 +81,71 @@ pub const MIC_MODAL_HZ: (f32, f32) = (40.0, 2_000.0);
 
 /// Bound on [`ModalBand::lift`]. It is an amplitude ratio between the pair's
 /// difference and its sum inside the band, so **one is the null**: at one, the
-/// anti-phase copy exactly cancels one capsule in-band. The recording asks for
-/// `10^(3.5/20) = 1.5`; the ceiling is that with room, and it is a rail rather
-/// than a taste.
-pub const MIC_MODAL_LIFT: (f32, f32) = (0.0, 6.0);
+/// anti-phase copy exactly cancels one capsule in-band.
+///
+/// # The rail is one, and it is the whole of `DECISIONS.md` 417's disposition
+///
+/// The lobe is `side = s + B(mid)` with `B = lift · butterworth_band`, so per
+/// frequency `L = m(1 + B)` and `R = m(1 − B)`. **`B` is complex** — item 423,
+/// and the correction that item 392's `g = lift·|B|` shorthand cost two
+/// milestones — so a channel is inverted where `Re(1 ± B) < 0`, which needs
+/// `|B| > 1` and is therefore what the rail forbids, and a channel is *deep*
+/// where `1 ± B` is small, which needs `|B|` near **one** and is therefore what
+/// the rail invites. Two of item 392's three convictions stop existing at the
+/// rail and the third does not:
+///
+/// * **Channel inversion.** With `|B| > 1` the sign of `Re(1 ± B)` turns over,
+///   so one loudspeaker carries the note's fundamental *inverted* against the
+///   other — and because the twelfth-order cascade rotates phase by hundreds of
+///   degrees inside the band, **which** loudspeaker flips with pitch. On the
+///   pre-418 preset the left channel is inverted over **232.0-272.3 Hz** and
+///   the right over **316.0-357.4**, which is why item 392 measured the flip
+///   landing between D4 and D#4, in the middle of a tune: C4 read `L +0.70 /
+///   R +9.43` against F4's `L +7.17 / R −9.61`, and C4 and F4 sit one inside
+///   each span. At or under the rail `|B| <= 1`, neither channel's real part
+///   can turn, and there is no sign to flip.
+/// * **One-speaker nulls — and here the rail does the opposite of what item 418
+///   claimed, which is item 423's correction.** `B` is a **complex** filter
+///   response, not a gain, so `1 − B` is not `1 − |B|`: item 392's "unity
+///   crossings at 213.0 and 359.6 Hz, where one channel is nulled outright" are
+///   frequencies where `|B| = 1` and `arg B` is *not* zero, and
+///   `|1 − B| = 2|sin(arg B / 2)|` is not zero there. **No exact null has ever
+///   been expressible at any lift**, and neither this rail nor the old ceiling
+///   changes that. What both do change is where the *deep* loss sits, and the
+///   rail deepens it: `1 ± B` is smallest exactly when `|B|` is closest to one,
+///   so a lift of 0.99 across a wide flat band is a worse null than a lift of
+///   2.12 across a narrow one. Measured on the two presets over 40 Hz-4 kHz,
+///   the pre-418 lobe's deepest one-channel loss was **−20.5 dB at 349.8 Hz**
+///   (right) with either channel more than 10 dB down over **0.105 octaves**
+///   and never more than 26 dB down anywhere; the refit under this rail reaches
+///   **−33.1 dB at 221.4 Hz — in the *left* channel, at A3's own fundamental**
+///   — with either channel more than 10 dB down over **0.286 octaves in two
+///   zones** and more than 30 dB down over 0.009. So what this rail buys is the
+///   **sign**, in both channels, and not the depth; the depth is what
+///   `each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts`
+///   scores and is red on. A *smaller* lift does not buy it back either — item
+///   423 swept 0.75 and 0.50 on the shipped band and the coherence board goes
+///   from 0.224/0.214 bars out to 0.477/0.427 and 0.738/0.602 while the
+///   per-channel shape moves 2.39/2.47 to 2.68/2.05, red in both.
+/// * **Manufactured pair energy.** `|1 + B|² + |1 − B|² = 2(1 + |B|²)` exactly,
+///   whatever the phase — so this is the one of the three that the magnitude
+///   shorthand got right, and it is phase-independent. The pair carries
+///   `1 + |B|²` where the mono fold-down carries `1`: **+6.18 dB** of acoustic
+///   energy that is in neither the sum nor the source at the fitted lift of
+///   2.12, and **+2.94 dB realised** under the rail against its ceiling of
+///   +3.01 — half of it in decibels, and the most a nodal-line model of this
+///   shape can manufacture at all.
+///
+/// The recording asks for more than this — `10^(3.5/20) = 1.5` read straight
+/// off its own mid-over-side ratio — and item 417 is the measurement of why it
+/// may not be given it: the part of the recording's nodal band that a lift
+/// above the null would be chasing is its two capsules' **asymmetric
+/// placement** across the board's nodal lines (`dev_L − dev_R` to +5.85 dB at
+/// 178 Hz), which is one session's microphone stand and not a property of a
+/// piano. So the rail is where the physics of a symmetric pair stops, and what
+/// is above it is excluded from the target rather than bought with an
+/// inversion.
+pub const MIC_MODAL_LIFT: (f32, f32) = (0.0, 1.0);
 
 /// Section `Q`s of the mode-controlled lobe's lower edge: an **eighth-order
 /// Butterworth** highpass, as four second-order sections.
@@ -431,7 +492,13 @@ impl Biquad {
 /// pair sees against the sum it sees, so the measured mid/side ratio of
 /// **−3.5 dB** in the mode-controlled band *is* `lift = 10^(3.5/20) = 1.5`,
 /// read off the recording rather than searched for. Above one the difference is
-/// larger than the sum, which is what a pair straddling a nodal line is.
+/// larger than the sum, which is what a pair straddling a nodal line is — **and
+/// above one is also where one loudspeaker carries the note inverted against
+/// the other**, which is what a listener heard three ways and what item 417
+/// refused. Since `DECISIONS.md` 418 the lift is railed at one
+/// ([`MIC_MODAL_LIFT`]), so the recording's own reading of it is out of reach by
+/// **3.5 dB of side amplitude** and that shortfall is the frontier item 418
+/// records — not a fit that stopped early.
 ///
 /// The band's correlation does not simply rail at −1 the way a pure anti-phase
 /// copy would, because the diffuse term is still there and is incoherent with
@@ -1620,7 +1687,7 @@ mod tests {
             modal: Some(ModalBand {
                 lo_hz: 190.0,
                 hi_hz: 330.0,
-                lift: 2.4,
+                lift: 0.95,
             }),
             ..mic_voicing()
         }
@@ -1684,11 +1751,15 @@ mod tests {
         let lobe = Some(ModalBand {
             lo_hz: 190.0,
             hi_hz: 330.0,
-            lift: 2.4,
+            lift: 0.95,
         });
         // The last row is the mode-controlled band at the top of its own
-        // range: a lift of six on the board's difference is the largest thing
-        // this stage can put into the side, and the sum still may not move.
+        // range: a lift of one — `MIC_MODAL_LIFT.1`, item 418's rail, where the
+        // anti-phase copy exactly cancels one capsule in-band — is the largest
+        // thing this stage can put into the side, and the sum still may not
+        // move. It is the *hardest* row for this invariant and not the easiest:
+        // at the null one channel is zero and the whole signal is in the other,
+        // so `(L + R)/2` is carried by one summand alone.
         for (spacing, height, span, width, coherence, modal) in [
             (0.12f32, 0.30f32, 0.70f32, 1.0f32, 1.0f32, None),
             (0.60, 0.05, 1.50, 2.0, 4.0, lobe),
@@ -1978,16 +2049,37 @@ mod tests {
         assert!((ul - ur).abs() > 1e-3, "the two planes share a gain");
     }
 
-    /// **The finding, as an assertion.** The board's mode-controlled band puts
-    /// the two capsules in *opposition* where the modes are, and nowhere else.
+    /// **The finding, as an assertion.** The board's mode-controlled band takes
+    /// the two capsules apart where the modes are, and nowhere else.
     ///
     /// Three bands, one signal: noise through the board field alone, split into
     /// a decade below the lobe, the lobe itself, and a decade above it. Below
     /// and above, the pair reads what it read before the section existed;
-    /// inside, it reads **negative**, which no spacing, no delay and no
-    /// `sin(kd)/kd` can produce (`DECISIONS.md` 357).
+    /// inside, its coherence **collapses**, which no spacing, no delay and no
+    /// `sin(kd)/kd` can produce at these wavelengths (`DECISIONS.md` 357).
+    ///
+    /// # Re-pinned at item 418's rail, and what moved is the claim
+    ///
+    /// This test used to assert the *sign* — `inside < -0.1`, "not anti-phase"
+    /// — and that assertion was only ever passed by a lift **above one**. The
+    /// lobe is `L = m(1+g)`, `R = m(1−g)` with `g = lift·|B|`, so a negative
+    /// interchannel correlation at the band's own centre is exactly `1 − g < 0`
+    /// — one loudspeaker carrying the note inverted against the other, which is
+    /// item 392's convicted defect and item 417's reason for the rail. A test
+    /// that demanded it was a test that demanded the defect.
+    ///
+    /// What a legal lift produces instead is measured here rather than assumed:
+    /// with the fixture at `0.95` the in-band correlation reads **+0.476**
+    /// against the bare pair's **+0.995**, and below and above the band both
+    /// pairs read the same. So the surviving claim is the *collapse* and its
+    /// locality — a swing of about half a unit of correlation confined to the
+    /// band — and the sign is no longer available to any preset this schema
+    /// accepts. The mid-over-side ratio, which is the statistic the recording
+    /// is read on and the one the strike test below asserts, is untouched by
+    /// the re-pinning: it is `−20 log10 g` inside the band whatever the sign of
+    /// `1 − g`.
     #[test]
-    fn the_mode_controlled_band_is_anti_phase_and_only_there() {
+    fn the_mode_controlled_band_collapses_the_pairs_coherence_and_only_there() {
         let mv = mic_voicing_with_lobe();
         let band = mv.modal.expect("a lobe");
         let mut state = 0x1f3a_77c1u32;
@@ -2045,12 +2137,16 @@ mod tests {
             if has_lobe {
                 // A one-pole pair is a leaky probe — the band is 190-330 Hz and
                 // its skirts reach well past both edges — so the number here is
-                // milder than the sixth-octave profile's own -0.79 at 226 Hz.
-                // What has to be true is the *sign*, which nothing outside this
-                // section can produce.
+                // milder than the sixth-octave profile's own. What has to be
+                // true is that the pair stops being one signal twice, by a
+                // margin nothing outside this section reaches: the bare pair's
+                // own board field reads above +0.99 through the same probe, and
+                // `width` and `diffuse_coherence` at their rails do not take
+                // this band under +0.85 (the row above this test asserts that).
                 assert!(
-                    inside < -0.1,
-                    "{label}: the mode-controlled band reads {inside:+.3}, not anti-phase"
+                    inside < 0.6,
+                    "{label}: the mode-controlled band reads {inside:+.3} — the pair is still \
+                     coherent where the plate has a nodal line"
                 );
                 assert!(
                     below > 0.8,
@@ -2069,8 +2165,12 @@ mod tests {
             }
         }
         let swing = inside_both[1] - inside_both[0];
+        // Half a unit of correlation, where it used to be seven tenths. The
+        // difference is exactly the part of the old swing that lived above
+        // `g = 1`: the section can take the pair from coherent to uncorrelated
+        // and no longer from coherent to *inverted*. `DECISIONS.md` 418.
         assert!(
-            swing > 0.7,
+            swing > 0.4,
             "the section moved the band by {swing:.3}, from {:+.3} to {:+.3}",
             inside_both[1],
             inside_both[0]
@@ -2089,43 +2189,108 @@ mod tests {
     /// recording's own first 10 ms read `−1.6 dB` (`DECISIONS.md` 379).
     ///
     /// Two halves, and the first is the one the old form could not pass at all:
-    /// with the **board muted entirely** the pair must still oppose inside the
-    /// band, and with no lobe the same render is one signal twice.
+    /// with the **board muted entirely** the pair must still carry the nodal
+    /// line inside the band, and with no lobe the same render is one signal
+    /// twice.
+    ///
+    /// # The statistic is mid-over-side, and that is item 418's re-pinning
+    ///
+    /// Both halves used to read the interchannel *correlation* and assert that
+    /// it was negative. Under item 418's rail it cannot be: the lobe makes
+    /// `L = m(1+g)` and `R = m(1−g)`, so a negative correlation at the band's
+    /// centre is `g > 1` — one loudspeaker inverted against the other, item
+    /// 392's convicted defect, and the rail is exactly the boundary that
+    /// forbids it. Measured with the fixture clamped to `0.95`, the same two
+    /// probes read **+0.132** and **+0.132** where they used to read under
+    /// −0.5.
+    ///
+    /// So this test now reads the quantity `DECISIONS.md` 379 was written on
+    /// and the recording is scored on — **mid over side, in decibels, inside
+    /// the band** — which the rail does not touch: it is `−20 log10 g` whatever
+    /// the sign of `1 − g`, so a lift of 0.95 puts it at **+0.45 dB** and the
+    /// old 2.4 put it at **−7.6**, both of them "the side is at least as large
+    /// as the mid inside the band", and both of them a world away from the
+    /// bare pair's `+∞` (its side at pan zero, with the board muted, is
+    /// identically zero). The claim item 379 established survives verbatim:
+    /// the band acts on a note's *first milliseconds*, down the direct path,
+    /// because the FDN's shortest line is 149 samples and there is nothing else
+    /// there to act on. What does not survive is the sign, and it was never the
+    /// claim — it was the shape of the mechanism that carried it.
     #[test]
     fn the_mode_controlled_band_reaches_the_direct_path() {
         let with = mic_voicing_with_lobe();
         let band = with.modal.expect("a lobe");
         let centre = (f64::from(band.lo_hz) * f64::from(band.hi_hz)).sqrt() as f32;
 
+        /// Mid over side in decibels over a window: `10 log10(Σ m² / Σ s²)`,
+        /// with `m = (L+R)/2` and `s = (L−R)/2`. Positive is a pair that agrees
+        /// more than it differs; `+∞` (returned as a large finite number) is
+        /// one signal twice.
+        fn mid_over_side_db(l: &[f32], r: &[f32]) -> f64 {
+            let (mut m, mut s) = (0.0f64, 0.0f64);
+            for (&a, &b) in l.iter().zip(r) {
+                let (x, y) = (f64::from(a), f64::from(b));
+                m += 0.25 * (x + y) * (x + y);
+                s += 0.25 * (x - y) * (x - y);
+            }
+            if s <= 0.0 {
+                return 200.0;
+            }
+            10.0 * (m / s).log10()
+        }
+
         // (a) The direct path alone — the board contributes nothing at all.
         let mut lobed = Soundboard::with_mics(&voicing(), Some(&with));
         lobed.set_board_mix(0.0);
         let (l, r) = render_pair(&mut lobed, 0.0, 64, sine(centre));
-        let opposed = correlation(&l, &r);
+        let opposed = mid_over_side_db(&l, &r);
         let mut bare = Soundboard::with_mics(&voicing(), Some(&mic_voicing()));
         bare.set_board_mix(0.0);
         let (bl, br) = render_pair(&mut bare, 0.0, 64, sine(centre));
-        let coherent = correlation(&bl, &br);
+        let coherent = mid_over_side_db(&bl, &br);
         assert!(
-            coherent > 0.999,
-            "with no lobe and no board this is one signal twice, and it reads {coherent:+.3}"
+            coherent > 40.0,
+            "with no lobe and no board this is one signal twice, and it reads {coherent:+.2} dB \
+             mid over side"
         );
-        // Not −1: the run includes the decay after the source stops, where
-        // what is left is the cascade's own settling rather than the tone.
+        // Not exactly `−20 log10 0.95`: the run includes the decay after the
+        // source stops, where what is left is the cascade's own settling rather
+        // than the tone.
         assert!(
-            opposed < -0.5,
-            "the direct path does not carry the nodal line: {opposed:+.3} at {centre:.0} Hz"
+            opposed < 3.0,
+            "the direct path does not carry the nodal line: {opposed:+.2} dB mid over side at \
+             {centre:.0} Hz, against the bare pair's {coherent:+.2}"
         );
 
-        // (b) And it is opposed *from the strike*, not once the field has
-        //     built: the first 10 ms of a burst, board and all.
-        let mut struck = Soundboard::with_mics(&voicing(), Some(&with));
+        // (b) And it acts *from the strike*, not once the field has built: the
+        //     first 10 ms of a burst, board and all. This is the reading item
+        //     379 caught the FDN-only form on — `+9.9 dB` where the recording's
+        //     own first 10 ms read `−1.6`.
         let attack = (0.010 * SAMPLE_RATE) as usize;
+        let mut struck = Soundboard::with_mics(&voicing(), Some(&with));
         let (sl, sr) = render_pair(&mut struck, 0.0, 8, sine(centre));
-        let first = correlation(&sl[..attack], &sr[..attack]);
+        let first = mid_over_side_db(&sl[..attack], &sr[..attack]);
+        let mut struck_bare = Soundboard::with_mics(&voicing(), Some(&mic_voicing()));
+        let (bsl, bsr) = render_pair(&mut struck_bare, 0.0, 8, sine(centre));
+        let first_bare = mid_over_side_db(&bsl[..attack], &bsr[..attack]);
+        // **Nine decibels, and the number is item 379's own.** The FDN-only
+        // form this test was written to refuse read `+9.9 dB` here where the
+        // recording's own first 10 ms read `−1.6`, so a band that reaches the
+        // strike is a band that beats the form it replaced. The clamped fixture
+        // reads **+5.25 dB** against the direct path's own `+32.56` — the
+        // cascade's 6.3 ms of group delay is most of what is left, and item
+        // 418's rail costs about eight decibels of the rest (`20 log10(2.4 /
+        // 0.95)`), which is stated in that item's frontier rather than papered
+        // over with a threshold that happens to fit.
         assert!(
-            first < 0.0,
-            "the band is coherent through the strike: {first:+.3} over the first 10 ms"
+            first < 9.0,
+            "the band does not reach the strike: {first:+.2} dB mid over side over the first \
+             10 ms, against the bare pair's {first_bare:+.2} and the FDN-only form's +9.9"
+        );
+        assert!(
+            first_bare - first > 20.0,
+            "the section moved the strike window by {:.2} dB, from {first_bare:+.2} to {first:+.2}",
+            first_bare - first
         );
     }
 

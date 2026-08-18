@@ -226,13 +226,13 @@ share_tilt = 0.0
 spacing_m = 0.12631701
 height_m = 0.12
 span_m = 1.5
-width = 1.6262758
-diffuse_coherence = 3.4744656
+width = 1.6319119
+diffuse_coherence = 4.0994396
 
 [voicing.mics.modal]
-lo_hz = 229.42517
-hi_hz = 307.39163
-lift = 2.1242962
+lo_hz = 174.26439
+hi_hz = 456.49146
+lift = 0.99
 
 [hammer]
 velocity_min = 0.2

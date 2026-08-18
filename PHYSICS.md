@@ -354,6 +354,26 @@ than where they agree**. A real pair over a mode-controlled plate has a large pe
 so anything built here must be a decorrelation whose statistics match that, not an inversion that carves a fixed notch
 (items 393-394).
 
+**Where that line stopped, and what ships.** Five mechanisms were built against it and none landed: an allpass diffuser
+(393-397), an energy-conserving Givens rotation (399-406), a fitted radiated response between the partials (412-416),
+and a side-only injection (417). The last one is what closed the question, because it refuted the whole class rather
+than one member: the recording's nodal band is asymmetric **in level** between its two capsules — `dev_L − dev_R` up to
+**+5.85 dB at 178 Hz** — and no symmetric side source can move that statistic at all, while the successor form whose
+whole selling point was `|L| = |R|` is excluded by exactly that property. Matching it needs per-channel per-band gains,
+which is a model of where two microphones stood on one afternoon: a property of the reference, not of a piano, and
+refused by the same policy that refuses the room (§9) and the library's transposed notes (item 328). So it is
+**excluded from the target and printed as excluded** (`ChannelColumn::asymmetry`, half the reference spread — the floor
+any symmetric pair's worse-channel error has — this lobe is not symmetric, so that floor *sizes* the exclusion and
+item 417's policy is what justifies it, item 424), and what ships is the lobe with its lift railed at **one**, the null:
+above one the anti-phase copy changes sign, one loudspeaker carries the note inverted against the other and which one
+flips with pitch, and the pair manufactures up to +6.18 dB of energy the fold-down does not contain. At the rail that
+last number is +3.01 dB and the first two do not exist (items 417-418). **The per-channel level loss survives the rail
+and is deepened by it**, which is item 423's correction: the band's response `B` is complex, `1 ± B` is smallest where
+`|B|` is nearest *one*, so the deepest one-channel loss goes from −20.5 dB at 349.8 Hz on the pre-rail lobe to
+**−33.1 dB at 221.4 Hz in the left channel** under the rail. That residual, not the mechanism, is what the per-channel
+gate is red on, and the "unity crossings where one channel is nulled outright" of item 392 do not exist at any lift —
+at `|B| = 1` the loss is `2|sin(arg B / 2)|`, which is zero only if the phase is also zero.
+
 **Evidence.** This is where `TUNING.md`'s stage-2 recording-chain absorber lands. Today that absorber is a 40-band
 static EQ that will happily swallow mic placement, lid and room in one curve. Splitting it into *mic geometry* +
 *room* (§9) and letting CMA-ES fit the geometry is strictly better: geometry has priors, an anonymous EQ has none.

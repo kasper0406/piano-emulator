@@ -3373,7 +3373,7 @@ mod tests {
             modal: Some(ModalBand {
                 lo_hz: 190.0,
                 hi_hz: 330.0,
-                lift: 2.4,
+                lift: 0.95,
             }),
         };
         break_it(&mut mics);
@@ -3873,7 +3873,7 @@ mod tests {
                     m.modal = Some(ModalBand {
                         lo_hz: 330.0,
                         hi_hz: 190.0,
-                        lift: 2.4,
+                        lift: 0.95,
                     })
                 }))
             },
@@ -3882,7 +3882,7 @@ mod tests {
                     m.modal = Some(ModalBand {
                         lo_hz: 250.0,
                         hi_hz: 250.0,
-                        lift: 2.4,
+                        lift: 0.95,
                     })
                 }))
             },
@@ -4129,7 +4129,7 @@ mod tests {
             modal: Some(ModalBand {
                 lo_hz: 190.0,
                 hi_hz: 330.0,
-                lift: 2.4,
+                lift: 0.95,
             }),
         };
         preset.voicing.mics = Some(mics);

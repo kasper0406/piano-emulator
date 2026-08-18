@@ -103,7 +103,12 @@ pub const MAX_MIC_DIFFUSE_COHERENCE: f32 = 8.0;
 /// notch rather than a lobe.
 pub const MIN_MIC_MODAL_HZ: f32 = 40.0;
 pub const MAX_MIC_MODAL_HZ: f32 = 2_000.0;
-pub const MAX_MIC_MODAL_LIFT: f32 = 6.0;
+/// **One, the null** — `soundboard::MIC_MODAL_LIFT`'s own rail, and its header
+/// carries the three measured defects that live strictly above it and the item
+/// 417 disposition that says they may not be bought back
+/// (`DECISIONS.md` 418). Both crates' schemas refuse the same preset, which is
+/// what `the_two_schemas_agree_on_every_bound` is for.
+pub const MAX_MIC_MODAL_LIFT: f32 = 1.0;
 
 /// Bounds on a per-partial correction to the *fitted* decay rate
 /// (`engine::string::{MIN,MAX}_PARTIAL_SIGMA_SCALE`).
@@ -2695,7 +2700,7 @@ mod tests {
             modal: Some(piano_emulator::preset::ModalBand {
                 lo_hz: 190.0,
                 hi_hz: 330.0,
-                lift: 2.4,
+                lift: 0.95,
             }),
         });
         preset.soundboard.radiation = Some(piano_emulator::preset::Radiation {
@@ -2855,7 +2860,7 @@ mod tests {
             modal: Some(ModalBand {
                 lo_hz: 190.0,
                 hi_hz: 330.0,
-                lift: 2.4,
+                lift: 0.95,
             }),
         };
         break_it(&mut mics);
@@ -2908,7 +2913,7 @@ mod tests {
                     m.modal = Some(ModalBand {
                         lo_hz: MIN_MIC_MODAL_HZ - 0.01,
                         hi_hz: 330.0,
-                        lift: 2.4,
+                        lift: 0.95,
                     })
                 }))
             },
@@ -2917,7 +2922,7 @@ mod tests {
                     m.modal = Some(ModalBand {
                         lo_hz: 190.0,
                         hi_hz: MAX_MIC_MODAL_HZ + 0.01,
-                        lift: 2.4,
+                        lift: 0.95,
                     })
                 }))
             },
@@ -2946,7 +2951,7 @@ mod tests {
                     m.modal = Some(ModalBand {
                         lo_hz: 330.0,
                         hi_hz: 190.0,
-                        lift: 2.4,
+                        lift: 0.95,
                     })
                 }))
             },
@@ -2955,7 +2960,7 @@ mod tests {
                     m.modal = Some(ModalBand {
                         lo_hz: 250.0,
                         hi_hz: 250.0,
-                        lift: 2.4,
+                        lift: 0.95,
                     })
                 }))
             },

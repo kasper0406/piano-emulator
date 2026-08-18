@@ -151,7 +151,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let report = format!(
         "# The stereo image, heard\n\n\
          *`piano-tuner stereo` — `PHYSICS.md` §8, `DECISIONS.md` 313-317, 346-379\n\
-         and 392-395.*\n\n\
+         and 392-425.*\n\n\
          Every other board in `renders/` scores a **mono sum**, on purpose: a stereo\n\
          distance would mostly measure somebody else's microphones. This one is the\n\
          exception, and it exists because the largest single difference ever measured\n\
@@ -175,9 +175,66 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
          what one loudspeaker's own spectrum does. A stage can leave the mono sum\n\
          bit-identical, match the recording's coherence band for band, and still put\n\
          one speaker 9 dB up and the other 21 dB *down* at a single note's\n\
-         fundamental — which is what the mode-controlled band did until item 393, and\n\
-         what a listener reported three separate ways while every gate stayed green\n\
-         (item 392).\n\n\
+         fundamental — which is what the mode-controlled band did, and what a listener\n\
+         reported three separate ways while every gate stayed green (item 392).\n\n\
+         ## What item 418's rail changed, complaint by complaint\n\n\
+         `[voicing.mics.modal].lift` is railed at **one** since item 418 and the pair is\n\
+         refitted under it, so these takes are not the ones items 392-394 were written\n\
+         on. The lobe is `L = m(1 + B)`, `R = m(1 − B)` where `B` is the band's\n\
+         **complex** response — items 392-418 wrote it as a real `g` and item 423 is the\n\
+         correction, which is worth up to 13 dB and changes two of the three findings.\n\
+         What the rail makes **unbuildable** is `|B| > 1`: no channel inversion in\n\
+         either loudspeaker (on the pre-418 preset the left was inverted over\n\
+         232.0-272.3 Hz and the right over 316.0-357.4), no pitch-dependent flip of\n\
+         which one carries it, and a pair-energy ceiling of `10 log10(1 + |B|²)` =\n\
+         **+3.01 dB** against the old lobe's realised **+6.18**. What it does **not**\n\
+         remove is per-channel level loss, and it **deepens** it: `1 ± B` is smallest\n\
+         where `|B|` is nearest *one*, so a lift of 0.99 across a wide band is a worse\n\
+         null than a lift of 2.12 across a narrow one. The old lobe's deepest\n\
+         one-channel loss was **−20.5 dB at 349.8 Hz**, in the right channel; the\n\
+         shipped one reaches **−33.1 dB at 221.4 Hz — in the *left* channel, at A3's\n\
+         own fundamental** — with either channel more than 10 dB down over 0.286\n\
+         octaves against the old lobe's 0.105. There are **no exact nulls and never\n\
+         were**: at `|B| = 1` the loss is `2|sin(arg B / 2)|`, so item 392's \"unity\n\
+         crossings at 213.0 and 359.6 Hz\" null nothing.\n\n\
+         Re-measured on these renders' own instrument with\n\
+         `forensics/src/bin/stereo_channels.rs`, against item 392's numbers for the same\n\
+         statistics (item 425):\n\n\
+         * **(a) \"the C4 of the melody line stands out\" — resolved.** The old band's\n\
+           gain peaked at 261.7 Hz, half a cent from C4, and pair-over-mono energy read\n\
+           **C4 +6.42 dB**, the loudest note of the line by 0.9 dB, with adjacent\n\
+           semitones 6.7 dB apart. The shipped band's own prediction is flat across the\n\
+           line at **+2.45 to +2.94 dB**, and measured through the whole chain C4 reads\n\
+           **+4.07** with E4 above it at **+4.36**; the recording's own C4 sits +1.72\n\
+           above its line's trend. No note is singled out any more.\n\n\
+         * **(b) \"the hammer noise is too loud\" — the inversion is gone, a loss of\n\
+           the same order is not.** The complaint was a denominator: the burst was\n\
+           untouched and the note's own *fundamental* was leaving one channel, so what\n\
+           was left there read as noise. Measured against a pan-pot at each note's\n\
+           fundamental, **F#4 goes R −18.33 → −6.54 dB** and **F4 R −9.61 → −10.09**:\n\
+           the worst per-channel loss on the line improves by 8 dB and moves note. The\n\
+           lobe's own notch moves the *other* way — deepest right-channel loss −20.5 dB\n\
+           at 349.8 Hz before and −20.2 at 373.9 after, the same depth one semitone up —\n\
+           because in a channel the lobe has nulled what is left is the pair's\n\
+           **geometric** side, and that is what sets the depth and the frequency a\n\
+           listener actually gets. **What is structurally gone is the sign**: `L +7.17 /\n\
+           R −9.61` at F4 against `L +0.70 / R +9.43` at C4 was one loudspeaker carrying\n\
+           the note inverted against the other, with the flip landing in the middle of\n\
+           the tune, and no preset this schema accepts can do that now. **What is not\n\
+           gone is the loss**, whose deepest point under the rail has moved to the left\n\
+           channel at 221.4 Hz (item 423).\n\n\
+         * **(c) \"the reference chords have more brilliance\" — the right channel's\n\
+           share is retired, the left channel's is where it was.** Brilliance as a\n\
+           2-6 kHz over 250-500 Hz tilt, engine minus reference: `dmono` is **−8.15 dB\n\
+           and identical on all three engine takes**, which is the control that says the\n\
+           mono deficit is pre-existing and the microphone section is innocent of it. On\n\
+           top of that, the lobe's own share — engine minus the pair-only take, per\n\
+           channel — moves **L −4.95 → −4.23 dB** and **R −2.64 → +0.18**. The larger\n\
+           one, and the one the complaint was about, is 0.7 dB better and still there.\n\n\
+         So one of the three complaints is gone, one has lost its mechanism but not its\n\
+         level, and one is half gone. The residual is what the two documented reds\n\
+         measure (`CONTEXT.md`), and item 421 is the arithmetic that says a bar may not\n\
+         move to close them.\n\n\
          {sections}"
     );
     std::fs::write(out.join("STEREO.md"), &report)?;

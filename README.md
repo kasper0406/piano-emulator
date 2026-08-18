@@ -123,12 +123,17 @@ and `[voicing.mics]` was refitted at the aligned window by `piano-tuner mics
 --stage band`, a stage that moves the band and the two trims together because
 since the change they build one side signal and are no longer separable.
 
-**All six bands now pass**, at a window that opens where the note does — the
-engine reads +0.945 / −0.057 / −0.196 / −0.032 / +0.023 / +0.068 against the
-recording's +0.953 / −0.115 / −0.226 / −0.002 / −0.012 / +0.027, a summed |err|
-of 0.203 against the 4.967 the gate was written at, and no band closer to its
-threshold than 0.89 of a bar. The two held-out velocity layers, never fitted,
-improve from 21.5 and 30.2 bars out to 2.2 and 2.8. What is *not* closed is
+**All six bands passed** at that point, at a window that opens where the note
+does — the engine read +0.945 / −0.057 / −0.196 / −0.032 / +0.023 / +0.068
+against the recording's +0.953 / −0.115 / −0.226 / −0.002 / −0.012 / +0.027, a
+summed |err| of 0.203 against the 4.967 the gate was written at. **Four of six
+pass today**, and the two that do not are the price of `DECISIONS.md` 418's
+rail: a lift of 1.5 is what the recording's −3.5 dB mid/side ratio asks for and
+a lift above **one** is one loudspeaker inverted against the other, so the
+nodal bands now read +0.109 and −0.012 where the recording reads −0.115 and
+−0.226. Those two greens had been bought with the artifact a listener heard,
+and 418-422 is the arithmetic that says a bar may not move to get them back.
+What is *not* closed is
 stated in items 377 and 379: on a single melody line the engine's sixth-octave
 dip still sits about half an octave above the recording's, and the engine's own
 image still moves when the window does (0.38 and 0.34 in the two mid bands)
@@ -411,11 +416,29 @@ Where a history document and `DECISIONS.md` disagree, the log wins.
   mode-controlled band left the mono sum bit-identical, matched the recording's
   correlation in all six bands, and put one loudspeaker 9 dB up and the other
   21 dB *down* at a single note's fundamental, which a listener heard three
-  different ways while every gate here stayed green. Refitted there, all six of
-  the correlation columns pass: 63-125 Hz — the
+  different ways while every gate here stayed green. Five milestones then went
+  looking for a mechanism that could have the recording's per-channel band
+  without manufacturing the energy, and none landed (`DECISIONS.md` 393-416); a
+  side-injection probe finally refuted the class, because the recording's nodal
+  band is asymmetric *in level* between its two capsules — one session's
+  microphone placement, which is a property of the reference and not of a piano
+  (417). So the stopgap ships: the lift is **railed at one, the null**, where
+  channel inversions and the pitch-dependent flip of which loudspeaker carries
+  them stop being expressible and the pair can manufacture +3.01 dB instead of
+  +6.18. What the rail does *not* remove is the per-channel level loss, and item
+  423 is the correction that it makes it *worse*: the band's response is a
+  complex `B`, `1 ± B` is smallest where `|B|` is nearest **one**, and a lift of
+  0.99 across a wide band takes the deepest one-channel loss from −20.5 dB at
+  349.8 Hz to **−33.1 dB at 221.4 Hz, in the left channel**. That residual is
+  what the per-channel red measures. The pair is refitted under the
+  rail; and the capsule asymmetry is subtracted from the per-channel target and
+  **printed by the gate that excludes it** (418-422). What that costs is stated
+  rather than hidden: the recording's nodal band asks for more difference than
+  sum — which for this construction *is* a lift above the null — so **two bands
+  of the correlation board and both per-channel energy columns are now red**,
+  and they were green on the artifact. 63-125 Hz — the
   band the whole finding is about, where the recording reads +0.953 and repeats
-  itself to 0.007 — reads +0.945 against a bar of 0.009, and the tightest of the
-  six sits at 0.89 of its bar. The geometry is not a taste: the pair's **spacing** is inverted out of
+  itself to 0.007 — still reads +0.945 against a bar of 0.009. The geometry is not a taste: the pair's **spacing** is inverted out of
   the interchannel delays the recording itself carries — 0.112 m by that
   inversion alone, 0.126 m by the render fit that never saw it, agreeing to a
   thousandth of a millisecond of delay residual — and its **height** is the

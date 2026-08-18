@@ -70,22 +70,43 @@ core; currently ~30%).
 **Documented reds (deliberate, by name):**
 1. `a_known_duplex_comes_back_from_the_engines_own_render_of_it` — duplex
    segments need broadband drive; field semantics to be re-decided (D260).
-2. `each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts` —
-   the modal lobe's per-channel defect (D392-396). Two mechanism milestones
-   have been reverted rather than shipped (D404, D406) and a third was not
-   started (D407-411): the mechanism is understood, the *source* cannot pay
-   for it, and that is the open item below. The gate prints a sixth-octave
-   board (D405) before it asserts — that is the readable half of a red.
-   **This red is the second half of a two-milestone repair and is gated on
-   the first (D411): do not accept a mandate that asks for it on its own.**
-   The first half was built and measured in D412-416 and does **not** land;
-   read those before proposing either half again.
+2. `each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts` and
+   3. `the_engines_stereo_image_is_the_recordings_in_every_band` — **one
+   shortfall, read in two units, and it is the price of D418's rail.**
+   `[voicing.mics.modal].lift` is now railed at **one**, the null, because
+   above one the lobe inverts one loudspeaker against the other — the left
+   over 232.0-272.3 Hz and the right over 316.0-357.4, with the flip landing
+   mid-tune — and manufactures up to +6.18 dB of pair energy the mono sum
+   does not contain (D392, D417; the "outright nulls at two frequencies" of
+   D392 do not exist and D423 is the correction). The recording's
+   own nodal band asks for `E_side/E_mid` of **1.26 at 125-250 Hz and 1.58 at
+   250-500** — more difference than sum, which for this construction *is* a
+   lift above the null — and the refit under the rail reaches **0.80 and
+   1.03**. `r0` reads that as 0.224/0.120 and 0.214/0.059 bars out on the
+   coherence gate; `pair_db` reads the same thing as −0.88/0.49 and
+   −0.66/0.38 on the per-channel gate. Both were green *on the artifact*.
+   The per-channel gate's *shape* half additionally excludes the
+   capsule-placement asymmetry D417 accepted as unscored
+   (`ChannelColumn::asymmetry`, printed per band by the gate itself) and is
+   still red at 2.38/1.91 and 2.47/1.74 — and **red against the unexcluded
+   bar too** (1.15 and 1.09), which is why the exclusion changes no verdict
+   this gate asserts. It is a *policy* sized by an arithmetic floor and not
+   the floor itself: the floor holds for a model whose two channels depart
+   symmetrically from their own mono, and a nodal-line lobe is not one
+   (D424). **Do not close either by moving a bar**; D418's frontier map is
+   the three swept conflicts that bound them, D423 adds the fourth axis
+   (lift below the rail, which is worse), and
+   `the_acceptance_still_fails_on_the_lobe_it_was_re_barred_against` is the
+   falsification that keeps the exclusion narrower than the defect.
+   D404/D406/D411/D414 are the four mechanism attempts that did not land and
+   are what a fifth must start from.
 
 ## Conventions (hard rules for agents)
 
 - Iterate with plain `cargo test` (dev profile is opt-level 3; release-only
   gates self-skip). Full `cargo test --release --workspace` at most twice per
-  agent, at phase ends. Suite baseline: 708 green / 2 documented reds.
+  agent, at phase ends. Suite baseline: 708 green / 3 documented reds
+  (D418, verified and left standing by D423-425).
 - Any command trending past ~5 minutes: parallelize or split the tool; never
   wrap it in a sleep/poll loop. Time-box closed-on-render fit loops; report
   budgets; report-and-stop beats converge-at-any-cost.
@@ -97,9 +118,51 @@ core; currently ~30%).
   the only copy of evidence.
 - Do not commit; the session owner reviews and commits.
 
-## Current open items (beyond the two reds)
+## Current open items (beyond the reds)
 
-**The blocker under the third red** (D407-416). The direct path had per-partial
+**The stereo line is closed** (D417-425). The stopgap shipped: the lift is
+railed at the null, `presets/salamander-c5.toml`'s `[voicing.mics]` is refitted
+under it (`width` 1.632, `diffuse_coherence` 4.099, band **174.3-456.5 Hz at
+0.99**), and the capsule-placement asymmetry is excluded from the per-channel
+target and printed. **What that removes is a mechanism, not a level, and the
+difference is measured** (D423, D425 — D417's "the audible artifacts are gone"
+and D418's account of the nulls are both wrong and are corrected there). The
+lobe's `B` is a **complex** filter response and the `R = m(1 − g)` shorthand two
+milestones reasoned from is wrong by up to 13 dB: there are **no unity crossings
+and never were** (`|1 − B| = 2|sin(arg B/2)|` at `|B| = 1`, not zero), and the
+inverted spans on the old preset are 232.0-272.3 Hz in L and 316.0-357.4 in R —
+0.18-0.23 octaves, not 0.76. Gone by construction under the rail, unbuildable by
+any preset the schema accepts: **channel inversion in either channel**, the
+pitch-dependent flip of which loudspeaker carries it, and pair energy above
++3.01 dB. **Not gone, and worse than before: the per-channel level loss.** `1 ± B`
+is smallest where `|B|` is closest to *one*, so railing the lift at one deepens
+it — the old lobe's worst was **−20.5 dB at 349.8 Hz** with either channel >10 dB
+down over 0.105 octaves, and the refit reaches **−33.1 dB at 221.4 Hz in the
+LEFT channel** (A3's fundamental) over 0.286 octaves in two zones. That notch is
+inside the 125-250 band where the per-channel gate reads `dev_L −0.98` against
+the recording's `+1.40`, which D423 names as the lead for a successor rather
+than a proven cause. Of D392's three listener
+complaints re-measured on the shipped instrument: C4's prominence is **gone**
+(+6.42 → +4.07 dB with E4 now above it, the lobe's own prediction flat across
+the line), the hammer/fundamental complaint has **lost its mechanism but not
+its level** (F#4 R −18.33 → −6.54, F4 R −9.61 → **−10.09**; the worst loss on
+the line improves 8 dB and moves note, and what fills a nulled channel is the
+pair's geometric side rather than the lobe), and the chords' brilliance tilt is
+**half gone** (the
+lobe's share L −4.95 → −4.23, R −2.64 → +0.18; the −8.15 dB `dmono` deficit is
+pre-existing and not the mic section's). A smaller lift does not buy the level
+back either: 0.75 and 0.50 on the same band take the coherence board from
+0.224/0.214 bars out to 0.477/0.427 and 0.738/0.602 (D423). What it bought
+beside that: **melody all five green** (the `channel` balance −0.49 against a
+bar of 0.91, where the merely-clamped instrument reads −1.06 and fails),
+spacing readback **+6 / +1 / −7 %** against 20, and D395's third constraint
+dissolved — the estimator's band boundary moves from 225 Hz to **170** under a
+weaker lobe (`where_the_bands_lower_edge_starts_biasing_the_reading`, an
+`#[ignore]`d instrument in `tuner/tests/mics.rs`). The next mechanism, if one is
+ever attempted, is not a filter design: it is the mono fold-down paying for a
+nodal line, and D411's ordering rule and D414's refutation still stand.
+
+**The blocker under the mono-source milestone** (D407-416). The direct path had per-partial
 gains and *no radiated response between the partials*. That stage now exists —
 `[soundboard.radiation]`, a fitted sixth-octave minimum-phase colouration of the
 drive, absent-means-old, railed, `f64`, +0.5 points of one core (D412) — and

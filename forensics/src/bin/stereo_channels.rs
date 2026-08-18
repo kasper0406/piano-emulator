@@ -22,13 +22,18 @@ use piano_tuner::realism::{self, Phrase, RecordedKeys};
 use piano_tuner::sampler::{engine_events, SamplerEvent, SAMPLER_VERSION};
 use piano_tuner::{cache, SampleLibrary, Sampler, TimedEvent, SAMPLE_RATE};
 
-use rustfft::num_complex::Complex32;
+use rustfft::num_complex::{Complex32, Complex64};
 use rustfft::FftPlanner;
 
 const SFZ: &str = "data/salamander/SalamanderGrandPiano-V3+20200602.sfz";
 const DATA: &str = "data/salamander";
 const SPEED_OF_SOUND: f64 = 343.0;
 const MIC_DIFFUSE_POLE_K: f64 = 0.426_63;
+/// `soundboard::MIC_MODAL_HIGH_Q` and `MIC_MODAL_LOW_Q`, copied because they
+/// are private to the engine. Eighth-order Butterworth highpass as four
+/// sections, fourth-order lowpass as two: the twelve poles of the lobe.
+const MIC_MODAL_HIGH_Q: [f64; 4] = [0.509_796_2, 0.601_344_9, 0.899_976_2, 2.562_915_4];
+const MIC_MODAL_LOW_Q: [f64; 2] = [0.541_196_1, 1.306_562_9];
 
 /// The keys the per-key work is done on: recorded takes only, because only a
 /// recorded key has per-channel *truth* — the real AB pair's own two capsules.
@@ -138,14 +143,50 @@ fn analytic(preset: &Preset) {
         * f64::from(mics.diffuse_coherence);
     println!("board-field diffuse corner {pole:.0} Hz");
     if let Some(m) = mics.modal {
+        // Scanned rather than read off `lift`, because `B` is complex: the
+        // deepest a channel goes is where `|B|` is closest to **one** and
+        // `arg B` is closest to 180 or 0 degrees, which is not where `|B|`
+        // peaks and is not the same channel at both ends (`DECISIONS.md` 423).
+        let (lo, hi, lift) = (
+            f64::from(m.lo_hz),
+            f64::from(m.hi_hz),
+            f64::from(m.lift),
+        );
+        let mut worst_l = (f64::INFINITY, 0.0);
+        let mut worst_r = (f64::INFINITY, 0.0);
+        let mut inverted = (f64::INFINITY, 0.0f64);
+        for i in 0..=120_000 {
+            let f = 40.0 * (4000.0f64 / 40.0).powf(f64::from(i) / 120_000.0);
+            let b = lobe_response(lo, hi, lift, f);
+            if (1.0 + b).norm() < worst_l.0 {
+                worst_l = ((1.0 + b).norm(), f);
+            }
+            if (1.0 - b).norm() < worst_r.0 {
+                worst_r = ((1.0 - b).norm(), f);
+            }
+            if (1.0 + b).re < 0.0 || (1.0 - b).re < 0.0 {
+                inverted = (inverted.0.min(f), inverted.1.max(f));
+            }
+        }
         println!(
-            "modal lobe {:.1}-{:.1} Hz  lift {:.4}   -> in-band L = {:+.2} dB, R = {:+.2} dB \
-             (mono sum unchanged)",
+            "modal lobe {:.1}-{:.1} Hz  lift {:.4}   -> deepest L {:+.2} dB at {:.1} Hz, \
+             deepest R {:+.2} dB at {:.1} Hz, pair ceiling {:+.2} dB, {} (mono sum unchanged)",
             m.lo_hz,
             m.hi_hz,
             m.lift,
-            20.0 * (1.0 + f64::from(m.lift)).log10(),
-            20.0 * (1.0 - f64::from(m.lift)).abs().log10(),
+            20.0 * worst_l.0.log10(),
+            worst_l.1,
+            20.0 * worst_r.0.log10(),
+            worst_r.1,
+            10.0 * (1.0 + f64::from(m.lift).powi(2)).log10(),
+            if inverted.0.is_finite() {
+                format!(
+                    "a channel is INVERTED over {:.1}-{:.1} Hz",
+                    inverted.0, inverted.1
+                )
+            } else {
+                "neither channel is ever inverted".to_string()
+            },
         );
     }
     println!();
@@ -891,11 +932,62 @@ fn band_db_short(power: &[f64], lo: f64, hi: f64) -> f64 {
 // 5. The melody line, per note, per channel
 // ---------------------------------------------------------------------------
 
-/// The mode-controlled lobe's exact gain at one frequency: an eighth-order
-/// Butterworth highpass at `lo`, a fourth-order lowpass at `hi`, times `lift`.
-/// Written out rather than rendered because it *is* the code
-/// (`soundboard::ModalLobe`) and the whole per-note effect follows from it.
-fn lobe_gain(lo: f64, hi: f64, lift: f64, f: f64) -> f64 {
+/// The mode-controlled lobe's **complex** response at one frequency: the exact
+/// digital cascade `soundboard::ModalLobe` runs — four RBJ highpass biquads at
+/// `lo` with `MIC_MODAL_HIGH_Q`, two lowpass biquads at `hi` with
+/// `MIC_MODAL_LOW_Q`, times `lift`.
+///
+/// # This used to return a magnitude, and that was worth up to 13 dB
+///
+/// `DECISIONS.md` 423. The side is `s_geo + B·mid`, so `L = m(1 + B)` and
+/// `R = m(1 − B)` — and `B` is a **complex** filter response. The old form of
+/// this function returned `|B|` from the analogue Butterworth magnitude and the
+/// table below then printed `20 log10|1 − |B||`, which is `|1 − B|` only where
+/// `arg B` happens to be 0 or 180 degrees. A twelfth-order cascade turns
+/// hundreds of degrees inside its own band, so that is almost nowhere: on the
+/// pre-418 preset at C4 the magnitude-only form reads **−2.21 dB** in the right
+/// channel where the true `|1 − B|` is **+8.57**, and the measurement through
+/// the whole chain — the second table below — reads **+9.43**. The complex form
+/// tracks that measurement to about a decibel everywhere except in the
+/// immediate neighbourhood of a deep notch, where the pair's geometric side is
+/// what is left and dominates it.
+///
+/// Two things items 392-418 concluded from the magnitude-only form are wrong
+/// and item 423 corrects them: the "unity crossings at 213.0 and 359.6 Hz where
+/// one channel is nulled outright" are frequencies where `|B| = 1` but
+/// `arg B ≠ 0`, so `|1 − B| = 2|sin(arg B / 2)|` is not zero and no exact null
+/// exists at any lift; and the inverted span is where `Re B > 1`, which on that
+/// preset is 316.0-357.4 Hz — 0.18 octaves, not the 0.76 the magnitude form
+/// implies. What is unaffected is the pair energy, because
+/// `|1 + B|² + |1 − B|² = 2(1 + |B|²)` exactly, whatever the phase.
+fn lobe_response(lo: f64, hi: f64, lift: f64, f: f64) -> Complex64 {
+    /// `soundboard::Biquad::butterworth`, coefficient for coefficient.
+    fn biquad(hz: f64, q: f64, high: bool) -> [f64; 5] {
+        let w = (std::f64::consts::TAU * hz / f64::from(SAMPLE_RATE)).clamp(1.0e-6, 3.0);
+        let (sin, cos) = w.sin_cos();
+        let alpha = sin / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        let g = if high { (1.0 + cos) / 2.0 } else { (1.0 - cos) / 2.0 };
+        let b1 = if high { -2.0 * g } else { 2.0 * g };
+        [g / a0, b1 / a0, g / a0, -2.0 * cos / a0, (1.0 - alpha) / a0]
+    }
+    fn at(co: [f64; 5], f: f64) -> Complex64 {
+        let z = (-Complex64::i() * std::f64::consts::TAU * f / f64::from(SAMPLE_RATE)).exp();
+        (co[0] + co[1] * z + co[2] * z * z) / (1.0 + co[3] * z + co[4] * z * z)
+    }
+    let mut y = Complex64::new(lift, 0.0);
+    for q in MIC_MODAL_HIGH_Q {
+        y *= at(biquad(lo, q, true), f);
+    }
+    for q in MIC_MODAL_LOW_Q {
+        y *= at(biquad(hi, q, false), f);
+    }
+    y
+}
+
+/// The magnitude-only form this instrument used until item 423, kept so the
+/// table can print what the old reading was beside what is true.
+fn lobe_magnitude_only(lo: f64, hi: f64, lift: f64, f: f64) -> f64 {
     let hp = 1.0 / (1.0 + (lo / f).powi(16)).sqrt();
     let lp = 1.0 / (1.0 + (f / hi).powi(8)).sqrt();
     lift * hp * lp
@@ -910,31 +1002,39 @@ fn lobe_table(preset: &Preset) {
         f64::from(band.hi_hz),
         f64::from(band.lift),
     );
-    println!("the mode-controlled lobe, note by note: side += lift*bandpass(mid), so");
-    println!("L = mid*(1+g), R = mid*(1-g) at the note's own fundamental. The mono sum");
-    println!("is mid at every g, which is why no board in this repository sees any of it.\n");
+    println!("the mode-controlled lobe, note by note: side += B*mid, so L = mid*(1+B)");
+    println!("and R = mid*(1-B) at the note's own fundamental, where B is the band's");
+    println!("COMPLEX response. The mono sum is mid at every B, which is why no board in");
+    println!("this repository sees any of it. `R_naive` is the magnitude-only reading");
+    println!("this instrument printed until item 423 — 20 log10|1-|B|| — kept because it");
+    println!("is what items 392-418 were reasoning from and it is wrong by up to 13 dB.\n");
     println!(
-        "{:<5} {:>9} {:>8} {:>10} {:>10} {:>12}",
-        "key", "f0_Hz", "g", "L_dB", "R_dB", "pair_dB"
+        "{:<5} {:>9} {:>8} {:>9} {:>10} {:>10} {:>10} {:>12}",
+        "key", "f0_Hz", "|B|", "arg_deg", "L_dB", "R_dB", "R_naive", "pair_dB"
     );
     for key in 55u8..=68 {
         let f0 = 440.0 * 2f64.powf((f64::from(key) - 69.0) / 12.0);
-        let g = lobe_gain(lo, hi, lift, f0);
-        let l = 20.0 * (1.0 + g).log10();
-        let r = 20.0 * (1.0 - g).abs().log10();
-        let pair = 10.0 * (((1.0 + g).powi(2) + (1.0 - g).powi(2)) / 2.0).log10();
+        let b = lobe_response(lo, hi, lift, f0);
+        let l = 20.0 * (1.0 + b).norm().log10();
+        let r = 20.0 * (1.0 - b).norm().log10();
+        let naive = lobe_magnitude_only(lo, hi, lift, f0);
+        // `|1+B|^2 + |1-B|^2 = 2(1+|B|^2)` exactly, whatever the phase — so the
+        // pair-energy column is the one number the old form got right.
+        let pair = 10.0 * (1.0 + b.norm_sqr()).log10();
         let mark = if melody::line_keys().contains(&key) {
             " <- melody"
         } else {
             ""
         };
         println!(
-            "{:<5} {:>9.1} {:>8.3} {:>10.2} {:>10.2} {:>12.2}{mark}",
+            "{:<5} {:>9.1} {:>8.3} {:>9.1} {:>10.2} {:>10.2} {:>10.2} {:>12.2}{mark}",
             melody::note_name(key),
             f0,
-            g,
+            b.norm(),
+            b.arg().to_degrees(),
             l,
             r,
+            20.0 * (1.0 - naive).abs().log10(),
             pair
         );
     }
@@ -1070,16 +1170,18 @@ fn measured_lift(preset: &Preset) -> Result<(), Box<dyn std::error::Error>> {
             .log10();
         let (predl, predr, predp) = match band {
             Some(b) => {
-                let g = lobe_gain(
+                // The **complex** response, item 423: `1 - |B|` is not `|1 - B|`
+                // and the difference here reaches 13 dB.
+                let g = lobe_response(
                     f64::from(b.lo_hz),
                     f64::from(b.hi_hz),
                     f64::from(b.lift),
                     f0,
                 );
                 (
-                    20.0 * (1.0 + g).log10(),
-                    20.0 * (1.0 - g).abs().log10(),
-                    10.0 * (((1.0 + g).powi(2) + (1.0 - g).powi(2)) / 2.0).log10(),
+                    20.0 * (1.0 + g).norm().log10(),
+                    20.0 * (1.0 - g).norm().log10(),
+                    10.0 * (1.0 + g.norm_sqr()).log10(),
                 )
             }
             None => (0.0, 0.0, 0.0),

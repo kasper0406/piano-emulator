@@ -3611,6 +3611,82 @@ pub struct ChannelColumn {
     pub uncertainty: f64,
     /// `max(floor, uncertainty) · `[`STEREO_ALLOWANCE`].
     pub bar: f64,
+    /// **The capsule-placement asymmetry, excluded from the target rather than
+    /// chased** (`DECISIONS.md` 417, and item 328's rule applied to a second
+    /// property of the reference).
+    ///
+    /// `|reference_left_db − reference_right_db| / 2`, in decibels, out of the
+    /// recording alone.
+    ///
+    /// **What it is.** The recording's two capsules do not straddle the board's
+    /// nodal lines symmetrically — they are one session's placement — so the
+    /// recording's own `spread = dev_L − dev_R` runs to **+5.85 dB at 178 Hz**
+    /// where an incoherent side source can move it by nothing at all and a
+    /// coherent one only through uncontrollable cross terms
+    /// (`renders/side-injection/SIDE_INJECTION.md` §5f, item 417's refutation).
+    /// Modelling it would mean per-channel per-band gains fitted to where two
+    /// microphones stood on one afternoon, which the standing no-room and
+    /// no-mic-idiosyncrasy policy refuses: it is a property of the reference,
+    /// not of a piano.
+    ///
+    /// **Why exactly half the spread.** [`Self::error`] is
+    /// `max(|dev_L − ref_L|, |dev_R − ref_R|)`. An engine whose two channels
+    /// depart *symmetrically* from their own mono has `dev_L = dev_R = x`, and
+    /// `max(|x − rl|, |x − rr|)` is minimised at the midpoint, where it is
+    /// `|rl − rr| / 2` **whatever `x` is chosen**. So half the reference spread
+    /// is the floor this statistic puts under any symmetric model: such a model
+    /// cannot read better than this in a band however well it is fitted.
+    ///
+    /// **This engine is not in that class, and the difference is measured**
+    /// (`DECISIONS.md` 424). A nodal-line lobe is `L = m(1 + g)` and
+    /// `R = m(1 − g)` — per-channel *by construction* — so `dev_L ≠ dev_R`
+    /// here, and the diffuser's rotation moves which channel is up with
+    /// frequency. On the shipped instrument the engine's own spread reads
+    /// **−1.27 dB at 125-250 Hz and +3.64 at 250-500** against the reference's
+    /// **+1.52 and −1.30**: opposite in sign in both bands, and larger than the
+    /// reference's in the second. So for this model the exclusion is **not** an
+    /// unreachable floor — the section could in principle put its spread on the
+    /// reference's side of the ledger, and doing so would be fitting
+    /// per-channel per-band gains to where two microphones stood on one
+    /// afternoon, which is exactly what item 417 refused. **The floor argument
+    /// sizes the exclusion; the policy is what justifies it**, and stating it
+    /// the other way round would be claiming an arithmetic necessity this
+    /// construction does not have.
+    ///
+    /// **Three things keep it from being a widened bar, and the third is the
+    /// one that binds today.** (i) It is computed out of the reference's two
+    /// medians and nothing else, so like [`Self::bar`] it cannot be fitted to
+    /// and cannot move when the engine does. (ii)
+    /// `the_acceptance_still_fails_on_the_lobe_it_was_re_barred_against`
+    /// asserts that the pre-418 unclamped lobe is still red against
+    /// [`Self::reachable`], so the exclusion is narrower than the defect it
+    /// could be accused of hiding. (iii) On the shipped instrument it **changes
+    /// no verdict the gate asserts**: the two bands asserted absolutely are red
+    /// with it and without it (2.38 dB against an unexcluded bar of 1.15 and a
+    /// reachable 1.91; 2.47 against 1.09 and 1.74), and the other four bands
+    /// are asserted only against a pan-potted engine's own error with the
+    /// *unexcluded* `bar` as the slack. Where the exclusion does change a
+    /// target is the **fit** — `mics::channel_excess` reads
+    /// [`Self::reachable`] — so that the fit and the gate close on one
+    /// definition of what is being asked for.
+    ///
+    /// The gate prints it, and the engine's own spread beside it, before it
+    /// asserts: an acceptance nobody can read is indistinguishable from a
+    /// widened bar.
+    pub asymmetry: f64,
+    /// **The bar the verdict is actually taken against**: `bar + asymmetry`,
+    /// the recording's own target with item 417's acceptance subtracted from
+    /// it.
+    ///
+    /// `bar` alone is what the recording asks of a model that could place its
+    /// capsules where the session did. [`Self::asymmetry`] is the part of that
+    /// ask which item 417 accepted as unscored, and this is the remainder. Read
+    /// [`Self::asymmetry`] for why the subtraction is a policy sized by an
+    /// arithmetic floor rather than an arithmetic necessity, and for the three
+    /// things that keep it from being a widened bar — on the shipped instrument
+    /// it changes no verdict this gate asserts, and both bands it is largest in
+    /// are red with it and without it.
+    pub reachable: f64,
     /// **The per-item distance**: the same worse-of-two-channels rule applied
     /// key by key and then taken at the median, so a band that is right on
     /// average and wrong at every key is visible here and nowhere else. This is
@@ -3832,6 +3908,11 @@ fn channel_columns_over(
                 scatter / (readable.len() as f64).sqrt()
             };
             let bar = floor.max(uncertainty) * STEREO_ALLOWANCE;
+            // The capsule-placement asymmetry item 417 accepted as unscored,
+            // out of the reference's own two medians and nothing else. See
+            // `ChannelColumn::asymmetry` for why it is exactly half the spread.
+            let asymmetry = (rl - rr).abs() / 2.0;
+            let reachable = bar + asymmetry;
             let worst = errors
                 .iter()
                 .enumerate()
@@ -3853,6 +3934,8 @@ fn channel_columns_over(
                 scatter,
                 uncertainty,
                 bar,
+                asymmetry,
+                reachable,
                 per_key_error: stereo_median(&errors),
                 per_key_floor: stereo_median(&floors),
                 per_key_bar: scatter * STEREO_ALLOWANCE,
@@ -3881,7 +3964,11 @@ fn channel_columns_over(
                     && mono_balance.abs() <= mono_bar,
                 mono_pooled,
                 mono_pooled_floor,
-                pass: error.is_finite() && bar.is_finite() && error <= bar,
+                // The verdict is taken against the *reachable* bar: item 417's
+                // accepted exclusion is subtracted from the target here and
+                // nowhere else, so there is one definition of it and the gate,
+                // the boards and the fit all read the same one.
+                pass: error.is_finite() && reachable.is_finite() && error <= reachable,
                 items: readable.len(),
                 worst,
             }
@@ -3896,18 +3983,20 @@ pub fn channel_report(columns: &[ChannelColumn]) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
-        "| band | engine L / R | reference L / R | alternate L / R | \\|err\\| | bar | floor | \
+        "| band | engine L / R | reference L / R | alternate L / R | \\|err\\| | reachable | \
+bar | excl. asym | floor | \
 scatter | per-item \\|err\\| / floor | pair E / R | balance | bar | mono E / R | balance | bar | \
 pooled | pooled floor | worst | n |"
     );
     let _ = writeln!(
         s,
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
     );
     for c in columns {
         let _ = writeln!(
             s,
             "| `{}` | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:.2} | {:.2}{} | \
+{:.2} | {:.2} | \
 {:.2} | {:.2} | {:.2}{} / {:.2} | {:+.2} / {:+.2} | {:+.2}{} | {:.2} | {:+.2} / {:+.2} | \
 {:+.2}{} | {:.2} | {:+.2} | {:.2} | {} | {} |",
             c.name,
@@ -3918,8 +4007,10 @@ pooled | pooled floor | worst | n |"
             c.alternate_left_db,
             c.alternate_right_db,
             c.error,
-            c.bar,
+            c.reachable,
             if c.pass { "" } else { " **RED**" },
+            c.bar,
+            c.asymmetry,
             c.floor,
             c.scatter,
             c.per_key_error,

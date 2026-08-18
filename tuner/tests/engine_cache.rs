@@ -46,7 +46,10 @@ fn mic_preset() -> Preset {
         modal: Some(ModalBand {
             lo_hz: 220.0,
             hi_hz: 300.0,
-            lift: 2.0,
+            // Under `soundboard::MIC_MODAL_LIFT`'s rail since
+            // `DECISIONS.md` 418 — the fixture is `validate`d, so an illegal
+            // lift is a fixture that is not a preset.
+            lift: 0.99,
         }),
     });
     preset.validate().expect("a legal fixture");
@@ -106,8 +109,10 @@ fn anything_that_would_change_the_render_lands_on_a_different_entry() {
 
     let mut turned = base.clone();
     turned.voicing.mics = turned.voicing.mics.map(|m| MicVoicing {
+        // Down rather than up: the fixture sits a hundredth under item 418's
+        // rail, so the only legal way to move it is towards zero.
         modal: m.modal.map(|b| ModalBand {
-            lift: b.lift + 0.1,
+            lift: b.lift - 0.1,
             ..b
         }),
         ..m

@@ -197,10 +197,89 @@ fn the_estimator_reads_back_a_spacing_the_engine_was_given() {
             failures += 1;
         }
     }
+    // Printed whether it passes or not, so the calibration is re-derivable from
+    // a green run rather than only visible in a red one — `DECISIONS.md` 400's
+    // rule, and item 418's frontier is quoted from exactly this line.
+    println!("the spacings read back out of the engine's own renders:{lines}");
     assert_eq!(
         failures, 0,
         "the estimator did not read back the geometry the engine was given:{lines}"
     );
+}
+
+/// **Where the mode-controlled band starts biasing the reading**, swept, so the
+/// constraint the fit is held under is a measurement of this tree rather than a
+/// number carried forward from `DECISIONS.md` 395.
+///
+/// The lobe is not common to the two channels — it is added to the side and
+/// subtracted from it — so its own group delay enters a phase-transform delay
+/// reading. Item 395 measured the boundary at about `lo_hz = 225` and item 400
+/// undid it exactly, for a *rotation* whose arithmetic has an inverse; the
+/// rotation is gone (item 406) and the lobe's inverse is not the same
+/// arithmetic, so the boundary is a live constraint again. Item 418 re-measures
+/// it under the rail, where the lobe is weaker and the bias is therefore
+/// smaller, and holds `piano-tuner mics`' own `Knob::ModalLo` at what comes
+/// out.
+///
+/// `#[ignore]`d because it is an instrument and not a gate — twelve bands times
+/// three spacings is 396 renders — and run by name:
+///
+/// ```sh
+/// cargo test --release -p piano-tuner --test mics -- --ignored --nocapture \
+///     where_the_bands_lower_edge_starts_biasing_the_reading
+/// ```
+#[test]
+#[ignore]
+fn where_the_bands_lower_edge_starts_biasing_the_reading() {
+    // `MICS_SWEEP_PRESET` points the sweep at a candidate instead of the
+    // shipped preset — the case this was written for is a refit in flight,
+    // where the boundary has to be known *before* the preset that respects it
+    // exists. It is an override on an `#[ignore]`d instrument and nothing a
+    // gate reads.
+    let base = match std::env::var("MICS_SWEEP_PRESET") {
+        Ok(path) => Preset::load(std::path::Path::new(&path)).expect("the candidate loads"),
+        Err(_) => shipped_preset(),
+    };
+    let shipped = base
+        .voicing
+        .mics
+        .expect("the shipped preset carries a microphone pair");
+    let band = shipped.modal.expect("the shipped preset carries a band");
+    println!("| lo_hz | hi_hz | lift | 0.12 m | 0.24 m | 0.48 m | worst |");
+    println!("|---:|---:|---:|---:|---:|---:|---:|");
+    for lift in [0.5f32, 0.99] {
+        for lo_hz in [155.0f32, 160.0, 165.0, 170.0, 185.0, 230.0] {
+            let mut errors = Vec::new();
+            for &spacing in &[0.12f32, 0.24, 0.48] {
+                let preset = with_mics(
+                    &base,
+                    MicVoicing {
+                        spacing_m: spacing,
+                        modal: Some(piano_emulator::preset::ModalBand {
+                            lo_hz,
+                            hi_hz: band.hi_hz.max(lo_hz * 1.06),
+                            lift,
+                        }),
+                        ..shipped
+                    },
+                );
+                let mut lags: Vec<f64> = delays(&preset).iter().map(|k| k.lag_s).collect();
+                lags.sort_by(f64::total_cmp);
+                let median = lags[lags.len() / 2];
+                let recovered = median.abs() * SPEED_OF_SOUND / ENGINE_LAG_PER_ITD;
+                errors.push(recovered / f64::from(spacing) - 1.0);
+            }
+            let worst = errors.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+            println!(
+                "| {lo_hz:.0} | {:.0} | {lift:.2} | {:+.0} % | {:+.0} % | {:+.0} % | {:+.0} % |",
+                band.hi_hz.max(lo_hz * 1.06),
+                100.0 * errors[0],
+                100.0 * errors[1],
+                100.0 * errors[2],
+                100.0 * worst
+            );
+        }
+    }
 }
 
 /// The same thing said the other way: the readout is **monotone** in the

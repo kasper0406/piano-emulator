@@ -223,10 +223,16 @@ fn probe_mics() -> MicVoicing {
         span_m: 1.1,
         width: 1.3,
         diffuse_coherence: 2.0,
+        // The lift is **0.99 and not 2.0** since item 418 railed it at one: a
+        // fingerprint probe is a preset, and a preset the schema refuses is not
+        // a description of what this engine renders. Changing it misses every
+        // entry written before it, which is the same cost as bumping
+        // `ENGINE_CACHE_VERSION` and is what the version is for — an entry is
+        // the answer to exactly this question or it is not read.
         modal: Some(ModalBand {
             lo_hz: 220.0,
             hi_hz: 300.0,
-            lift: 2.0,
+            lift: 0.99,
         }),
     }
 }

@@ -218,9 +218,23 @@ const SEARCH_FLOOR: f64 = 0.005;
 /// converted through a model of the diffuse taps, which is what it had to be
 /// while the lobe was a gain on the difference (`DECISIONS.md` 379). All three
 /// are starting points and all three move.
-const PROFILE_LOBE_START_HZ: f32 = 165.0;
+///
+/// The lift's reading is **1.5 and the rail is 1.0** (`DECISIONS.md` 418), so
+/// the start is the rail's own top: the recording asks for more side-over-mid
+/// inside the band than a pair of capsules straddling a nodal line can carry
+/// without one of them going through zero, and item 417's disposition is that
+/// the part above the null is the reference session's placement rather than a
+/// piano. Reading it and then not being able to have it is the finding, and the
+/// start of the search is where it is clipped.
+///
+/// The lower edge's reading is **165 Hz and the search's own rail is 170**, for
+/// the reason [`Knob::bounds`] gives: the estimator's spacing readback is
+/// biased by the lobe's group delay, and 170 is where that bias comes inside
+/// the gate's 20 % under the clamped lift. The start is the rail, not the
+/// reading, and the five hertz between them is stated rather than absorbed.
+const PROFILE_LOBE_START_HZ: f32 = 172.0;
 const PROFILE_LOBE_END_HZ: f32 = 270.0;
-const PROFILE_LOBE_LIFT: f32 = 1.5;
+const PROFILE_LOBE_LIFT: f32 = 0.99;
 
 // ---------------------------------------------------------------------------
 // Material
@@ -808,10 +822,20 @@ geometry held"
             hi_hz: PROFILE_LOBE_END_HZ,
             lift: PROFILE_LOBE_LIFT,
         };
-        let start = MicVoicing {
+        let mut start = MicVoicing {
             modal: Some(voicing.modal.unwrap_or(read_off)),
             ..voicing
         };
+        // A base preset written before item 418's rail carries a lift above it
+        // (the shipped one is 2.124), and a search started outside its own
+        // bounds spends its first steps walking back inside them. Every axis is
+        // brought into range before the grid, which for the three axes already
+        // inside is the identity.
+        for knob in knobs {
+            let value = knob.get(&start);
+            let (lo, hi) = knob.bounds();
+            knob.set(&mut start, value.clamp(lo, hi));
+        }
         // **Relaxed first, then constrained** — the standard order for a
         // penalty method, and here it is not a formality. `RED_BAND_PENALTY`
         // is ten bars, which is larger than the whole continuous variation of
@@ -1026,9 +1050,33 @@ impl Knob {
             // held inside the range the profile actually resolves — above the
             // lowest recorded fundamental and below the band where every
             // measured value is already within 0.2 of zero.
-            Knob::ModalLo => (60.0, 400.0),
+            //
+            // **The lower bound is 170 Hz and it is a measurement of the
+            // spacing-readback gate, re-taken under item 418's rail.** The lobe
+            // is not common to the two channels, so its group delay enters the
+            // phase-transform delay reading `tuner/tests/mics.rs`'s
+            // `the_estimator_reads_back_a_spacing_the_engine_was_given` is built
+            // on. Item 395 put that boundary at about **225 Hz** and it is what
+            // emptied the M12 feasible set; swept again under the clamped lobe
+            // (`where_the_bands_lower_edge_starts_biasing_the_reading`, the same
+            // three spacings and the same 20 % tolerance) the worst reading is
+            // **+8 % at 170 Hz, +13 % at 165, +24 % at 160 and +40 % at 155** at
+            // a lift of 0.99, and +14 / +18 / +23 / +32 % at 0.5. So the rail
+            // moves fifty-five hertz *down*: a weaker lobe biases the reading
+            // less, which is the first thing item 418's clamp bought back and
+            // the reason its refit has room item 395's did not.
+            Knob::ModalLo => (170.0, 400.0),
             Knob::ModalHi => (200.0, 1_500.0),
-            Knob::ModalLift => (0.05, 5.9),
+            // **Under the rail, and a hair inside it** (`DECISIONS.md` 418).
+            // `soundboard::MIC_MODAL_LIFT` is clamped at 1.0 — the lift is the
+            // side-over-mid amplitude the band carries, so one is where
+            // `1 − g` reaches zero and one loudspeaker is nulled outright, and
+            // above it `1 − g` changes sign and which speaker carries the
+            // fundamental flips with pitch (item 392's two unity crossings at
+            // 213.0 and 359.6 Hz). The search stops at 0.99 for the reason
+            // every other knob here stops short of its rail: a fitted number
+            // written at a bound is a fit that wanted to keep going.
+            Knob::ModalLift => (0.05, 0.99),
         }
     }
 
@@ -1092,9 +1140,18 @@ impl Knob {
 /// and 180 Hz and comes back between 254 and 320, so the lower edge is gridded
 /// over 150-281 Hz and the upper over 280-815; the lift over 1.2-3.4, which
 /// spans "the diffuse taps as they are" to "three times what they are".
-const MODAL_GRID_LO_HZ: [f32; 4] = [150.0, 185.0, 228.0, 281.0];
+///
+/// **The lift row is the rail's** (`DECISIONS.md` 418). It used to span 1.2-3.4
+/// — "the diffuse taps as they are" to "three times what they are" — and every
+/// cell of it is now illegal: `soundboard::MIC_MODAL_LIFT` stops at 1.0 because
+/// that is where `1 − g` reaches zero. The row spans the legal range instead,
+/// from a quarter of the null to a hundredth under it, and the top of it is
+/// where the whole of the pair energy a lobe can manufacture now lives:
+/// `10 log10(1 + g²)` is **+3.01 dB** at `g = 1` against the +6.18 item 392
+/// convicted.
+const MODAL_GRID_LO_HZ: [f32; 4] = [172.0, 200.0, 235.0, 281.0];
 const MODAL_GRID_HI_HZ: [f32; 4] = [280.0, 400.0, 570.0, 815.0];
-const MODAL_GRID_LIFT: [f32; 4] = [1.2, 1.7, 2.4, 3.4];
+const MODAL_GRID_LIFT: [f32; 4] = [0.25, 0.5, 0.75, 0.99];
 
 fn modal_grid(
     preset: &Preset,
@@ -1660,11 +1717,21 @@ fn pair_excess(columns: &[ChannelColumn]) -> f64 {
         .sum()
 }
 
+/// The per-channel shape half of the objective, in the **gate's own currency**.
+///
+/// `ChannelColumn::reachable` and not `::bar`, because that is what the gate's
+/// verdict is taken against since item 418: the bar is what the recording asks
+/// of a model that could place its capsules where the session did, and half the
+/// reference spread of that ask is the capsule-placement asymmetry item 417
+/// accepted as unscored. A fit closed on `bar` would spend the whole search
+/// chasing a component no symmetric pair can produce — which is what every
+/// mechanism milestone from 393 to 414 spent itself on — and would trade real
+/// bands away to buy a hundredth of it.
 fn channel_excess(columns: &[ChannelColumn]) -> f64 {
     columns
         .iter()
-        .filter(|c| c.error.is_finite() && c.bar.is_finite() && c.bar > 0.0)
-        .map(|c| (c.error / c.bar - PASS_MARGIN).max(0.0))
+        .filter(|c| c.error.is_finite() && c.reachable.is_finite() && c.reachable > 0.0)
+        .map(|c| (c.error / c.reachable - PASS_MARGIN).max(0.0))
         .sum()
 }
 

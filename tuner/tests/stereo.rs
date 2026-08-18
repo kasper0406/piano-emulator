@@ -525,6 +525,30 @@ fn report(what: &str, columns: &[StereoColumn]) -> String {
 /// was one radiator where the recording shows a mode-controlled plate. All
 /// three are now mechanisms in `soundboard`, and the module header says which
 /// milestone closed which bands.
+///
+/// # Red again in the two nodal bands since `DECISIONS.md` 418, on purpose
+///
+/// This gate was green in all six bands from item 379 to item 417, and it was
+/// green **on the mechanism item 392 convicted**. `r0 = (E_mid − E_side) /
+/// (E_mid + E_side)`, so the recording's `−0.115` at 125-250 Hz and `−0.226` at
+/// 250-500 are *more difference than sum* — `E_side/E_mid` of 1.26 and 1.58 —
+/// and the only thing in this engine that could produce them was
+/// `[voicing.mics.modal]`'s lift, whose whole contribution to that ratio is
+/// `lift²·|B|²`. **A ratio above one is a lift above one**, and a lift above one
+/// is `1 − g < 0`: one loudspeaker carrying the note inverted against the
+/// other, at a frequency that moves with pitch, with two outright nulls inside
+/// the audible band. Item 417 accepted that price as too high — a listener
+/// found the artifact three separate ways while this gate was green — and item
+/// 418 railed the lift at the null.
+///
+/// So these two bands are red because the instrument stopped manufacturing what
+/// made them green, and the refit's reach under the rail is `E_side/E_mid` of
+/// **0.80 and 1.03** against the 1.26 and 1.58 asked for. It is the same
+/// shortfall the per-channel board's `pair_db` columns carry, in the other of
+/// the two units it can be read in, and item 418 records the frontier and the
+/// three-way conflict that bounds it. **Do not close this by moving the bar**:
+/// the bar is the recording against its own second take and the shortfall is
+/// the mechanism, not the measurement.
 #[test]
 fn the_engines_stereo_image_is_the_recordings_in_every_band() {
     let Some(m) = measured() else {
@@ -595,6 +619,58 @@ against a bar of {:.3} (floor {:.3}, scatter {:.3}, x{:.2}), worst key {} at {:.
 /// has not happened; asserting that the microphone section does not make them
 /// *worse* is exactly the "must not have bought its two bands by spending the
 /// other four" rule the mode-controlled band already carries below.
+///
+/// # The target excludes the capsule-placement asymmetry, and says so out loud
+///
+/// `DECISIONS.md` 417's side-injection probe refuted the whole class of
+/// symmetric repairs at once: the recording's nodal band is asymmetric **in
+/// level** between its two capsules — `dev_L − dev_R` up to **+5.85 dB at
+/// 178 Hz** — and no side source, incoherent or coherent, can move that
+/// statistic under control, while item 406(a)'s successor form is excluded by
+/// the very property it was chosen for (`|L| = |R|`). Reproducing it needs
+/// per-channel per-band gains fitted to where two microphones stood on one
+/// afternoon, which the standing no-room and no-mic-idiosyncrasy policy
+/// refuses. So it is **accepted as unscored**, in the same class as item 328's
+/// transposed notes, and subtracted from this gate's target rather than
+/// chased: `ChannelColumn::asymmetry`, half the reference's own spread, which
+/// is the floor the statistic itself puts under any model whose two channels
+/// depart symmetrically from their own mono. The gate prints it, per octave and
+/// at the sixth-octave resolution the probe measured it at, **before** it
+/// asserts anything — an acceptance nobody can read is indistinguishable from a
+/// widened bar.
+///
+/// **This engine is not a symmetric model and the exclusion says so** (item
+/// 424). A nodal-line lobe is `L = m(1 + g)`, `R = m(1 − g)`: per-channel by
+/// construction, and the engine's own spread reads −1.27 dB at 125-250 Hz and
+/// +3.64 at 250-500 against the reference's +1.52 and −1.30 — opposite in sign
+/// in both. So the floor **sizes** the exclusion and item 417's policy is what
+/// **justifies** it, and what makes the difference safe here is measured rather
+/// than argued: the exclusion changes no verdict this gate asserts. The two
+/// bands asserted absolutely are red against the unexcluded bar too (2.38
+/// against 1.15, 2.47 against 1.09), the other four are asserted against a
+/// pan-potted engine's own error with the unexcluded `bar` as the slack, and
+/// the engine is *worse* than the symmetric floor in both nodal bands rather
+/// than spending it. Where the exclusion does move a target is the fit, which
+/// reads `ChannelColumn::reachable` so that fit and gate close on one
+/// definition.
+///
+/// `the_acceptance_still_fails_on_the_lobe_it_was_re_barred_against` is the
+/// falsification: the pre-418 unclamped lobe is refused by both crates' schemas
+/// *and* is red on this board against the reachable bar, so the exclusion is
+/// narrower than the defect it could be accused of hiding.
+///
+/// # And it is still red, which is item 418's frontier and not a surprise
+///
+/// The rail costs what it was always going to cost. `pair_db` is
+/// `10 log10(1 + E_side/E_mid)` and the lobe's whole contribution to
+/// `E_side/E_mid` is `lift²·|B|²`, so **one is a ceiling of +3.01 dB** where the
+/// recording's own two nodal bands read **+3.54 and +3.88**; the same ratio read
+/// as a correlation is `r0 = (1 − ρ)/(1 + ρ)`, and the recording's `−0.115` and
+/// `−0.226` are `ρ = 1.26` and `1.58` — *more difference than sum*, which for
+/// this construction is a lift above the null. The refit under the rail reaches
+/// `ρ = 0.80` and `1.03`. Every red left on this board and the two the
+/// coherence board now carries are that one shortfall read four ways, and item
+/// 418 records the map.
 #[test]
 fn each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts() {
     let Some(m) = measured() else {
@@ -640,18 +716,78 @@ mode-controlled band deleted, which is the headroom the fold-down has:\n{}",
         2,
         "the two bands the mode-controlled band lives in must both be readable{text}"
     );
+    // **The acceptance is printed before it is taken, so it is never silent**
+    // (`DECISIONS.md` 417-418). What the recording asks in these bands has a
+    // component no symmetric pair of capsules can produce — the reference
+    // session's own placement across the board's nodal lines, `spread = dev_L −
+    // dev_R` running to +5.85 dB at 178 Hz, which item 417's side-injection
+    // probe refuted every mechanism against and which the standing
+    // no-mic-idiosyncrasy policy accepts as unscored, exactly as item 328
+    // excludes the library's transposed notes from every fitted quantity.
+    // `ChannelColumn::asymmetry` is that component, half the reference spread,
+    // and the verdict below is taken against `bar + asymmetry`.
+    println!(
+        "the capsule-placement asymmetry excluded from this gate's target \
+(`DECISIONS.md` 417; half the recording's own dev_L − dev_R, out of the reference alone).\n\
+  The excluded figure is the floor this statistic puts under a model whose two channels depart \
+*symmetrically* from their own mono; a nodal-line lobe is `L = m(1+g)`, `R = m(1-g)` and is not \
+one, so the engine's own spread is printed beside it and the two bands' verdicts are stated \
+against both bars (`DECISIONS.md` 424):"
+    );
+    for c in &columns {
+        if c.items == 0 {
+            continue;
+        }
+        println!(
+            "  {:>7}: reference spread {:+.2} dB → excluded {:.2} dB; bar {:.2} → reachable \
+{:.2}; the engine's own spread is {:+.2} dB and it reads {:.2}, where a symmetric model's \
+best would be {:.2} — {}",
+            c.name,
+            c.reference_left_db - c.reference_right_db,
+            c.asymmetry,
+            c.bar,
+            c.reachable,
+            c.engine_left_db - c.engine_right_db,
+            c.error,
+            c.asymmetry,
+            if c.error <= c.asymmetry {
+                "inside the symmetric floor, so this band is spending the exclusion"
+            } else {
+                "worse than that floor, so the exclusion is not what carries this band"
+            },
+        );
+    }
+    println!(
+        "  and the same at a sixth of an octave, where the probe measured it \
+(`renders/side-injection/SIDE_INJECTION.md` §5f):"
+    );
+    for c in &fine {
+        if c.items == 0 || c.lo_hz < 125.0 || c.hi_hz > 500.0 {
+            continue;
+        }
+        println!(
+            "  {:>7}: reference spread {:+.2} dB → excluded {:.2} dB",
+            c.name,
+            c.reference_left_db - c.reference_right_db,
+            c.asymmetry
+        );
+    }
     for c in &middle {
         assert!(
             c.pass,
-            "{}: the two channels' spectra are {:.2} dB from the recording's against a bar of \
-{:.2} (floor {:.2}, scatter {:.2}, x{:.2}) — engine L {:+.2} / R {:+.2} where the recording \
-reads L {:+.2} / R {:+.2}{text}",
+            "{}: the two channels' spectra are {:.2} dB from the recording's against a reachable \
+bar of {:.2} — the recording's own bar {:.2} (floor {:.2}, scatter {:.2}, x{:.2}) plus the \
+{:.2} dB of capsule-placement asymmetry item 417 excludes (half the reference's own spread of \
+{:+.2} dB) — engine L {:+.2} / R {:+.2} where the recording reads L {:+.2} / R {:+.2}{text}",
             c.name,
             c.error,
+            c.reachable,
             c.bar,
             c.floor,
             c.scatter,
             realism::STEREO_ALLOWANCE,
+            c.asymmetry,
+            c.reference_left_db - c.reference_right_db,
             c.engine_left_db,
             c.engine_right_db,
             c.reference_left_db,
@@ -729,6 +865,121 @@ more than a bar ({:.2}) worse than having no section at all{text}",
             p.error,
             c.error,
             c.bar,
+            text = text
+        );
+    }
+}
+
+/// **The falsification the re-barring is kept honest by**: put the unclamped
+/// lobe back and the acceptance above must go red again.
+///
+/// `DECISIONS.md` 418 does two things to this gate at once — it clamps the
+/// instrument (`soundboard::MIC_MODAL_LIFT` at one) and it re-bars the target
+/// (item 417's capsule-placement asymmetry excluded, `ChannelColumn::asymmetry`)
+/// — and either of those, done alone and badly, is a way to make a red test
+/// green without fixing anything. This is the test that says the second did not
+/// swallow the first: the exact `[voicing.mics.modal]` the tree shipped before
+/// item 418, restored on top of everything else this milestone changed, read
+/// against the *reachable* bar rather than the old one.
+///
+/// Two assertions, and the pair of them is the point.
+///
+/// * **The schema refuses it.** A lift of 2.124 is not a preset any more, in
+///   either crate's copy of the rails, so the defect cannot come back through a
+///   file.
+/// * **And the board refuses it too**, on the same renders and the same
+///   statistic the acceptance passes on — so the exclusion is narrower than the
+///   defect it is accused of hiding. If a future edit widens `asymmetry` until
+///   the old lobe fits under it, this goes red.
+#[test]
+fn the_acceptance_still_fails_on_the_lobe_it_was_re_barred_against() {
+    let Some(m) = measured() else {
+        eprintln!("no data/salamander in this tree; skipping the falsification");
+        return;
+    };
+    // `DECISIONS.md` 401's own numbers: the band `presets/salamander-c5.toml`
+    // carried from item 379 to item 417, lift and all.
+    const PRE_418: piano_emulator::preset::ModalBand = piano_emulator::preset::ModalBand {
+        lo_hz: 229.425_17,
+        hi_hz: 307.391_63,
+        lift: 2.124_296_2,
+    };
+    let mut unclamped = shipped_preset();
+    unclamped.voicing.mics = unclamped
+        .voicing
+        .mics
+        .map(|mics| piano_emulator::preset::MicVoicing {
+            modal: Some(PRE_418),
+            ..mics
+        });
+    let refusal = unclamped.validate().expect_err(
+        "the pre-418 lobe must be refused by the schema — that is the rail item 418 added",
+    );
+    println!("the schema's own refusal of the unclamped lobe: {refusal}");
+    assert!(
+        format!("{refusal}").contains("voicing.mics.modal.lift"),
+        "the refusal must name the lift and not something else: {refusal}"
+    );
+
+    // Rendered anyway — `render_to_buffer` does not validate — so the board can
+    // be asked the same question the acceptance asks.
+    let (_, channels) = score(&unclamped);
+    let columns = realism::channel_columns(&channels);
+    let text = format!(
+        "\nthe pre-418 unclamped lobe, on this milestone's own board:\n{}",
+        realism::channel_report(&columns)
+    );
+    let middle: Vec<&realism::ChannelColumn> = columns
+        .iter()
+        .filter(|c| c.items > 0 && c.lo_hz >= 125.0 && c.hi_hz <= 500.0)
+        .collect();
+    assert_eq!(middle.len(), 2, "both middle bands must be readable{text}");
+    let red = middle.iter().filter(|c| !c.pass).count();
+    assert!(
+        red > 0,
+        "the unclamped lobe passes the re-barred acceptance, which means the exclusion is \
+wider than the defect: {}{text}",
+        middle
+            .iter()
+            .map(|c| format!(
+                "{} {:.2} against a reachable {:.2} (bar {:.2} + excluded {:.2})",
+                c.name, c.error, c.reachable, c.bar, c.asymmetry
+            ))
+            .collect::<Vec<_>>()
+            .join(", "),
+        text = text
+    );
+    // And the two instruments are told apart on the halves the rail *did*
+    // close, so this is a difference between two instruments and not a board
+    // that fails everything. The shipped one is inside the recording's own
+    // pair-energy on neither band (item 418's frontier) and the unclamped one
+    // is inside on both — because the energy it is inside with is manufactured,
+    // which is the whole of item 392. Printed, both ways, and asserted only on
+    // the direction: the clamped instrument must carry **less** pair energy than
+    // the unclamped one in the bands the lobe acts in.
+    let shipped: Vec<realism::ChannelColumn> = realism::channel_columns(&m.channels)
+        .into_iter()
+        .filter(|c| c.items > 0 && c.lo_hz >= 125.0 && c.hi_hz <= 500.0)
+        .collect();
+    for (c, s) in middle.iter().zip(&shipped) {
+        println!(
+            "  {}: unclamped pair {:+.2} dB (balance {:+.2}) against clamped {:+.2} \
+(balance {:+.2}), the recording's own {:+.2}",
+            c.name,
+            c.engine_pair_db,
+            c.pair_balance,
+            s.engine_pair_db,
+            s.pair_balance,
+            c.reference_pair_db
+        );
+        assert!(
+            s.engine_pair_db < c.engine_pair_db,
+            "{}: the clamped instrument carries {:+.2} dB of pair energy against the unclamped \
+one's {:+.2} — the rail is supposed to take energy out of the two loudspeakers, not put it \
+in{text}",
+            s.name,
+            s.engine_pair_db,
+            c.engine_pair_db,
             text = text
         );
     }
