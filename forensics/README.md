@@ -53,6 +53,7 @@ the one-line summaries below are only an index.
 | `channel_fidelity` | The recording's own interchannel behaviour at a sixth of an octave over thirty keys, which is what the per-channel board's bars are made of — `DECISIONS.md` 393. |
 | `channel_verify` | The per-channel repair re-measured with its own DSP, against the board that graded it. |
 | `mono_mechanism` | Whether the recording's own mono sum pays for its nodal band, how much of that the engine's mono already inherited, and — sections added for `DECISIONS.md` 407-411 — which keys carry the difference, which stage of the engine carries it (seven one-stage ablations), and the headroom an energy-conserving mechanism needs against what every fitted knob reaches. |
+| `side_injection` | Whether an **antisymmetric** (side-only) radiator can buy the recording's nodal band for free: it fits a per-sixth-octave decorrelated side source over 151-339 Hz until the treated pair-over-mono is the recording's, proves the mono fold-down unmoved, and re-reads every gate statistic on the treated renders — `DECISIONS.md` 417. |
 | `preset_variant` | Writes a copy of a preset with one thing changed, so that a standing board can be run on the variant without a hand-edited file. The only entry here that is a *helper* rather than a measurement, and it is here because the experiments in `DECISIONS.md` 338-341 are only reproducible with it. |
 
 Most of them write into `renders/` or into `target/`, both gitignored, and
