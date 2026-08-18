@@ -39,6 +39,7 @@
 //! | `hf` | 2-6 kHz share of the note's total power, dB | brilliance, at absolute frequency (`DECISIONS.md` 292), because texture that changed a note's colour would be heard as one note being brighter |
 //! | `strike` | attack tonality of the first 30 ms, dB — how loud the mechanism is against the note (`DECISIONS.md` 340-341) | a **balance**, scored against the recording rather than against the line's own trend |
 //! | `channel` | [`pair_over_mono_db`]: `10 log10((E_L + E_R) / 2 E_M)` over the note's window | **the only column here that is not a mono fold-down** (`DECISIONS.md` 392-394) — what the two loudspeakers put in the room against what this note's own mono sum says they do |
+//! | `balance` | [`fundamental_balance_db`]: `10 log10(E_L / E_R)` at the note's **own `f0`**, heterodyned | *which* loudspeaker the note's fundamental comes out of, and by how much (`DECISIONS.md` 446) |
 //!
 //! `channel` exists because the other four cannot exist without it. All four
 //! are computed on `(L+R)/2`, as is every other board in this repository, and
@@ -48,6 +49,19 @@
 //! virtual microphone pair's mode-controlled lobe read +6.42 dB at C4 against
 //! +2.41 at F4, a listener picked C4 out of this very line three milestones
 //! running, and 696 tests were green throughout.
+//!
+//! `balance` exists because `channel` cannot see the defect of `DECISIONS.md`
+//! 446 either, and for a reason of exactly the same shape. `channel` is a
+//! **sum**, `(E_L + E_R) / 2 E_M`: it is invariant under swapping the two
+//! loudspeakers, so a stage that puts every fundamental of a tune seven
+//! decibels into the *left* channel — against a recording that leans one and a
+//! half decibels *right* — moves it by nothing at all. Two capsules over a real
+//! soundboard do hear a note at two levels and the recording's own number is not
+//! zero; what makes it a defect is that the engine's is not the recording's, and
+//! `10 log10(E_L / E_R)` at the note's own fundamental is the statistic the
+//! session measured it with. It is `channel`'s missing half — where the energy
+//! is, not how much of it there is — read in the band a listener attributes a
+//! pitch from.
 //!
 //! `wobble` is not [`motion::Motion::beat_depth_db`], which `COMPASS.md` uses,
 //! and it cannot be: `motion.rs` measures over 0.3-3.0 s and a melody gives one
@@ -241,21 +255,47 @@ pub const LADDER_REACH: u8 = 9;
 pub const ALLOWANCE: f64 = 1.25;
 
 /// Names in the order [`NoteTexture::values`] returns them.
-pub const METRICS: [&str; 5] = ["roughness", "wobble", "hf", "strike", "channel"];
+pub const METRICS: [&str; 6] = [
+    "roughness",
+    "wobble",
+    "hf",
+    "strike",
+    "channel",
+    "balance",
+];
 
-/// Which of [`METRICS`] is a **balance** rather than an evenness, and is
-/// therefore gated on a different question.
+/// Which of [`METRICS`] is a **balance**: scored against the recording's own
+/// value at the same note, over the recorded ladder, in the head window only.
 ///
-/// `DECISIONS.md` 341, 394. The first three ask *does one note of the line
+/// `DECISIONS.md` 341, 394, 446. The first three ask *does one note of the line
 /// stand out from the rest*, which is the listener's complaint of item 284 and
 /// needs no recording of the note to answer. `strike` asks *is the mechanism as
-/// loud against the note as the piano's is* and `channel` asks *do the two
-/// loudspeakers play this note as the piano's two channels do* — both are
-/// comparisons with a recording and only mean anything at a key the library
-/// recorded, so both are scored on the recorded ladder and not on the line, and
-/// their bar is built out of two takes of one recorded key rather than out of
-/// the scatter of the register.
-pub const METRIC_IS_BALANCE: [bool; 5] = [false, false, false, true, true];
+/// loud against the note as the piano's is*, `channel` asks *do the two
+/// loudspeakers play this note as the piano's two channels do*, and `balance`
+/// asks *does the note's own fundamental come out of the loudspeaker the
+/// piano's comes out of* — all three are comparisons with a recording and only
+/// mean anything at a key the library recorded, so all three are scored on the
+/// recorded ladder and not on the line, and their bar is built out of two takes
+/// of one recorded key rather than out of the scatter of the register.
+pub const METRIC_IS_BALANCE: [bool; 6] = [false, false, false, true, true, true];
+
+/// Which of [`METRICS`] is additionally gated on the **line's own spread**: how
+/// far the engine's worst note stands from the engine line's own register
+/// trend, against how far the recorded keys of that register stand from theirs.
+///
+/// `balance` is the one metric that carries both verdicts, and `DECISIONS.md`
+/// 446 is why: the finding it was written for has two halves that are two
+/// different defects. A **uniform** lean — every fundamental of the tune seven
+/// decibels into the left channel where the recording leans one and a half
+/// right — is a wrong instrument and only a recorded key can convict it, which
+/// is the balance half. **Note-to-note jumps** — +10 dB at one pitch and −2 at
+/// the next — are what the listener actually reports as "wobbly", they are a
+/// property of the engine's own line that needs no recording of any note to
+/// see, and a median over nine keys cannot see them at all. A column that
+/// carried only the first would pass an instrument whose lean averaged to zero
+/// by alternating sides, and one that carried only the second would pass the
+/// uniform lean that is measured today.
+pub const METRIC_IS_SPREAD: [bool; 6] = [true, true, true, false, false, true];
 
 /// What `DECISIONS.md` 340's refit moved `[noise.strike]` by, kept here so that
 /// the instrument the `strike` column fails on can be built from the shipped
@@ -273,6 +313,21 @@ pub const STRIKE_METRIC: usize = 3;
 
 /// The index of `channel` in [`METRICS`].
 pub const CHANNEL_METRIC: usize = 4;
+
+/// The index of `balance` in [`METRICS`].
+pub const BALANCE_METRIC: usize = 5;
+
+/// **The `[voicing.mics.modal]` band `DECISIONS.md` 418 shipped and 446
+/// convicted**, as `(lo_hz, hi_hz, lift)` — kept here so that the instrument
+/// the `balance` column fails on can be built from whatever preset ships
+/// without a hand-edited file, exactly as [`STRIKE_REFIT_LEVEL_DB`] is kept for
+/// `strike`.
+///
+/// Its two edges bracket every fundamental of the Ode line (261.6 to 392.0 Hz)
+/// and that is the whole of the defect: `L = m(1 + B)` and `R = m(1 − B)`, so
+/// wherever `Re B > 0` the band is not a widener but a **pan**, and over this
+/// span it pans the tune's fundamentals into the left loudspeaker.
+pub const M17_MODAL_BAND: (f32, f32, f32) = (174.264_39, 456.491_46, 0.99);
 
 // ---------------------------------------------------------------------------
 // The line
@@ -518,16 +573,28 @@ pub struct NoteTexture {
     /// +2.41 at F4** where the recording's own five pitches sit inside a
     /// decibel of each other.
     pub channel_db: f64,
+    /// **Which loudspeaker this note's own fundamental comes out of**:
+    /// `10 log10(E_L / E_R)` at the note's `f0`, heterodyned
+    /// ([`fundamental_balance_db`]). Positive is a left lean.
+    ///
+    /// `DECISIONS.md` 446. Zero for a centred pan-pot note and *not* zero for
+    /// the recording, whose two capsules stood where they stood. It is the half
+    /// of the pair's behaviour [`NoteTexture::channel_db`] is blind to by
+    /// construction: `E_L + E_R` is symmetric under swapping the two channels,
+    /// so a stage that moves a whole melody into one loudspeaker moves that
+    /// column by nothing at all.
+    pub balance_db: f64,
 }
 
 impl NoteTexture {
-    pub fn values(&self) -> [f64; 5] {
+    pub fn values(&self) -> [f64; 6] {
         [
             self.roughness_db,
             self.wobble_db,
             self.hf_db,
             self.strike_db,
             self.channel_db,
+            self.balance_db,
         ]
     }
 }
@@ -611,6 +678,17 @@ pub fn measure_line(
                         slice,
                     ),
                 },
+                balance_db: match (stereo, hz.first()) {
+                    // Same convention as `channel`: one channel is its own
+                    // pair, and a pair that is one signal twice leans nowhere.
+                    (None, _) | (_, None) => 0.0,
+                    (Some((left, right)), Some(&f0)) => fundamental_balance_db(
+                        &left[lo.min(left.len())..hi.min(left.len())],
+                        &right[lo.min(right.len())..hi.min(right.len())],
+                        f0,
+                        sample_rate,
+                    ),
+                },
             }
         })
         .collect()
@@ -632,6 +710,42 @@ pub fn pair_over_mono_db(left: &[f32], right: &[f32], mono: &[f32]) -> f64 {
         return f64::NAN;
     }
     10.0 * (pair / (2.0 * mid)).log10()
+}
+
+/// **`10 log10(E_L / E_R)` in the note's own fundamental band** — the column
+/// [`NoteTexture::balance_db`] carries, and the statistic the session of
+/// `DECISIONS.md` 446 measured the defect with.
+///
+/// The band is the same complex heterodyne every other narrowband reading in
+/// this crate uses ([`crate::estimate::brilliance::narrowband_db`]): a
+/// band-pass a quarter of `f0` wide, centred on the frequency the *preset* says
+/// this key's first partial has, so the engine and the recording are read at
+/// one frequency and a difference between them is never a difference in where
+/// they looked. The two channels go through one filter, so anything the filter
+/// does to a note it does to both sides of the ratio.
+///
+/// **Why the fundamental and not the whole note.** A listener attributes a
+/// pitch — and an image — from the partial that carries it, and the mechanism
+/// this column was written for is a *band*: `[voicing.mics.modal]` acts over
+/// 174-456 Hz and every fundamental of the Ode line falls inside it while most
+/// of each note's energy does not. Read broadband, the same defect is diluted
+/// by the partials the band never touched; read at `f0`, it is the number the
+/// ear is given.
+///
+/// Positive is a **left** lean. `NaN` when either channel has no measurable
+/// energy at `f0`, which the callers drop rather than score.
+pub fn fundamental_balance_db(left: &[f32], right: &[f32], f0: f64, sample_rate: f64) -> f64 {
+    let energy = |signal: &[f32]| -> f64 {
+        crate::estimate::brilliance::narrowband_db(signal, f0, sample_rate)
+            .iter()
+            .map(|&db| 10f64.powf(db / 10.0))
+            .sum::<f64>()
+    };
+    let (l, r) = (energy(left), energy(right));
+    if !l.is_finite() || !r.is_finite() || l <= 0.0 || r <= 0.0 {
+        return f64::NAN;
+    }
+    10.0 * (l / r).log10()
 }
 
 /// Where the strike actually is, near where the phrase says it is.
@@ -721,13 +835,13 @@ fn hf_share_db(stft: &Stft, window: &[f32], sample_rate: f64) -> f64 {
 /// Median rather than mean because the notes are played into the tail of the
 /// one before them and how much tail there is depends on where in the phrase a
 /// note falls; the median over six occurrences is the note, not the phrasing.
-pub fn per_key(textures: &[NoteTexture]) -> Vec<(u8, [f64; 5])> {
+pub fn per_key(textures: &[NoteTexture]) -> Vec<(u8, [f64; 6])> {
     let mut keys: Vec<u8> = textures.iter().map(|t| t.key).collect();
     keys.sort_unstable();
     keys.dedup();
     keys.into_iter()
         .map(|key| {
-            let mut out = [0.0; 5];
+            let mut out = [0.0; 6];
             for (m, slot) in out.iter_mut().enumerate() {
                 let mut values: Vec<f64> = textures
                     .iter()
@@ -829,9 +943,18 @@ pub struct Column {
     pub bar: f64,
     pub pass: bool,
     // --- the balance verdict, for a metric that has one --------------------
-    /// Whether this column is gated on [`Column::balance`] instead of on
-    /// [`Column::standout`] — see [`METRIC_IS_BALANCE`].
+    /// Whether this column is gated on [`Column::balance`] — see
+    /// [`METRIC_IS_BALANCE`].
     pub gated_on_balance: bool,
+    /// Whether this column is gated on [`Column::standout`] — see
+    /// [`METRIC_IS_SPREAD`]. Every column carries both numbers; these two flags
+    /// say which of them is a verdict and which is printed. `balance` is the
+    /// one metric for which both are (`DECISIONS.md` 446).
+    pub gated_on_spread: bool,
+    /// The balance half's own verdict, whether or not it is gated.
+    pub balance_pass: bool,
+    /// The spread half's own verdict, whether or not it is gated.
+    pub spread_pass: bool,
     /// The engine's median distance from the piano over the **recorded keys of
     /// the register**, signed. For `strike` that is how much louder or quieter
     /// the engine's mechanism is against its own note than the piano's is
@@ -923,7 +1046,7 @@ pub fn compare(
         // once and in the window that contains it.
         .filter(|&(m, _)| !(METRIC_IS_BALANCE[m] && window == Window::Tail))
         .map(|(m, &metric)| {
-            let residuals = |rows: &[(u8, [f64; 5])]| -> Vec<f64> {
+            let residuals = |rows: &[(u8, [f64; 6])]| -> Vec<f64> {
                 let points: Vec<(f64, f64)> =
                     rows.iter().map(|&(k, v)| (f64::from(k), v[m])).collect();
                 let (slope, intercept) = theil_sen(&points);
@@ -1010,7 +1133,31 @@ pub fn compare(
                 notes.len(),
             );
 
-            let bar = population_bar.max(take_scatter) * ALLOWANCE;
+            // **The clone floor, and it applies to one column** (`DECISIONS.md`
+            // 446). Item 328 refuses `clone_standout` as a bar because for a
+            // texture metric the line's four transposed notes are two takes
+            // resampled and agree with each other far better than two keys of a
+            // piano do — the number is a resampler's. For `balance` that
+            // argument does not hold and its opposite is measured: resampling
+            // preserves a take's channel ratio exactly, so a transposed note's
+            // image *is* the take's image, and on this library the line's own
+            // spread is set by the one note that is **not** transposed — C4,
+            // whose recording puts its fundamental 16.65 dB into the right
+            // capsule against −1.0 at its four neighbours. A bar that made the
+            // engine smoother than the recording it is scored against would
+            // fail the recording itself, which is what the control
+            // `the_recordings_own_line_passes_the_balance_column` asserts. So
+            // for a column carrying both verdicts the floor is the larger of
+            // the recorded register's own scatter and the reference line's,
+            // which can only ever raise it above item 328's bar and never lower
+            // it below.
+            let clone_standout = biggest(&reference_resid);
+            let spread_floor = if METRIC_IS_BALANCE[m] && METRIC_IS_SPREAD[m] {
+                clone_standout
+            } else {
+                0.0
+            };
+            let bar = population_bar.max(take_scatter).max(spread_floor) * ALLOWANCE;
 
             // The balance: the engine's median distance from the piano over the
             // recorded keys, against the median distance between two takes of
@@ -1051,15 +1198,17 @@ pub fn compare(
             let register_sigma = 1.4826 * median(&mut spread) / n.sqrt();
             let balance_bar = median(&mut takes).max(register_sigma) * ALLOWANCE;
             let gated_on_balance = METRIC_IS_BALANCE[m];
+            let gated_on_spread = METRIC_IS_SPREAD[m];
+            let balance_pass = balance.abs() <= balance_bar;
+            let spread_pass = standout <= bar;
 
             Column {
                 metric,
                 window,
-                pass: if gated_on_balance {
-                    balance.abs() <= balance_bar
-                } else {
-                    standout <= bar
-                },
+                // A column asserts every half it is gated on and prints the
+                // other. `balance` is gated on both, which is the whole point
+                // of it (`METRIC_IS_SPREAD`).
+                pass: (!gated_on_balance || balance_pass) && (!gated_on_spread || spread_pass),
                 notes,
                 population: population_rows,
                 standout,
@@ -1069,10 +1218,13 @@ pub fn compare(
                 population_standout_key,
                 take_scatter,
                 take_scatter_key,
-                clone_standout: biggest(&reference_resid),
+                clone_standout,
                 clone_layer_standout: biggest(&layer_resid),
                 bar,
                 gated_on_balance,
+                gated_on_spread,
+                balance_pass,
+                spread_pass,
                 balance,
                 balance_bar,
                 seam,
@@ -1088,16 +1240,16 @@ pub fn compare(
 /// recordings, and the recordings' neighbouring velocity layer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lines {
-    pub engine: Vec<(u8, [f64; 5])>,
-    pub reference: Vec<(u8, [f64; 5])>,
-    pub layer: Vec<(u8, [f64; 5])>,
+    pub engine: Vec<(u8, [f64; 6])>,
+    pub reference: Vec<(u8, [f64; 6])>,
+    pub layer: Vec<(u8, [f64; 6])>,
 }
 
 impl Lines {
     pub fn new(
-        engine: Vec<(u8, [f64; 5])>,
-        reference: Vec<(u8, [f64; 5])>,
-        layer: Vec<(u8, [f64; 5])>,
+        engine: Vec<(u8, [f64; 6])>,
+        reference: Vec<(u8, [f64; 6])>,
+        layer: Vec<(u8, [f64; 6])>,
     ) -> Self {
         Lines {
             engine,
@@ -1189,30 +1341,30 @@ pub fn theil_sen(points: &[(f64, f64)]) -> (f64, f64) {
 pub fn report(columns: &[Column]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
+    // Every column carries both halves and both are printed; which of them is a
+    // verdict and which is context is `gated_on_balance` / `gated_on_spread`.
+    // Printing only the gated half is what let `DECISIONS.md` 446's defect sit
+    // under a green board — the number was never on the page.
+    let verdict = |gated: bool, ok: bool| {
+        match (gated, ok) {
+            (false, _) => "  ....  ",
+            (true, true) => "  pass  ",
+            (true, false) => "  FAIL  ",
+        }
+    };
     for c in columns {
-        if c.gated_on_balance {
-            let _ = writeln!(
-                out,
-                "{:<10} {:<4} balance {:+6.2} over the recorded keys, bar {:5.2} \
-(one key's two takes {:4.2}, x{:.2}) {}  |  evenness {:5.2} at {:<3} of {:5.2}",
-                c.metric,
-                c.window.name(),
-                c.balance,
-                c.balance_bar,
-                c.balance_bar / ALLOWANCE,
-                ALLOWANCE,
-                if c.pass { "pass" } else { "FAIL" },
-                c.standout,
-                note_name(c.standout_key),
-                c.bar,
-            );
-        } else {
         let _ = writeln!(
             out,
-            "{:<10} {:<4} stands out {:5.2} at {:<3} bar {:5.2} (register {:4.2}, worst {:4.2} at {}, \
-take {:4.2} at {}, x{:.2}) {}  |  seam {:5.2} at {:<3} floor {:4.2}",
+            "{:<10} {:<4} balance {:+6.2} bar {:5.2} (two takes {:4.2}, x{:.2}){}\
+|  stands out {:5.2} at {:<3} bar {:5.2} (register {:4.2}, worst {:4.2} at {}, take {:4.2} at {}){}\
+|  seam {:5.2} at {:<3} floor {:4.2}",
             c.metric,
             c.window.name(),
+            c.balance,
+            c.balance_bar,
+            c.balance_bar / ALLOWANCE,
+            ALLOWANCE,
+            verdict(c.gated_on_balance, c.balance_pass),
             c.standout,
             note_name(c.standout_key),
             c.bar,
@@ -1221,13 +1373,11 @@ take {:4.2} at {}, x{:.2}) {}  |  seam {:5.2} at {:<3} floor {:4.2}",
             note_name(c.population_standout_key),
             c.take_scatter,
             note_name(c.take_scatter_key),
-            ALLOWANCE,
-            if c.pass { "pass" } else { "FAIL" },
+            verdict(c.gated_on_spread, c.spread_pass),
             c.seam,
             note_name(c.seam_key),
             c.seam_floor,
         );
-        }
         let _ = writeln!(
             out,
             "{:<15}   line: key    engine  (resid)  recording  (resid)    layer     error",
@@ -1277,6 +1427,41 @@ take {:4.2} at {}, x{:.2}) {}  |  seam {:5.2} at {:<3} floor {:4.2}",
 
 /// `C4` for 60.
 pub use crate::realism::note_name;
+
+/// **The recordings playing one of these lines**, cached to disk and aligned —
+/// the one definition of the reference side, shared by the gate
+/// (`tuner/tests/melody.rs`), the driver (`piano-tuner melody`) and the fit
+/// (`piano-tuner mics`).
+///
+/// It is a function of the sampler, the library and the phrase, none of which
+/// move when the engine does, so the three callers key on the same fingerprint
+/// and can never be measuring two different trims of one take. It was three
+/// copies of this function until the fit needed a fourth (`DECISIONS.md` 447)
+/// — and a fit and a gate reading two different reference renders is the whole
+/// failure mode item 416 named.
+pub fn reference_line(
+    sfz: &std::path::Path,
+    data: &std::path::Path,
+    phrase: &Phrase,
+    name: &str,
+    events: &[TimedEvent],
+) -> Result<Audio, crate::Error> {
+    let mut key = crate::cache::Fingerprint::new();
+    key.str("tests/melody/reference")
+        .u64(u64::from(crate::sampler::SAMPLER_VERSION))
+        .file(sfz)?
+        .u64(u64::from(crate::SAMPLE_RATE))
+        .str(phrase.name)
+        .str(name)
+        .f64(phrase.duration_s);
+    let path = crate::cache::reference_dir(data)
+        .join(format!("melody-{}-{name}-{}.wav", phrase.name, key.hex()));
+    let rendered = crate::cache::audio(&path, || {
+        let mut sampler = crate::sampler::Sampler::new(sfz)?;
+        sampler.render(events, phrase.duration_s)
+    })?;
+    Ok(align_reference(&rendered, phrase.events[0].time_s))
+}
 
 /// A rendered line cut so that its first note starts where the phrase says it
 /// does.
@@ -1377,19 +1562,28 @@ mod tests {
         columns.into_iter().filter(|c| !c.gated_on_balance).collect()
     }
 
+    /// The column named, whatever the window.
+    fn named(columns: &[Column], metric: &str) -> Column {
+        columns
+            .iter()
+            .find(|c| c.metric == metric)
+            .expect("a named column")
+            .clone()
+    }
+
     /// Five pitches, every metric alike, on a rising register trend of `slope` per
     /// semitone; `bump` is added to the engine's C4 alone.
     fn lines(bump: f64, slope: f64) -> Lines {
         let keys = [60u8, 62, 64, 65, 67];
-        let reference: Vec<(u8, [f64; 5])> = keys
+        let reference: Vec<(u8, [f64; 6])> = keys
             .iter()
-            .map(|&k| (k, [slope * f64::from(k - 60); 5]))
+            .map(|&k| (k, [slope * f64::from(k - 60); 6]))
             .collect();
         // The neighbouring velocity layer: the piano again, on its own line.
         let layer = reference.clone();
         // The engine is the same line 3 dB smoother — a voicing offset — plus a
         // bump on one note.
-        let mut engine: Vec<(u8, [f64; 5])> = reference
+        let mut engine: Vec<(u8, [f64; 6])> = reference
             .iter()
             .map(|&(k, v)| (k, v.map(|x| x - 3.0)))
             .collect();
@@ -1406,14 +1600,14 @@ mod tests {
         // interpolation lands, and the median offset is still zero.
         const PATTERN: [f64; 9] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.0];
         let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
-        let engine: Vec<(u8, [f64; 5])> = keys
+        let engine: Vec<(u8, [f64; 6])> = keys
             .iter()
-            .map(|&k| (k, [slope * (f64::from(k) - 60.0) - offset; 5]))
+            .map(|&k| (k, [slope * (f64::from(k) - 60.0) - offset; 6]))
             .collect();
-        let reference: Vec<(u8, [f64; 5])> = keys
+        let reference: Vec<(u8, [f64; 6])> = keys
             .iter()
             .zip(PATTERN)
-            .map(|(&k, p)| (k, [slope * (f64::from(k) - 60.0) + scatter * p; 5]))
+            .map(|(&k, p)| (k, [slope * (f64::from(k) - 60.0) + scatter * p; 6]))
             .collect();
         let mut layer = reference.clone();
         layer[5].1 = layer[5].1.map(|x| x + take);
@@ -1494,10 +1688,10 @@ mod tests {
         // a median over nine reads that as zero.
         let takes = |offset: f64, take: f64| -> Lines {
             let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
-            let engine: Vec<(u8, [f64; 5])> =
-                keys.iter().map(|&k| (k, [-offset; 5])).collect();
-            let reference: Vec<(u8, [f64; 5])> = keys.iter().map(|&k| (k, [0.0; 5])).collect();
-            let layer: Vec<(u8, [f64; 5])> = keys.iter().map(|&k| (k, [take; 5])).collect();
+            let engine: Vec<(u8, [f64; 6])> =
+                keys.iter().map(|&k| (k, [-offset; 6])).collect();
+            let reference: Vec<(u8, [f64; 6])> = keys.iter().map(|&k| (k, [0.0; 6])).collect();
+            let layer: Vec<(u8, [f64; 6])> = keys.iter().map(|&k| (k, [take; 6])).collect();
             Lines::new(engine, reference, layer)
         };
         let line = lines(4.0, 0.0);
@@ -1556,6 +1750,128 @@ mod tests {
                 METRICS[m]
             );
         }
+    }
+
+    /// **`balance` is the one column that asserts both halves**, and each half
+    /// is asserted on material the other cannot see.
+    ///
+    /// `DECISIONS.md` 446. A uniform lean is invisible to the spread half — it
+    /// moves every note of the line by the same amount, and a departure from
+    /// the line's own trend is unmoved by a constant. Note-to-note jumps that
+    /// cancel are invisible to the balance half — the median over the recorded
+    /// keys of `engine − recording` is zero when the engine leans one way at
+    /// half of them and the other way at the rest. A column carrying only one
+    /// of the two verdicts passes an instrument the other convicts, so this
+    /// test builds both instruments and asserts that this column fails on each.
+    #[test]
+    fn the_balance_column_fails_on_a_uniform_lean_and_on_jumps_that_cancel() {
+        let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
+        // A piano whose two capsules agree with themselves to 0.2 dB and whose
+        // register carries no trend: the honest floor under both halves.
+        let rows = |values: &dyn Fn(u8) -> f64| -> Lines {
+            let engine: Vec<(u8, [f64; 6])> =
+                keys.iter().map(|&k| (k, [values(k); 6])).collect();
+            let reference: Vec<(u8, [f64; 6])> = keys.iter().map(|&k| (k, [0.0; 6])).collect();
+            let layer: Vec<(u8, [f64; 6])> = keys.iter().map(|&k| (k, [0.2; 6])).collect();
+            Lines::new(engine, reference, layer)
+        };
+        let line_rows = |values: &dyn Fn(u8) -> f64| -> Lines {
+            let line_keys = [60u8, 62, 64, 65, 67];
+            let engine: Vec<(u8, [f64; 6])> =
+                line_keys.iter().map(|&k| (k, [values(k); 6])).collect();
+            let reference: Vec<(u8, [f64; 6])> =
+                line_keys.iter().map(|&k| (k, [0.0; 6])).collect();
+            Lines::new(engine, reference.clone(), reference)
+        };
+
+        // (a) The instrument of the finding: every note of the line leaning
+        // +7 dB where the recording leans −1.5, and leaning it *evenly*.
+        let uniform = &|_: u8| 7.0;
+        let lean = named(
+            &compare(
+                Window::Head,
+                &line_rows(uniform),
+                &rows(uniform),
+                &salamander_keys(),
+            ),
+            "balance",
+        );
+        assert!(lean.gated_on_balance && lean.gated_on_spread);
+        assert!((lean.balance - 7.0).abs() < 1e-9, "{:.3}", lean.balance);
+        assert!(
+            lean.standout.abs() < 1e-9,
+            "a uniform lean stands out {:.3}, so the spread half can see it and \
+             this test proves nothing",
+            lean.standout
+        );
+        assert!(!lean.balance_pass, "a 7 dB lean passed {:.2}", lean.balance_bar);
+        assert!(lean.spread_pass);
+        assert!(!lean.pass, "the column passed on the defect it was written for");
+
+        // (b) The other instrument: jumps of ±6 dB that a median reads as zero.
+        // +6, −6, 0 repeating over the register: nine keys, three of each, so
+        // the median is exactly zero and the note-to-note jumps are 12 dB.
+        let jumpy = &|k: u8| [6.0, -6.0, 0.0][(usize::from(k).saturating_sub(51) / 3) % 3];
+        let jumps = named(
+            &compare(
+                Window::Head,
+                &line_rows(jumpy),
+                &rows(jumpy),
+                &salamander_keys(),
+            ),
+            "balance",
+        );
+        assert!(
+            jumps.balance.abs() < 1e-9,
+            "the jumps did not cancel in the median ({:.3}), so the balance \
+             half can see them and this test proves nothing",
+            jumps.balance
+        );
+        assert!(jumps.balance_pass);
+        assert!(jumps.standout > 5.0, "{:.3}", jumps.standout);
+        assert!(!jumps.spread_pass, "±6 dB of jumps passed {:.2}", jumps.bar);
+        assert!(!jumps.pass);
+
+        // And the control both halves have to agree on: an engine that is the
+        // recording passes.
+        let same = &|_: u8| 0.0;
+        let control = named(
+            &compare(
+                Window::Head,
+                &line_rows(same),
+                &rows(same),
+                &salamander_keys(),
+            ),
+            "balance",
+        );
+        assert!(control.pass, "an engine on top of the recording failed");
+    }
+
+    /// The measurement itself: a note panned into one loudspeaker reads the pan,
+    /// at the fundamental and not at whatever else is in the window.
+    #[test]
+    fn the_fundamental_balance_reads_the_pan_at_f0_and_not_the_rest_of_the_note() {
+        let sr = 48_000.0;
+        let n = (0.37 * sr) as usize;
+        let (f0, upper) = (261.6, 2_093.0);
+        let mut left = Vec::with_capacity(n);
+        let mut right = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / sr;
+            let fundamental = (std::f64::consts::TAU * f0 * t).sin();
+            let partial = (std::f64::consts::TAU * upper * t).sin();
+            // The fundamental 6 dB into the left; the upper partial 6 dB into
+            // the right, and twice as loud, so a broadband reading would call
+            // this pair right-leaning.
+            left.push((0.5 * fundamental + 2.0 * 0.25 * partial) as f32);
+            right.push((0.25 * fundamental + 2.0 * 0.5 * partial) as f32);
+        }
+        let at_f0 = fundamental_balance_db(&left, &right, f0, sr);
+        assert!((at_f0 - 6.02).abs() < 0.2, "{at_f0:.2} dB at the fundamental");
+        let at_partial = fundamental_balance_db(&left, &right, upper, sr);
+        assert!((at_partial + 6.02).abs() < 0.2, "{at_partial:.2} dB at k8");
+        // The same signal in both channels leans nowhere, whatever it is.
+        assert!(fundamental_balance_db(&left, &left, f0, sr).abs() < 1e-9);
     }
 
     #[test]

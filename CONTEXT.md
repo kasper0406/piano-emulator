@@ -38,6 +38,17 @@ instrument. MIT, free, open source; App Store via AUv3 planned
   instruments behind numbered DECISIONS items. Build with `cargo build -p
   forensics`. Its README indexes them. Verifiers: REUSE these instead of
   writing new measurement code.
+- `app/` — **Swift, not Rust, and the only non-cargo directory that ships.** The
+  AUv3 (`aumu`/`Pemu`/`KsNi`, sandboxSafe, `AUParameterTree` for the pedals plus
+  two read-only meters, `fullState` = the whole preset TOML with a schema
+  version, factory presets from the bundle) and a SwiftUI standalone app that
+  **hosts that same appex** through `AVAudioEngine`, with Core MIDI in, an
+  on-screen keyboard and a meter. Both link `target/dist/libpiano_emulator_ffi.a`
+  through a module map over the committed header. `app/Shared/` is the code both
+  use; `app/ParityHarness/` renders the benchmark phrase through the AU's own
+  render block with no GUI and hashes it. `app/build.sh` is the whole build
+  (cargo → XcodeGen → xcodebuild → harness); `app/PianoEmulator.xcodeproj`,
+  `app/.build/` and `app/build/` are generated and gitignored. D426-432.
 - `presets/`, `data/` (gitignored, fetch scripts checked in), `renders/`
   (gitignored), `docs/history/` (superseded investigation records).
 
@@ -51,6 +62,16 @@ instrument. MIT, free, open source; App Store via AUv3 planned
 - Stability: every eigenmode strictly inside the unit circle (asserted at
   construction, fuzzed at schema rails); sympathetic loop gain validated
   against the realized bridge filter; DRIVE_CEILING backstop.
+- **Unscored dimensions are how this repository fails.** Four times now a
+  defect a listener heard sat under a fully green board because no column was a
+  function of it: the mechanism's loudness against its own note (D341), the
+  pair's energy against the note's mono fold-down (D394), the two capsules'
+  per-band level asymmetry (D417, accepted as unscored rather than modelled),
+  and **which loudspeaker a note's fundamental comes out of** (D446). The
+  pattern is always the same — every board is a *mono fold-down* or a
+  *symmetric* function of the pair, and the defect lives in what those throw
+  away. Before adding a mechanism, ask which statistic would move if it were
+  wrong; if the answer is "none", that is the column to write first.
 - Provenance: measured vs synthesized preset values are marked
   (`notes.synthesized_texture` / `synthesized_decay`); fitting uses only
   genuinely recorded reference keys; scoring does too (transposed reference
@@ -63,7 +84,7 @@ instrument. MIT, free, open source; App Store via AUv3 planned
 `bench` (REALISM.md: mel vs floor, modulation, attack, release, stereo
 coherence + per-channel columns), `compass` (88 keys vs strung-alike
 neighbors + recordings), `melody` (the Ode line: roughness/wobble/hf/strike
-/channel, head+tail windows, recorded-key bars), motion columns A1/A2/B1/B2
+/channel/**balance**, head+tail windows, recorded-key bars), motion columns A1/A2/B1/B2
 (FM axes), limiter budget, release-click, stability fuzz, perf (<50% of one
 core; currently ~30%).
 
@@ -100,13 +121,32 @@ core; currently ~30%).
    falsification that keeps the exclusion narrower than the defect.
    D404/D406/D411/D414 are the four mechanism attempts that did not land and
    are what a fifth must start from.
+4. `the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do` — the
+   melody board's `balance` column, **new and red on the instrument that
+   shipped** (D446-448). `10 log10(E_L / E_R)` at each note's own
+   fundamental, median over the recorded ladder: **+8.84 dB against a bar of
+   1.94**, where `channel` on the same renders is −0.49 against 0.91 and
+   **green**. The two do not disagree — `channel` is `E_L + E_R`, symmetric
+   under swapping the loudspeakers, so it cannot see a lean at all.
+   `[voicing.mics.modal]` is `L = m(1 + B)`, `R = m(1 − B)`, so wherever
+   `Re B > 0` it is **not a widener but a pan**, and its 174.3-456.5 Hz span
+   contains every fundamental of the Ode line. **Do not close it by moving a
+   bar** (`1.4826·MAD/√9` off the reference's own takes, no engine in it) and
+   do not close it with the frontier: D448's table has four points green on
+   both melody stereo columns and every one buys the register median by
+   parking the band's upper edge between two notes of the tune, taking D4 to
+   **+23 dB** and the line's swing from 13.1 to 27.9. What would close it is a
+   **per-channel gain** — the reference leans −5.73 dB over the ladder and the
+   feasible set reaches −2.0 — which is exactly the capsule placement D417
+   accepted as unscored.
 
 ## Conventions (hard rules for agents)
 
 - Iterate with plain `cargo test` (dev profile is opt-level 3; release-only
   gates self-skip). Full `cargo test --release --workspace` at most twice per
-  agent, at phase ends. Suite baseline: 708 green / 3 documented reds
-  (D418, verified and left standing by D423-425).
+  agent, at phase ends. Suite baseline: **712 green / 4 documented reds**
+  (D418, verified and left standing by D423-425; the fourth is D446's
+  `balance` column, which adds four green tests and one red one).
 - Any command trending past ~5 minutes: parallelize or split the tool; never
   wrap it in a sleep/poll loop. Time-box closed-on-render fit loops; report
   budgets; report-and-stop beats converge-at-any-cost.
@@ -114,13 +154,37 @@ core; currently ~30%).
   values or widened bars. Falsification tests: a fixed defect gets a test
   that reproduces it on the old code.
 - DECISIONS.md is append-only with continuous numbering; parallel workflows
-  get reserved ranges. Renders are gitignored; nothing in renders/ is ever
+  get reserved ranges. **A range you are handed is not a range you may write
+  in until you have checked it against the ones already declared** — they live
+  in the items themselves (`grep 'reserved range' DECISIONS.md`), a live
+  workstream's claim can be wider than the numbers it has used yet, and two
+  uncommitted hunks in one working tree cannot see each other. D446 is the
+  overlap that happened (440-450 handed out inside the integration track's
+  426-445) and the fix is to renumber before committing, never to write into
+  the other track's range. Renders are gitignored; nothing in renders/ is ever
   the only copy of evidence.
 - Do not commit; the session owner reviews and commits.
 
 ## Current open items (beyond the reds)
 
-**The stereo line is closed** (D417-425). The stopgap shipped: the lift is
+**The stereo line is re-opened by one column** (D446-448) and the entry above
+it is the whole of it: `melody`'s `balance`. Nothing in `presets/` moved — `git
+diff` over it is empty and the sounding path is byte-identical — and what is in
+the tree is the column, its falsification, its reference-against-itself control,
+the melody term inside `piano-tuner mics`' closed loop (D416's lesson: close on
+what the gates read), and D448's forty-one-point frontier. Two things a
+successor should not have to re-derive. **(i) The register and the tune want
+opposite bands.** The column's median is taken over the recorded ladder, D#3 to
+D#5, and the tune is C4 to G4; a *wide* band (170-1000 Hz x0.99) gives the best
+line anyone has measured — swing 8.8 dB against the shipped 13.1, median line
+error +0.78 against +7.8, and the coherence board's 125-250 improves from 0.224
+to 0.175 — while its ladder median is +7.78 and red. **(ii) The reference's own
+per-note image is not a piano's.** Its C4 puts the fundamental **16.86 dB into
+the right capsule** (verified outside the tuner, stable from 4 to 32 heterodyne
+cycles and by plain FFT), against −1.0 at the neighbours, and its median lean
+over the ladder is −5.73 dB where nothing the schema can build passes −2.0.
+
+**The rest of the stereo line is closed** (D417-425). The stopgap shipped: the lift is
 railed at the null, `presets/salamander-c5.toml`'s `[voicing.mics]` is refitted
 under it (`width` 1.632, `diffuse_coherence` 4.099, band **174.3-456.5 Hz at
 0.99**), and the capsule-placement asymmetry is excluded from the per-channel
@@ -190,5 +254,23 @@ nineteen bands change sign between them.
 
 Treble sympathetic halo ~21 dB short (board late field); per-key brightness
 tilt not drawn for unsampled keys (needs more recorded keys by policy);
-phantom partials deferred (-60 dB); AUv3/standalone Swift app not started
-(SHIPPING.md sequences it); SL88 MK2 hardware smoke test pending hardware.
+phantom partials deferred (-60 dB); SL88 MK2 hardware smoke test pending
+hardware.
+
+**The plugin is built and proven, and what is left is named** (D426-432). The
+AUv3 and the standalone both build headlessly from `app/build.sh`; `auval -v
+aumu Pemu KsNi` is green with **no warnings**, out of process, 11 kHz to
+192 kHz; and the AU renders the benchmark phrase **sample for sample** with the
+C harness of D383 — md5 `f0fcb07999c00ca60110cd537de8f09e` on
+`presets/default.toml`, `e13cd0ac9d367126ca7bf2b64b147e04` on the measured one,
+at every host buffer that is a multiple of the engine's 128-frame block. Still
+open: **sub-block note-on offsets in `engine/`**, which is the other half of
+M2's own scope and the reason a DAW's grid still meets D55's 2.7 ms
+quantisation; the four host smoke tests (Logic, GarageBand, Live, Reaper) that
+need a person at a machine; signing/notarization (M5); the App Group preset
+importer (M4's remainder); the App Store (M7); CLAP/VST3/AUv2 (M8). Two
+measurements worth carrying forward: advertising MIDI 2.0 makes a 7-bit CC 64
+mean `v<<25 / 2^32-1` rather than `v/127`, worth −94 dBFS peak on the benchmark
+phrase and **not** a defect (D431a); and a 30 Hz meter on the same
+`ObservableObject` as the rest of a SwiftUI panel cost 36.7 % of one core in the
+appex with nothing playing (D431b).

@@ -2,6 +2,15 @@ target
 renders/
 .DS_Store
 
+# The Swift side's derived output. `app/PianoEmulator.xcodeproj` is *generated*
+# from `app/project.yml` by XcodeGen on every `app/build.sh`, so committing it
+# would be committing a build artifact — and a four-thousand-line one that no
+# reviewer can read. `app/.build` is the derived data and `app/build` the
+# finished, ad-hoc-signed bundles.
+/app/PianoEmulator.xcodeproj/
+/app/.build/
+/app/build/
+
 # The datasets and the caches, which are large, derived and downloadable — but
 # not the fetch script that downloads them. `data/fetch_salamander.sh` is the
 # first line of `README.md`'s reproduction recipe and carries the URL, the size

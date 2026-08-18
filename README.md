@@ -23,8 +23,12 @@ Full 88-key polyphony with the sustain pedal down runs at roughly a third of one
 ## System requirements
 
 - **macOS on Apple Silicon** (M-series) is the supported target; developed and tuned on an M4 Pro. The audio thread uses aarch64-specific code (FPCR flush-to-zero) and the modal loops are laid out for NEON; other platforms are untested.
-- An output device that can run at **48 kHz** (the engine refuses to resample).
+- An output device that can run at **48 kHz** for the command-line player, which
+  refuses to resample. The plugin and the app take any rate the host offers:
+  `ffi/`'s boundary resampler bridges it, and is bypassed bit-exactly at 48 kHz.
 - **Rust 1.84+** (`rustup` default toolchain is fine).
+- For `app/` only — the AUv3 and the standalone app — **Xcode** (26.2 here),
+  **macOS 14+**, and **XcodeGen** (`brew install xcodegen`).
 
 ## Build & run
 
@@ -34,8 +38,11 @@ cargo run -p piano-emulator
 
 The repository is a cargo workspace: `engine/` is the instrument, `tuner/` is
 the offline analysis and parameter-estimation crate `TUNING.md` describes,
-`presets/` holds the instrument's parameters as data, and `docs/history/` holds
-the investigation records the numbered decisions were made from. `cargo test --release` at
+`ffi/` is the C ABI a host plugs into, `presets/` holds the instrument's
+parameters as data, and `docs/history/` holds the investigation records the
+numbered decisions were made from. `app/` is not Rust at all: it is the Swift
+AUv3 and the standalone macOS app, built by `./app/build.sh` (see *The plugin
+and the app*). `cargo test --release` at
 the root runs both crates, including the self-calibration gate, which puts the
 tuner's whole estimation pipeline over notes the engine rendered from a known
 preset and checks that the parameters come back.
@@ -385,6 +392,21 @@ Where a history document and `DECISIONS.md` disagree, the log wins.
   off the line's own pitches played slowly and legato, because at the melody's
   tempo the late window of a note contains three later strikes and two of them
   are that note's own harmonics.
+  Two further columns read the pair rather than the fold-down. `channel`
+  (`DECISIONS.md` 392-394) is `10 log10((E_L + E_R) / 2 E_M)` — what the two
+  loudspeakers put in the room against what the note's own mono sum says they
+  do — and `balance` (`DECISIONS.md` 446-448) is `10 log10(E_L / E_R)` at the
+  note's **own fundamental**, heterodyned: *which* loudspeaker the pitch comes
+  out of. The second exists because the first cannot see it. `E_L + E_R` is
+  symmetric under swapping the two channels, so an instrument that puts every
+  fundamental of the tune seven decibels into the left loudspeaker, where the
+  recording leans about one and a half right, moves `channel` by nothing — and
+  that is measured, not hypothetical: on the shipped preset `channel` reads
+  −0.49 against a bar of 0.91 and is green while `balance` reads **+8.84
+  against 1.94** and is the fourth documented red. `balance` is also the one
+  column here gated on **both** halves, a median over the recorded ladder and
+  the line's own spread, because a uniform lean and note-to-note jumps are two
+  different defects and neither statistic can see the other.
   `cargo run --release -p piano-tuner -- melody`
   is the same measurement printed in full, with flags that undo one table at a
   time so a failure can be attributed to the table that causes it; it writes
@@ -497,12 +519,12 @@ audio. Any future library the pipeline is pointed at has to be recorded in
 
 A hardware keyboard plays this now, and so does anything else that can send
 MIDI. Two pieces, and they are independent: **live input** through Core MIDI in
-the standalone (below), and **`ffi/`**, a fifth workspace member — a `cdylib` +
-`staticlib` + `rlib` around a small C ABI — which is the whole of what
-`DISTRIBUTION.md`'s AUv3, its standalone app and its CLAP will be built on.
-`ffi/` is `M0` and `M1` of that document and nothing above them: **there is
-still no plugin and no app**. What exists there is the boundary a host plugs
-into, and a C program that proves it works.
+the command-line REPL (below), and **`ffi/`**, a fifth workspace member — a
+`cdylib` + `staticlib` + `rlib` around a small C ABI — which is the boundary
+everything above it is built on. `ffi/` is `M0` and `M1` of `DISTRIBUTION.md`;
+the AUv3 and the SwiftUI app that hosts it are `M2` and `M3` and they now exist,
+in `app/` (see *The plugin and the app*, below). A CLAP is still `M8` and is not
+started.
 
 ### Playing it from a keyboard
 
@@ -613,8 +635,96 @@ through `--queue` (the SPSC path) and through the built-in preset (`-`).
 code path on every `cargo test`. Pass `--rate 44100` or `--rate 96000` to hear
 the boundary resampler doing its work.
 
-What is still missing is the host side: an `AUAudioUnit` to put the ABI behind,
-and the standalone SwiftUI app that hosts it (`DISTRIBUTION.md` M2-M3). The
-velocity widening `SHIPPING.md` §4 asks for has landed — `pe_event_t` carries
-its velocity in 32 bits with the same two lanes the engine uses, and
-`PE_ABI_VERSION` is 2 because values above 127 mean something now.
+The host side is `app/`, below. The velocity widening `SHIPPING.md` §4 asks for
+has landed too — `pe_event_t` carries its velocity in 32 bits with the same two
+lanes the engine uses, and `PE_ABI_VERSION` is 2 because values above 127 mean
+something now.
+
+## The plugin and the app
+
+`app/` is the Swift side: an **AUv3 audio unit** that loads in Logic, and a
+**standalone macOS app** that is a playable piano on its own and that hosts the
+very same audio unit through `AVAudioEngine`. Everything is built from a
+terminal.
+
+```sh
+./app/build.sh                  # the library, the project, both bundles, the harness
+./app/build.sh --register       # ... and install to /Applications and launch once
+./app/build.sh --auval          # ... and run auval
+./app/build.sh --clean
+```
+
+You need Xcode (26.2 here) and [XcodeGen](https://github.com/yonaskolb/XcodeGen)
+(`brew install xcodegen`). The build produces, in `app/build/`:
+
+```
+Piano Emulator.app
+  Contents/PlugIns/PianoEmulatorAU.appex     the AUv3 — aumu / Pemu / KsNi
+parity-harness                               the offline render harness
+```
+
+Everything under `app/build/` and the generated `app/PianoEmulator.xcodeproj`
+are gitignored: the project is *generated* from the 157 lines of
+`app/project.yml`, because a four-thousand-line `pbxproj` is a build artifact.
+
+**Run it:**
+
+```sh
+open "app/build/Piano Emulator.app"
+```
+
+Four playable octaves with an octave shift, velocity from where in the key you
+click (low on the key is a fast hammer, high is a slow one), a drag is a
+glissando, a continuous sustain slider, sostenuto, una corda, both factory
+presets, a peak meter and a live voice count. It takes Core MIDI in from any
+keyboard, and it publishes a virtual destination called **Piano Emulator** so
+another app on the same Mac can play it with no cable.
+
+**Use it in a DAW.** An AUv3 is not a file you drop in a plug-ins folder:
+PluginKit registers the extension inside a *launched* app, so copy
+`Piano Emulator.app` to `/Applications` and run it once (`./app/build.sh
+--register` does exactly that). Logic, GarageBand and Live then list it under
+its manufacturer, **Kasper Nielsen**. The window tells you which way it is
+running — "AUv3 app extension, out of process" is the plugin; the in-process
+fallback means PluginKit has not seen the appex yet, and the app plays anyway.
+
+**Signing.** The build is *ad-hoc* signed, which is enough for the sandbox and
+for PluginKit on your own machine and nothing to Gatekeeper. Developer ID
+signing, notarization and stapling are a separate step and are written out in
+the comment at the top of `app/build.sh`.
+
+### Proving the plugin is the same instrument
+
+The claim that matters is that the AUv3 plays what `piano-emulator render`
+plays, sample for sample. `app/parity-harness` measures it, with no host, no
+window and no GUI session: it drives the audio unit's own render block with
+`AURenderEvent` lists at a host's block cadence and hashes the result.
+
+```sh
+app/build/parity-harness presets/default.toml ffi/harness/phrase.mid
+app/build/parity-harness - ffi/harness/phrase.mid                  # the built-in preset
+app/build/parity-harness presets/salamander-c5.toml ffi/harness/phrase.mid
+app/build/parity-harness --component presets/default.toml ffi/harness/phrase.mid
+```
+
+The last one drives the **registered appex, out of process**, the way a DAW
+does. What each run checks:
+
+| | |
+|---|---|
+| parity | the benchmark phrase at 128, 256, 512 and 1024-frame host buffers — all four must be md5 `f0fcb07999c00ca60110cd537de8f09e`, the number `DECISIONS.md` 383 recorded for the C harness (`e13cd0ac9d367126ca7bf2b64b147e04` for the measured preset) |
+| grid | buffers that are *not* a multiple of the engine's 128 frames, where onsets can only land one block late — measured, not assumed |
+| rates | 44.1 and 96 kHz through the boundary resampler |
+| lifecycle | allocate / deallocate cycles with a sample-rate change between them |
+| state | `fullState` round-trip — the whole preset TOML, a schema version, and a refusal to read a state from a newer version |
+| robustness | a parameter event under an address no parameter has, which is what a host reaching us through the AUv2 bridge actually sends |
+
+`auval -v aumu Pemu KsNi` passes with no warnings, out of process, at every
+sample rate it tries (11 025 Hz to 192 kHz). It is worth running even though the
+harness is stricter: `auval` is a host we did not write, and it found two real
+defects that the harness would not have (`DECISIONS.md` 429).
+
+What is **not** done: sub-block note-on offsets in the engine (so a DAW's grid
+still meets `DECISIONS.md` 55's 2.7 ms quantisation), signing and notarization,
+the App Group preset importer, the App Store, and smoke tests in the four hosts
+that need a person at a machine (`DECISIONS.md` 432).

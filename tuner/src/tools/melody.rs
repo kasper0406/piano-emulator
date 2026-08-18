@@ -31,10 +31,9 @@ use std::path::{Path, PathBuf};
 use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_tuner::audio::Audio;
-use piano_tuner::cache;
 use piano_tuner::estimate::melody::{self, Column, LineNote, NoteTexture, Window};
 use piano_tuner::realism::{Phrase, RecordedKeys, VelocityLayers};
-use piano_tuner::sampler::{engine_events, Sampler, SAMPLER_VERSION};
+use piano_tuner::sampler::engine_events;
 use piano_tuner::{SampleLibrary, SAMPLE_RATE};
 
 pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -370,21 +369,7 @@ fn render_reference(
     name: &str,
     events: &[piano_tuner::TimedEvent],
 ) -> Result<Audio, piano_tuner::Error> {
-    let mut key = cache::Fingerprint::new();
-    key.str("tests/melody/reference")
-        .u64(u64::from(SAMPLER_VERSION))
-        .file(sfz)?
-        .u64(u64::from(SAMPLE_RATE))
-        .str(phrase.name)
-        .str(name)
-        .f64(phrase.duration_s);
-    let path = cache::reference_dir(data)
-        .join(format!("melody-{}-{name}-{}.wav", phrase.name, key.hex()));
-    let rendered = cache::audio(&path, || {
-        let mut sampler = Sampler::new(sfz)?;
-        sampler.render(events, phrase.duration_s)
-    })?;
-    Ok(melody::align_reference(&rendered, phrase.events[0].time_s))
+    melody::reference_line(sfz, data, phrase, name, events)
 }
 
 /// `MELODY.md`: the standing report for the gate in `tuner/tests/melody.rs`.
@@ -417,7 +402,9 @@ tune with one note wrong in it is what opened `DECISIONS.md` 284.\n\n\
 | `roughness` | mean absolute step between adjacent partial levels, dB | `notes.partial_gains` |\n\
 | `wobble` | median over partials of the RMS of that partial's dB envelope about its own straight-line decay | `notes.false_beat` |\n\
 | `hf` | 2-6 kHz share of the note's power, dB | brilliance, at absolute frequency (`DECISIONS.md` 292) |\n\
-| `strike` | attack tonality of the first 30 ms from the note's own strike, dB — large is a line spectrum, zero is a continuum | `[noise.strike]`, against the tonal attack (`DECISIONS.md` 341) |\n\n\
+| `strike` | attack tonality of the first 30 ms from the note's own strike, dB — large is a line spectrum, zero is a continuum | `[noise.strike]`, against the tonal attack (`DECISIONS.md` 341) |\n\
+| `channel` | `10 log10((E_L + E_R) / 2 E_M)` over the note's window, dB | `[voicing.mics]`, against the note's own mono fold-down (`DECISIONS.md` 394) |\n\
+| `balance` | `10 log10(E_L / E_R)` at the note's own `f0`, heterodyned, dB — positive is a left lean | `[voicing.mics]`, against the recording's own lean at the same note (`DECISIONS.md` 446) |\n\n\
 The first three are measured in **two windows** of the same note, found again \
 inside the phrase by the largest rise in a 1 ms envelope — the sampler plays \
 every recording from its own start, so the offset between a note-on and its \
@@ -498,7 +485,7 @@ engine.\n\n\
         named(ladder_keys),
         melody::ALLOWANCE,
     );
-    for c in columns.iter().filter(|c| !c.gated_on_balance) {
+    for c in columns.iter().filter(|c| c.gated_on_spread) {
         let _ = writeln!(
             out,
             "| `{}` | `{}` | **{:.2}** | {} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {:.2} | {} | {:.2} |",
@@ -510,7 +497,7 @@ engine.\n\n\
             c.population_bar,
             c.population_standout,
             c.take_scatter,
-            if c.pass { "pass" } else { "**FAIL**" },
+            if c.spread_pass { "pass" } else { "**FAIL**" },
             c.seam,
             melody::note_name(c.seam_key),
             c.seam_floor,
@@ -519,21 +506,34 @@ engine.\n\n\
     let _ = write!(
         out,
         "\n## The balances\n\n\
-`DECISIONS.md` 341, 394. `strike` and `channel` ask a different question from \
-the three above them, so they are gated on a different number. The three ask \
-*does one note of the line stand out from the rest*, which the engine answers on \
-its own and which needs no recording of the note. These two ask *is the \
-mechanism as loud against the note as the piano's is* and *do the two \
-loudspeakers play this note as the piano's two channels do* — both comparisons \
-with a recording, and therefore only meaningful at a key the library recorded, \
-so both are scored on the **recorded ladder** and not on the line at all, as the \
-median over those keys of `engine - recording`.\n\n\
+`DECISIONS.md` 341, 394, 446. `strike`, `channel` and `balance` ask a different \
+question from the three above them, so they are gated on a different number. The \
+three ask *does one note of the line stand out from the rest*, which the engine \
+answers on its own and which needs no recording of the note. These three ask *is \
+the mechanism as loud against the note as the piano's is*, *do the two \
+loudspeakers play this note as the piano's two channels do* and *does this \
+note's own fundamental come out of the loudspeaker the piano's comes out of* — \
+all comparisons with a recording, and therefore only meaningful at a key the \
+library recorded, so all are scored on the **recorded ladder** and not on the \
+line at all, as the median over those keys of `engine - recording`.\n\n\
 `channel` is `10 log10((E_L + E_R) / 2 E_M)`: what the two loudspeakers put in \
 the room against what this note's own mono fold-down says they do. **It is the \
 only column on this board, or on any board in this repository, that is not a \
 function of that fold-down** — which is why a stereo stage could make C4 four \
 decibels louder in the room than its neighbours with every gate green \
 (`DECISIONS.md` 392).\n\n\
+`balance` is `10 log10(E_L / E_R)` at the note's **own fundamental**, \
+heterodyned — *which* loudspeaker the pitch comes out of. It is `channel`'s \
+missing half and the reason it is missing is arithmetic: `E_L + E_R` is \
+symmetric under swapping the two channels, so an instrument that puts every \
+fundamental of a tune seven decibels into the left loudspeaker, against a \
+recording that leans one and a half decibels right, moves `channel` by nothing \
+(`DECISIONS.md` 446). It is also the **one column of this board that carries \
+both verdicts**: the balance half convicts a uniform lean, which a median over \
+nine recorded keys can see and the line's own trend cannot, and the spread half \
+convicts note-to-note jumps, which the line answers on its own and a median \
+cannot see because they cancel in it. Its spread verdict is in the evenness \
+table above and its balance verdict is here.\n\n\
 The bar is the larger of two things, times {:.2}: the median distance between \
 **two takes of one recorded key** (the same key out of the neighbouring velocity \
 layer), which is the same velocity-layer floor `REALISM.md` quotes beside every \
@@ -557,7 +557,7 @@ gated.\n\n\
             c.balance,
             c.balance_bar,
             c.balance_bar / melody::ALLOWANCE,
-            if c.pass { "pass" } else { "**FAIL**" },
+            if c.balance_pass { "pass" } else { "**FAIL**" },
             c.standout,
             melody::note_name(c.standout_key),
             c.bar,
@@ -570,7 +570,7 @@ the same statistic on the line's own reference notes and on their neighbouring \
 velocity layer — kept so the size of the change is visible rather than asserted:\n\n\
 | metric | window | bar (recorded register) | clone line | clone layer |\n|---|---|--:|--:|--:|\n"
     );
-    for c in columns.iter().filter(|c| !c.gated_on_balance) {
+    for c in columns.iter().filter(|c| c.gated_on_spread) {
         let _ = writeln!(
             out,
             "| `{}` | `{}` | {:.2} | {:.2} | {:.2} |",

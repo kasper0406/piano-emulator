@@ -98,6 +98,7 @@ use piano_tuner::cache;
 use piano_tuner::estimate::mics::{
     fit_geometry, interchannel_lag, GeometryConfig, GeometryFit, KeyLag, LagConfig, MicGeometry,
 };
+use piano_tuner::estimate::melody;
 use piano_tuner::numeric::NelderMead;
 use piano_tuner::realism::{
     self, ChannelColumn, ChannelItem, ChannelShape, StereoColumn, StereoImage, StereoItem,
@@ -612,6 +613,20 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<Vec<_>, _>>()?;
     println!("  and {} phrases of the scoreboard's own set", phrases.len());
 
+    // ---- the melody surface, measured once -------------------------------
+    //
+    // `DECISIONS.md` 447. Two phrases through the recordings and their
+    // neighbouring velocity layer, cached under the melody board's own
+    // fingerprint so this tool and `piano-tuner melody` and `tests/melody.rs`
+    // all read one set of files.
+    let melody_board = MelodyBoard::measure(&data, &sfz, &layers, &recorded, &base)?;
+    println!(
+        "  and the melody board's {} columns on the Ode line and the recorded ladder \
+(scored here: {})",
+        melody::METRICS.len(),
+        MELODY_METRICS.join(", ")
+    );
+
     // ---- stage 1: the geometry -------------------------------------------
     let start = base.voicing.mics.map(|m| MicGeometry {
         spacing_m: f64::from(m.spacing_m),
@@ -715,18 +730,37 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut trimmed = None;
     if wants("coherence") {
         println!("\ncoherence: width and diffuse_coherence, geometry held at the measured delays");
-        let fit = search(&base, &rows, &phrases, measured, TRIM_KNOBS, false, &Feasible::default());
+        let fit = search(
+            &base,
+            &rows,
+            &phrases,
+            &melody_board,
+            measured,
+            TRIM_KNOBS,
+            false,
+            &Feasible::default(),
+        );
         trimmed = Some(fit);
         voicing = fit;
     }
     if wants("image") {
         println!("\nimage: all four, on the render score alone");
-        let from_measured = search(&base, &rows, &phrases, voicing, IMAGE_KNOBS, false, &Feasible::default());
+        let from_measured = search(
+            &base,
+            &rows,
+            &phrases,
+            &melody_board,
+            voicing,
+            IMAGE_KNOBS,
+            false,
+            &Feasible::default(),
+        );
         let from_shipped = base.voicing.mics.map(|shipped| {
             search(
                 &base,
                 &rows,
                 &phrases,
+                &melody_board,
                 MicVoicing {
                     height_m: DOCUMENTED_HEIGHT_M as f32,
                     ..shipped
@@ -743,6 +777,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         let floor_ms = delay_floor_ms(&rows);
         let total = |v: MicVoicing| {
             gate_excess(&columns_for_voicing(&base, &rows, v, FIT_VELOCITY))
+                + melody_excess_for(&base, &melody_board, v)
                 + gate_excess(&phrase_columns_for_voicing(&base, &phrases, v))
                 + delay_excess(&rows, geometry_of(&v), floor_ms)
         };
@@ -781,7 +816,7 @@ from the shipped values: {value:.3}"
         };
         let feasible = Feasible::default();
         let clock = std::time::Instant::now();
-        let best = modal_grid(&base, &rows, &phrases, start, &feasible);
+        let best = modal_grid(&base, &rows, &phrases, &melody_board, start, &feasible);
         let elapsed = clock.elapsed().as_secs_f64();
         let cells = 1 + MODAL_GRID_LO_HZ.len() * MODAL_GRID_HI_HZ.len() * MODAL_GRID_LIFT.len();
         println!(
@@ -846,9 +881,18 @@ geometry held"
         // own objective finds the basin; the constraint then decides where in
         // it to stop.
         let feasible = Feasible::default();
-        let coarse = modal_grid(&base, &rows, &phrases, start, &feasible);
+        let coarse = modal_grid(&base, &rows, &phrases, &melody_board, start, &feasible);
         println!("  (relaxed: item 363's objective, to find the basin)");
-        let relaxed = search(&base, &rows, &phrases, coarse, knobs, false, &feasible);
+        let relaxed = search(
+            &base,
+            &rows,
+            &phrases,
+            &melody_board,
+            coarse,
+            knobs,
+            false,
+            &feasible,
+        );
         // A penalty method has to start somewhere it can move. See [`Feasible`].
         let from = feasible.take().unwrap_or(relaxed);
         match (from.modal, relaxed.modal) {
@@ -860,8 +904,17 @@ rather than at its own optimum {:.1}-{:.1} Hz x{:.3})",
             ),
             _ => println!("  (constrained: no band passed the gate in the relaxed pass)"),
         }
-        let constrained = search(&base, &rows, &phrases, from, knobs, true, &feasible);
-        voicing = modal_refine(&base, &rows, &phrases, constrained);
+        let constrained = search(
+            &base,
+            &rows,
+            &phrases,
+            &melody_board,
+            from,
+            knobs,
+            true,
+            &feasible,
+        );
+        voicing = modal_refine(&base, &rows, &phrases, &melody_board, constrained);
     }
 
     if let (Some(trim), true) = (trimmed, wants("image")) {
@@ -932,6 +985,27 @@ there {:.3} ms; the preset this replaces {:.3} ms)",
         channel_excess(&after_channels),
         realism::channel_report(&before_channels),
         realism::channel_report(&after_channels)
+    );
+
+    let melody_before = melody_board.columns(&base);
+    let melody_after = melody_board.columns(&fitted);
+    println!(
+        "MELODY columns, the Ode line and the recorded ladder — before ({} of {} red, {:.2} bars out) \
+and after ({} red, {:.2} bars out).  Scored here: {}.\n{}\n{}",
+        melody_before
+            .iter()
+            .filter(|c| MELODY_METRICS.contains(&c.metric) && !c.pass)
+            .count(),
+        MELODY_METRICS.len(),
+        melody_excess(&melody_before),
+        melody_after
+            .iter()
+            .filter(|c| MELODY_METRICS.contains(&c.metric) && !c.pass)
+            .count(),
+        melody_excess(&melody_after),
+        MELODY_METRICS.join(", "),
+        melody::report(&melody_before),
+        melody::report(&melody_after),
     );
 
     let phrases_before = phrase_columns(&base, &phrases);
@@ -1157,13 +1231,14 @@ fn modal_grid(
     preset: &Preset,
     rows: &[Row],
     phrases: &[PhraseRow],
+    melody_board: &MelodyBoard,
     start: MicVoicing,
     feasible: &Feasible,
 ) -> MicVoicing {
     // Item 363's objective, not the penalised one: the grid's job is to choose
     // a basin, and a ten-bar penalty turns the surface into an integer count of
     // red bands that no coarse grid can read. See the modal stage's own comment.
-    let objective = relaxed_objective(preset, rows, phrases, feasible);
+    let objective = relaxed_objective(preset, rows, phrases, melody_board, feasible);
     // **Every cell at once.** The grid is a fixed, independent batch and
     // nothing in it reads anything a sibling wrote, so it is one `par_iter`
     // rather than sixty-five serial evaluations of a thirty-way one. See
@@ -1219,6 +1294,7 @@ fn relaxed_objective<'a>(
     preset: &'a Preset,
     rows: &'a [Row],
     phrases: &'a [PhraseRow],
+    melody_board: &'a MelodyBoard,
     feasible: &'a Feasible,
 ) -> impl Fn(MicVoicing) -> f64 + Sync + 'a {
     let floor_ms = delay_floor_ms(rows);
@@ -1226,12 +1302,17 @@ fn relaxed_objective<'a>(
         let mut candidate = preset.clone();
         candidate.voicing.mics = Some(v);
         let (notes, channels) = boards_for(&candidate, rows, FIT_VELOCITY);
+        let melody = melody_board.columns(&candidate);
         let value = gate_excess(&notes)
             + channel_excess(&channels)
             + pair_excess(&channels)
+            + melody_excess(&melody)
             + gate_excess(&phrase_columns_for_voicing(preset, phrases, v))
             + delay_excess(rows, geometry_of(&v), floor_ms);
-        if notes.iter().all(|c| c.items == 0 || c.pass)
+        if melody
+            .iter()
+            .all(|c| !MELODY_METRICS.contains(&c.metric) || c.pass)
+            && notes.iter().all(|c| c.items == 0 || c.pass)
             && channels
                 .iter()
                 .all(|c| c.items == 0 || (c.pass && (c.pair_pass || !modal_channel_band(c))))
@@ -1309,6 +1390,7 @@ fn modal_objective<'a>(
     preset: &'a Preset,
     rows: &'a [Row],
     phrases: &'a [PhraseRow],
+    melody_board: &'a MelodyBoard,
 ) -> impl Fn(MicVoicing) -> f64 + Sync + 'a {
     let floor_ms = delay_floor_ms(rows);
     move |v: MicVoicing| -> f64 {
@@ -1322,14 +1404,25 @@ fn modal_objective<'a>(
         // other band of it is the pan-pot's and the pair geometry's, which this
         // stage cannot move and must not be scored on. See
         // [`MODAL_CHANNEL_BANDS`].
+        //
+        // The melody board's two stereo columns are charged the same way and
+        // for the same reason (`DECISIONS.md` 447): they are gates, they are
+        // this stage's own to move, and a red one is a statement the recording
+        // makes about a *tune* that the engine does not.
+        let melody = melody_board.columns(&candidate);
         let reds = notes.iter().filter(|c| c.items > 0 && !c.pass).count()
             + channels
                 .iter()
                 .filter(|c| c.items > 0 && modal_channel_band(c) && !(c.pass && c.pair_pass))
+                .count()
+            + melody
+                .iter()
+                .filter(|c| MELODY_METRICS.contains(&c.metric) && !c.pass)
                 .count();
         gate_excess(&notes)
             + channel_excess(&channels)
             + pair_excess(&channels)
+            + melody_excess(&melody)
             + RED_BAND_PENALTY * reds as f64
             + gate_excess(&phrase_columns_for_voicing(preset, phrases, v))
             + delay_excess(rows, geometry_of(&v), floor_ms)
@@ -1370,9 +1463,10 @@ fn modal_refine(
     preset: &Preset,
     rows: &[Row],
     phrases: &[PhraseRow],
+    melody_board: &MelodyBoard,
     start: MicVoicing,
 ) -> MicVoicing {
-    let objective = modal_objective(preset, rows, phrases);
+    let objective = modal_objective(preset, rows, phrases, melody_board);
     let mut best = start;
     let mut score = objective(best);
     for step in MODAL_REFINE_STEPS {
@@ -1432,20 +1526,22 @@ fn modal_refine(
 /// onto it; a compass search either finds a better point along an axis or
 /// halves its step, and cannot be fooled into converging on a discontinuity.
 /// Log coordinates because every one of these is a positive scale.
+#[allow(clippy::too_many_arguments)]
 fn search(
     preset: &Preset,
     rows: &[Row],
     phrases: &[PhraseRow],
+    melody_board: &MelodyBoard,
     start: MicVoicing,
     free: &[Knob],
     hard: bool,
     feasible: &Feasible,
 ) -> MicVoicing {
-    let plain = relaxed_objective(preset, rows, phrases, feasible);
+    let plain = relaxed_objective(preset, rows, phrases, melody_board, feasible);
     // The geometry stages keep item 363's objective exactly; only the
     // mode-controlled band is fitted under the hard gate, and only after a
     // relaxed pass has chosen the basin. See [`RED_BAND_PENALTY`].
-    let penalised = modal_objective(preset, rows, phrases);
+    let penalised = modal_objective(preset, rows, phrases, melody_board);
     let objective = move |v: MicVoicing| -> f64 {
         if hard {
             penalised(v)
@@ -1681,6 +1777,177 @@ fn boards_for(
         realism::stereo_columns(&images),
         realism::channel_columns(&shapes),
     )
+}
+
+// ---------------------------------------------------------------------------
+// The melody board, as a term of this objective
+// ---------------------------------------------------------------------------
+
+/// The columns of `piano-tuner melody` that this fit's three knobs can move.
+///
+/// `strike`, `roughness`, `wobble` and `hf` are all functions of the mono
+/// fold-down and of tables no microphone parameter touches, so charging them
+/// here would add a constant and its render noise. `channel` and `balance` are
+/// the two the pair writes.
+const MELODY_METRICS: [&str; 2] = ["channel", "balance"];
+
+/// **The melody board's two stereo columns, in this objective** — the term
+/// `DECISIONS.md` 447 adds, and item 416's own lesson applied: *close on what
+/// the gates read*.
+///
+/// The reason it is here and not checked afterwards is the whole of item 446.
+/// The band this stage fits acts over 174-456 Hz; every fundamental of the Ode
+/// line falls inside it; and the boards this fit already closes on are a
+/// per-key **spectral** surface, a per-key **coherence** surface and a
+/// per-phrase one, none of which is a per-note reading of *which loudspeaker a
+/// tune's pitches come out of*. Item 421 chose the shipped point partly on the
+/// melody `channel` column — but by checking it after the fit had finished, so
+/// the fit never traded anything for it. This makes it a term.
+///
+/// The reference side is measured **once**: it is the recordings playing two
+/// fixed phrases and it does not move when a candidate does. Per candidate the
+/// engine renders the soprano line and the recorded ladder, which is about
+/// twenty-eight seconds of audio against the thirty keys' ninety — and the
+/// keys go through [`ENGINE_CACHE`] while these do not, so on a warm cache it
+/// is the larger half. That cost is stated in item 447's budget rather than
+/// hidden.
+struct MelodyBoard {
+    recorded: realism::RecordedKeys,
+    line: Phrase,
+    line_notes: Vec<melody::LineNote>,
+    line_reference: Vec<(u8, [f64; 6])>,
+    line_layer: Vec<(u8, [f64; 6])>,
+    ladder: Phrase,
+    ladder_notes: Vec<melody::LineNote>,
+    ladder_reference: Vec<(u8, [f64; 6])>,
+    ladder_layer: Vec<(u8, [f64; 6])>,
+}
+
+impl MelodyBoard {
+    /// The recordings' half, measured once. Only [`melody::Window::Head`] is
+    /// built: `channel` and `balance` are both head-window columns
+    /// (`melody::METRIC_IS_BALANCE`), and the tail line is another twenty-five
+    /// seconds of render per candidate for three columns this stage cannot
+    /// move.
+    fn measure(
+        data: &std::path::Path,
+        sfz: &std::path::Path,
+        layers: &realism::VelocityLayers,
+        recorded: &realism::RecordedKeys,
+        preset: &Preset,
+    ) -> Result<Self, piano_tuner::Error> {
+        let window = melody::Window::Head;
+        let ladder_keys = melody::ladder_keys(recorded, &melody::line_keys());
+        let line = melody::line_for(window);
+        let line_notes = melody::line_notes_for(window);
+        let ladder = melody::ladder(&ladder_keys, window);
+        let ladder_notes = melody::ladder_notes(&ladder_keys, window);
+        let hz = partial_hz_of(preset);
+        let side = |phrase: &Phrase,
+                    notes: &[melody::LineNote],
+                    name: &str,
+                    events: &[TimedEvent]|
+         -> Result<Vec<(u8, [f64; 6])>, piano_tuner::Error> {
+            let audio = melody::reference_line(sfz, data, phrase, name, events)?;
+            Ok(melody::per_key(&melody::measure_line(
+                &audio,
+                f64::from(SAMPLE_RATE),
+                notes,
+                &hz,
+                window,
+            )))
+        };
+        Ok(MelodyBoard {
+            recorded: recorded.clone(),
+            line_reference: side(&line, &line_notes, "reference", &line.events)?,
+            line_layer: side(&line, &line_notes, "alt-layer", &layers.shift(&line.events))?,
+            ladder_reference: side(&ladder, &ladder_notes, "reference", &ladder.events)?,
+            ladder_layer: side(
+                &ladder,
+                &ladder_notes,
+                "alt-layer",
+                &layers.shift(&ladder.events),
+            )?,
+            line,
+            line_notes,
+            ladder,
+            ladder_notes,
+        })
+    }
+
+    /// One candidate's melody columns, off two engine renders.
+    fn columns(&self, preset: &Preset) -> Vec<melody::Column> {
+        let hz = partial_hz_of(preset);
+        let engine = |phrase: &Phrase, notes: &[melody::LineNote]| -> Vec<(u8, [f64; 6])> {
+            let events = engine_events::to_render_events(&phrase.events);
+            let (left, right) = render_to_buffer(preset, &events, phrase.duration_s as f32);
+            let audio =
+                Audio::new(SAMPLE_RATE, vec![left, right]).expect("the engine renders stereo");
+            melody::per_key(&melody::measure_line(
+                &audio,
+                f64::from(SAMPLE_RATE),
+                notes,
+                &hz,
+                melody::Window::Head,
+            ))
+        };
+        melody::compare(
+            melody::Window::Head,
+            &melody::Lines::new(
+                engine(&self.line, &self.line_notes),
+                self.line_reference.clone(),
+                self.line_layer.clone(),
+            ),
+            &melody::Lines::new(
+                engine(&self.ladder, &self.ladder_notes),
+                self.ladder_reference.clone(),
+                self.ladder_layer.clone(),
+            ),
+            &self.recorded,
+        )
+    }
+}
+
+/// The frequencies a key's partials are read at: the preset's own table, which
+/// is what both sides of every melody column are measured with.
+fn partial_hz_of(preset: &Preset) -> impl Fn(u8) -> Vec<f64> + '_ {
+    move |key: u8| -> Vec<f64> {
+        let params = preset.string_params(key);
+        (1..=piano_tuner::series::PARTIALS)
+            .map(|k| f64::from(params.partial_freq(k)))
+            .collect()
+    }
+}
+
+/// The melody board's exceedance, in the same currency [`gate_excess`] uses.
+///
+/// Both halves of a column are charged and each only where it is a verdict:
+/// `balance` is gated on the median over the recorded ladder **and** on the
+/// line's own spread (`melody::METRIC_IS_SPREAD`), `channel` on the median
+/// alone. A fit that drives this to zero is a fit that turns those columns of
+/// `tuner/tests/melody.rs` green, which is the only thing it can earn here.
+fn melody_excess(columns: &[melody::Column]) -> f64 {
+    columns
+        .iter()
+        .filter(|c| MELODY_METRICS.contains(&c.metric))
+        .map(|c| {
+            let mut excess = 0.0;
+            if c.gated_on_balance && c.balance.is_finite() && c.balance_bar > 0.0 {
+                excess += (c.balance.abs() / c.balance_bar - PASS_MARGIN).max(0.0);
+            }
+            if c.gated_on_spread && c.standout.is_finite() && c.bar > 0.0 {
+                excess += (c.standout / c.bar - PASS_MARGIN).max(0.0);
+            }
+            excess
+        })
+        .sum()
+}
+
+/// The melody term for one voicing.
+fn melody_excess_for(preset: &Preset, board: &MelodyBoard, voicing: MicVoicing) -> f64 {
+    let mut candidate = preset.clone();
+    candidate.voicing.mics = Some(voicing);
+    melody_excess(&board.columns(&candidate))
 }
 
 /// The per-channel board's exceedance, in the same currency [`gate_excess`]

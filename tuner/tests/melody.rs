@@ -125,6 +125,28 @@ fn with_the_mechanism_before_the_refit(mut preset: Preset) -> Preset {
     preset
 }
 
+/// The same preset with `DECISIONS.md` 418's mode-controlled band put back and
+/// nothing else moved: the instrument the `balance` column of item 446 was
+/// written on.
+///
+/// The three numbers are `melody::M17_MODAL_BAND`, kept beside the metric they
+/// convict rather than hand-written into a fixture file, exactly as
+/// `STRIKE_REFIT_LEVEL_DB` is. The geometry, `width` and `diffuse_coherence`
+/// are the shipping preset's, so a column that moves here moves for one reason.
+fn with_the_lobe_before_the_refit(mut preset: Preset) -> Preset {
+    let mics = preset
+        .voicing
+        .mics
+        .as_mut()
+        .expect("the measured preset declares [voicing.mics]");
+    let (lo_hz, hi_hz, lift) = melody::M17_MODAL_BAND;
+    mics.modal = Some(piano_emulator::preset::ModalBand { lo_hz, hi_hz, lift });
+    preset
+        .validate()
+        .expect("item 418's own band is still a legal preset");
+    preset
+}
+
 /// The same preset with `DECISIONS.md` 335 taken back out of it: every drawn
 /// decay row's cells **under 2 kHz** go back to 1.0, which is what
 /// `TailCorrection::at` wrote there before this milestone and what left the 58
@@ -315,7 +337,7 @@ fn gate(metric: &str, window: Window) {
     let c = column(columns, metric, window);
     if c.gated_on_balance {
         assert!(
-            c.pass,
+            c.balance_pass,
             "{} ({}) reads {:+.2} dB over the recorded keys of the register \
              against a bar of {:.2} (one recorded key's two takes, {:.2}, x{:.2})\n{}",
             c.metric,
@@ -326,10 +348,12 @@ fn gate(metric: &str, window: Window) {
             melody::ALLOWANCE,
             melody::report(std::slice::from_ref(c))
         );
+    }
+    if !c.gated_on_spread {
         return;
     }
     assert!(
-        c.pass,
+        c.spread_pass,
         "{} ({}) stands out {:.2} at {} against a bar of {:.2} \
          (how far the recorded register's own notes go, {:.2}; its single worst key {:.2} at {}; \
           one key's two takes {:.2} at {})\n{}",
@@ -423,6 +447,158 @@ fn the_two_loudspeakers_play_this_line_as_the_recording_does() {
     gate("channel", Window::Head);
 }
 
+/// **Which loudspeaker the tune's pitches come out of** (`DECISIONS.md` 446).
+///
+/// `balance` is `10 log10(E_L / E_R)` at each note's **own fundamental**,
+/// heterodyned — the statistic the session that opened item 446 measured the
+/// defect with. It is `channel`'s missing half and the reason it was missing is
+/// arithmetic: `channel` is `(E_L + E_R) / 2 E_M`, a **sum**, invariant under
+/// swapping the two loudspeakers, so an instrument that puts every fundamental
+/// of the Ode line seven decibels into the *left* channel — where the recording
+/// leans about one and a half *right* — moves it by nothing. That is not
+/// hypothetical: on the instrument item 422 shipped, `channel` reads −0.49
+/// against a bar of 0.91 and is **green**, while this column reads **+8.84
+/// against 1.94** over the same nine recorded keys, and the line itself reads
+/// C4 −2.05, D4 +4.68, E4 +6.92, F4 +11.07, G4 +5.73 against a recording that
+/// reads −1.01, −0.91, −1.39 and −1.07 at the four of them it can be read at.
+/// The complaint the listener made of that render was "wobbly", and the jumps
+/// are the wobble.
+///
+/// It is the **one column of this board gated on both halves**
+/// (`melody::METRIC_IS_SPREAD`): the median over the recorded ladder convicts a
+/// uniform lean the line's own trend cannot see, and the line's own spread
+/// convicts note-to-note jumps a median cannot see because they cancel in it.
+#[test]
+fn the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do() {
+    gate("balance", Window::Head);
+}
+
+/// **The falsification for the column above, and it is the milestone's own
+/// finding**: put item 418's band back and the column goes red, in the
+/// direction and at the size item 446 measured.
+///
+/// A gate nobody has seen fail is not a gate. The material is whatever preset
+/// ships with `[voicing.mics.modal]` replaced by `melody::M17_MODAL_BAND` and
+/// **nothing else moved** — same geometry, same `width`, same
+/// `diffuse_coherence` — so a column that moves here has moved for one reason.
+/// It asserts the **sign** as well as the size, because which loudspeaker the
+/// tune walks into is the whole attribution: the lobe is `L = m(1 + B)`,
+/// `R = m(1 − B)`, and over 174-456 Hz `Re B > 0`, so it is not a widener but a
+/// pan, and it pans left.
+#[test]
+fn the_balance_gate_fails_on_the_band_the_milestone_started_from() {
+    let Some(sfz) = sfz() else {
+        eprintln!("no data/salamander in this tree; skipping the balance falsification");
+        return;
+    };
+    let before = with_the_lobe_before_the_refit(shipped_preset());
+    let (columns, _, _) = score(&before, &sfz);
+    let text = melody::report(&columns);
+    println!("{text}");
+    let balance = column(&columns, "balance", Window::Head);
+    assert!(
+        !balance.balance_pass,
+        "item 418's band passes the balance column, so that column does not test \
+         what it was written for\n{text}"
+    );
+    assert!(
+        balance.balance > 0.0,
+        "the engine was supposed to be the LEFT-leaning of the two and reads \
+         {:+.2}\n{text}",
+        balance.balance
+    );
+    // And the column it was written beside cannot see it: `channel` is a sum
+    // over the two loudspeakers and this is a difference between them. If a
+    // successor ever makes `channel` fail here too, this assertion is the
+    // notice that the two columns have stopped being independent.
+    let channel = column(&columns, "channel", Window::Head);
+    println!(
+        "the same instrument on the column that cannot see it: channel {:+.2} \
+against a bar of {:.2}, {}",
+        channel.balance,
+        channel.balance_bar,
+        if channel.balance_pass { "green" } else { "red" }
+    );
+}
+
+/// **The control the falsification needs to mean anything**: the recordings
+/// scored against themselves pass this column.
+///
+/// A column that failed everything would fail item 418's band too, and the test
+/// above would prove nothing. So the same measurement is run with the
+/// **reference render standing in for the engine** — the recordings' own line
+/// against the recordings' own line, with the neighbouring velocity layer still
+/// the floor — and every half of the column must be inside its own bar. It is
+/// exactly zero on the balance half by construction and is asserted anyway,
+/// because the construction is what a successor would change.
+#[test]
+fn the_recordings_own_line_passes_the_balance_column() {
+    let Some(sfz) = sfz() else {
+        eprintln!("no data/salamander in this tree; skipping the balance control");
+        return;
+    };
+    let preset = shipped_preset();
+    let library = SampleLibrary::from_sfz(&sfz).expect("the library reads");
+    let layers = VelocityLayers::from_library(&library).expect("velocity layers");
+    let recorded = RecordedKeys::from_library(&library).expect("recorded keys");
+    let ladder_keys = melody::ladder_keys(&recorded, &melody::line_keys());
+    let window = Window::Head;
+    let lines = |phrase: &Phrase, notes: &[LineNote]| -> melody::Lines {
+        let sr = f64::from(SAMPLE_RATE);
+        let partial_hz = |key: u8| -> Vec<f64> {
+            let params = preset.string_params(key);
+            (1..=piano_tuner::series::PARTIALS)
+                .map(|k| f64::from(params.partial_freq(k)))
+                .collect()
+        };
+        let reference = render_reference(&sfz, phrase, "reference", &phrase.events);
+        let alt = render_reference(&sfz, phrase, "alt-layer", &layers.shift(&phrase.events));
+        let rows = melody::per_key(&melody::measure_line(
+            &reference,
+            sr,
+            notes,
+            &partial_hz,
+            window,
+        ));
+        let layer = melody::per_key(&melody::measure_line(&alt, sr, notes, &partial_hz, window));
+        // The engine slot is the reference itself: this is the recording
+        // measured against a second measurement of the same file.
+        melody::Lines::new(rows.clone(), rows, layer)
+    };
+    let line_phrase = melody::line_for(window);
+    let ladder_phrase = melody::ladder(&ladder_keys, window);
+    let columns = melody::compare(
+        window,
+        &lines(&line_phrase, &melody::line_notes_for(window)),
+        &lines(&ladder_phrase, &melody::ladder_notes(&ladder_keys, window)),
+        &recorded,
+    );
+    let text = melody::report(&columns);
+    println!("{text}");
+    let balance = column(&columns, "balance", Window::Head);
+    assert!(
+        balance.balance.abs() < 1e-9,
+        "the recordings differ from themselves by {:+.3} dB\n{text}",
+        balance.balance
+    );
+    assert!(
+        balance.pass,
+        "the recordings' own line fails the column that scores instruments \
+         against it: balance {:+.2} of {:.2}, spread {:.2} of {:.2}\n{text}",
+        balance.balance, balance.balance_bar, balance.standout, balance.bar
+    );
+    // Every column, not just this one: a control that only holds for the column
+    // it was written for is not a control.
+    for c in &columns {
+        assert!(
+            c.pass,
+            "{} ({}) fails on the recordings against themselves\n{text}",
+            c.metric,
+            c.window.name()
+        );
+    }
+}
+
 /// The tail gate is a statement about a preset, and the statement it was
 /// written to make is that the instrument of `DECISIONS.md` 331 fails it, at
 /// C4, on the metric the seam is in.
@@ -511,7 +687,7 @@ fn the_strike_gate_fails_at_the_level_the_milestone_started_from() {
     // The refit moved two numbers of one event and nothing else, so every other
     // column of the gate has to read the same on both instruments.
     let after = shipped().expect("the shipped columns are measured");
-    for c in columns.iter().filter(|c| !c.gated_on_balance) {
+    for c in columns.iter().filter(|c| c.gated_on_spread && !c.gated_on_balance) {
         let now = column(after, c.metric, c.window);
         assert!(
             (c.standout - now.standout).abs() < 0.1 && (c.bar - now.bar).abs() < 0.01,
