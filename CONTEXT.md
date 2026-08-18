@@ -71,14 +71,19 @@ core; currently ~30%).
 1. `a_known_duplex_comes_back_from_the_engines_own_render_of_it` — duplex
    segments need broadband drive; field semantics to be re-decided (D260).
 2. `each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts` —
-   the modal lobe's per-channel defect (D392-396); the stereo-mechanism
-   milestone exists to turn it green.
+   the modal lobe's per-channel defect (D392-396). Two mechanism milestones
+   have been reverted rather than shipped (D404, D406) and a third was not
+   started (D407-411): the mechanism is understood, the *source* cannot pay
+   for it, and that is the open item below. The gate prints a sixth-octave
+   board (D405) before it asserts — that is the readable half of a red.
+   **This red is the second half of a two-milestone repair and is gated on
+   the first (D411): do not accept a mandate that asks for it on its own.**
 
 ## Conventions (hard rules for agents)
 
 - Iterate with plain `cargo test` (dev profile is opt-level 3; release-only
   gates self-skip). Full `cargo test --release --workspace` at most twice per
-  agent, at phase ends. Suite baseline: 698 green / 2 documented reds.
+  agent, at phase ends. Suite baseline: 701 green / 2 documented reds.
 - Any command trending past ~5 minutes: parallelize or split the tool; never
   wrap it in a sleep/poll loop. Time-box closed-on-render fit loops; report
   budgets; report-and-stop beats converge-at-any-cost.
@@ -91,6 +96,24 @@ core; currently ~30%).
 - Do not commit; the session owner reviews and commits.
 
 ## Current open items (beyond the two reds)
+
+**The blocker under the third red** (D407-411): the direct path has per-partial
+gains and *no radiated response between the partials*, so the engine's 100-800
+Hz mono shape cannot be moved where a key has no partial. An energy-conserving
+nodal mechanism needs the source to stand up to **+8.97 dB** above the
+recording's own mono at 180 Hz before it is applied; it stands at +0.04, and
+`body_modes` x8 reaches +1.7 while `partial_gains` +9 dB reaches +2.9. Next
+milestone: a fitted sixth-octave colouration of the mono drive, fitted to the
+recording's mono **divided by the pair's own mono transfer** — measure both
+with `forensics/.../mono_mechanism keys`. It moves every mono board. Its
+acceptance is D408's *standing* column rising to its *required* column, not
+the per-channel gate; **the nodal rotation is not to be built until it lands**
+(D411), in either the Givens or the `C=(A+B)/2, S=(A−B)/2` form, because an
+energy-conserving mechanism on today's source lands the fold-down 4-6 dB under
+the recording across the nodal band. Settle one thing before that fit is
+written: `mono_balance` is a *median over keys*, so it weights a key carrying
+1% of a band like one carrying 42% (D411) — the fit's target is pooled and
+level-matched, and the two agree only if the band's energy is spread evenly.
 
 Treble sympathetic halo ~21 dB short (board late field); per-key brightness
 tilt not drawn for unsampled keys (needs more recorded keys by policy);

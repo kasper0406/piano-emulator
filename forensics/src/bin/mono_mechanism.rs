@@ -4,8 +4,17 @@
 //!
 //! ```text
 //! cargo run -p forensics --bin mono_mechanism -- <section>
-//! sections: mono  theta  lag  all
+//! sections: keys  mono  theta  lag  all
 //! ```
+//!
+//! * `keys` — the four sections `DECISIONS.md` 407-408 are built on, which is
+//!   the attribution `mono` deliberately pools away: **which** keys carry each
+//!   band's mono difference and how much of the band they own; the same
+//!   difference at **1/24 octave** with both sides printed separately and the
+//!   recording's own pair-over-mono beside them; the same statistic through
+//!   seven instruments that differ in **one stage each**, so the comb can be
+//!   charged to a stage rather than guessed at; and the **headroom** an
+//!   energy-conserving mechanism needs against what the fitted knobs reach.
 //!
 //! * `mono` — the recording's mono behaviour at sixth-octave resolution over
 //!   100-800 Hz on the thirty recorded keys, against the engine's own mono in
@@ -835,6 +844,387 @@ spend before the engine's mono is *darker* there than the recording's.",
 // Section 2: theta(f)
 // ---------------------------------------------------------------------------
 
+/// **How far the existing knobs reach against the headroom a nodal mechanism
+/// needs** (`DECISIONS.md` 407).
+///
+/// The mechanism's mono cost at a band is exactly the pair energy it adds
+/// there, so the source must stand **`REF pair - ENG(bare) pair`** decibels
+/// *above* the recording's own mono before the mechanism is applied, or the
+/// fold-down lands under the recording once it is. That is the "required"
+/// column. Against it: what the engine actually stands at now, and what it
+/// stands at when the only frequency-shaping knob the direct-plus-board path
+/// has — `soundboard.body_modes` under 400 Hz — is pushed to two, four and
+/// eight times its fitted gains, with `board_mix` opened to 0.6 as well.
+fn report_headroom(grid: &[f64], rows: &[KeyRow]) -> Result<(), Box<dyn std::error::Error>> {
+    let base = without_lobe(&shipped());
+    let scaled = |k: f32, mix: Option<f32>| {
+        let mut p = base.clone();
+        for m in &mut p.soundboard.body_modes {
+            if m.hz >= 140.0 && m.hz <= 400.0 {
+                m.gain *= k;
+            }
+        }
+        if let Some(mix) = mix {
+            p.soundboard.board_mix = mix;
+        }
+        p
+    };
+    let v2 = scaled(2.0, None);
+    let v4 = scaled(4.0, None);
+    let v8 = scaled(8.0, None);
+    let v8m = scaled(8.0, Some(0.6));
+    // The one fitted parameter that *is* the direct path's radiated spectrum:
+    // `notes.partial_gains`, per key and per partial. Every partial whose own
+    // frequency lands between 160 and 300 Hz is lifted by 9 dB — the deficit
+    // the table below asks for at 180 Hz — so that what the per-partial fit
+    // could supply if it were re-fitted against an uncancelled target can be
+    // told apart from what it cannot reach at all.
+    let mut lifted = base.clone();
+    {
+        let f0 = lifted.notes.f0_hz.clone();
+        let bb = lifted.notes.inharmonicity_b.clone();
+        for (k, row) in lifted.notes.partial_gains.iter_mut().enumerate() {
+            let (f, b) = (f0[k], bb[k]);
+            for (i, g) in row.iter_mut().enumerate() {
+                let n = (i + 1) as f32;
+                let hz = f * n * (1.0 + b * n * n).sqrt();
+                if (160.0..=300.0).contains(&hz) {
+                    *g *= 2.818_383; // +9 dB
+                }
+            }
+        }
+    }
+    let variants: [(&str, &Preset); 6] = [
+        ("x2", &v2),
+        ("x4", &v4),
+        ("x8", &v8),
+        ("x8, board_mix 0.6", &v8m),
+        ("partials +9 dB in 160-300", &lifted),
+        ("shipped bare", &base),
+    ];
+    let mut cols: Vec<Vec<f64>> = Vec::new();
+    let mono_of = |t: &Take, i: usize| (t.bands[i][2], t.mono_total());
+    for (_, preset) in variants {
+        let takes: Vec<Take> = rows
+            .par_iter()
+            .map(|r| {
+                let (l, rr) = render_key(preset, r.key);
+                Take::of(&l, &rr, grid)
+            })
+            .collect();
+        cols.push(
+            (0..grid.len())
+                .map(|i| {
+                    let (mut e, mut rf) = (0.0, 0.0);
+                    for (t, r) in takes.iter().zip(rows) {
+                        let (a, b) = mono_of(t, i);
+                        let (c, d) = mono_of(&r.reference, i);
+                        e += a / b;
+                        rf += c / d;
+                    }
+                    db(e / rf)
+                })
+                .collect(),
+        );
+    }
+    println!("\n## 0d. The headroom a nodal mechanism needs, against what the knobs reach\n");
+    print!("| Hz | REF pair dB | ENG bare pair dB | **required** | now |");
+    for (name, _) in &variants[..5] {
+        print!(" {name} |");
+    }
+    println!();
+    print!("|---:|---:|---:|---:|---:|");
+    for _ in &variants[..5] {
+        print!("---:|");
+    }
+    println!();
+    for (i, &hz) in grid.iter().enumerate() {
+        let pooled_pair = |f: &dyn Fn(&KeyRow) -> &Take| {
+            let (mut p, mut m) = (0.0, 0.0);
+            for r in rows {
+                let t = f(r);
+                let tot = t.mono_total();
+                p += (t.bands[i][0] + t.bands[i][1]) / tot;
+                m += 2.0 * t.bands[i][2] / tot;
+            }
+            db(p / m)
+        };
+        let refp = pooled_pair(&|r| &r.reference);
+        let engp = pooled_pair(&|r| &r.engine_bare);
+        print!(
+            "| {hz:.0} | {refp:+.2} | {engp:+.2} | **{:+.2}** | {:+.2} |",
+            refp - engp,
+            cols[5][i]
+        );
+        for c in &cols[..5] {
+            print!(" {:+.2} |", c[i]);
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// **Which stage of the engine carries the comb** (`DECISIONS.md` 407).
+///
+/// The same pooled 1/24-octave mono shape as [`report_halo`], on the same keys,
+/// through four instruments that differ in one stage each: the shipped preset
+/// with no lobe; the same with `soundboard.body_modes` flattened (every gain
+/// zero); the same with `voicing.bridge.peaks` flattened (every gain 0 dB); and
+/// the same with `board_mix` at zero, which removes the whole board path. A
+/// bump that is the body modes' disappears in the second, a bump that is the
+/// bridge's disappears in the third, and one that survives all three is the
+/// backbone's or the strings' own.
+fn report_parts(rows: &[KeyRow]) -> Result<(), Box<dyn std::error::Error>> {
+    let ratio = 2.0f64.powf(1.0 / 24.0);
+    let mut fine = Vec::new();
+    let mut hz = SPAN_HZ.0;
+    while hz <= SPAN_HZ.1 {
+        fine.push(hz);
+        hz *= ratio;
+    }
+    let base = without_lobe(&shipped());
+    let mut flat_body = base.clone();
+    for m in &mut flat_body.soundboard.body_modes {
+        m.gain = 0.0;
+    }
+    let mut flat_peaks = base.clone();
+    if let Some(bridge) = flat_peaks.voicing.bridge.as_mut() {
+        for p in &mut bridge.peaks {
+            p.gain_db = 0.0;
+        }
+    }
+    let mut no_board = base.clone();
+    no_board.soundboard.board_mix = 0.0;
+    let mut no_symp = base.clone();
+    no_symp.voicing.resonance_coupling = 0.0;
+    let mut no_strike = base.clone();
+    for a in &mut no_strike.noise.strike.level_db {
+        a.db = -200.0;
+    }
+    let mut only_direct = no_symp.clone();
+    only_direct.soundboard.board_mix = 0.0;
+    for a in &mut only_direct.noise.strike.level_db {
+        a.db = -200.0;
+    }
+    let variants: [(&str, &Preset); 7] = [
+        ("bare", &base),
+        ("no body modes", &flat_body),
+        ("no bridge peaks", &flat_peaks),
+        ("no board path", &no_board),
+        ("no sympathetic", &no_symp),
+        ("no strike noise", &no_strike),
+        ("strings alone", &only_direct),
+    ];
+    let half = 2.0f64.powf(0.5 / 24.0);
+    let take_of = |l: &[f32], r: &[f32]| {
+        let n = l.len().max(r.len()).next_power_of_two();
+        let mut planner = FftPlanner::<f64>::new();
+        let a = forward(l, n, &mut planner);
+        let b = forward(r, n, &mut planner);
+        Take {
+            bands: fine
+                .iter()
+                .map(|&hz| band_energies(&a, &b, hz / half, hz * half))
+                .collect(),
+        }
+    };
+    println!("\n## 0c. The comb, stage by stage — pooled engine less recording, 1/24 octave, dB\n");
+    let refs: Vec<Take> = rows
+        .par_iter()
+        .map(|r| -> Result<Take, piano_tuner::Error> {
+            let a = reference_key(r.key, VELOCITY)?;
+            Ok(take_of(&a.channels[0], &a.channels[1]))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut cols: Vec<Vec<f64>> = Vec::new();
+    for (_, preset) in variants {
+        let takes: Vec<Take> = rows
+            .par_iter()
+            .map(|r| {
+                let (l, rr) = render_key(preset, r.key);
+                take_of(&l, &rr)
+            })
+            .collect();
+        cols.push(
+            (0..fine.len())
+                .map(|i| {
+                    let (mut e, mut rf) = (0.0, 0.0);
+                    for (t, reference) in takes.iter().zip(&refs) {
+                        e += t.bands[i][2] / t.mono_total();
+                        rf += reference.bands[i][2] / reference.mono_total();
+                    }
+                    db(e / rf)
+                })
+                .collect(),
+        );
+    }
+    print!("| Hz |");
+    for (name, _) in variants {
+        print!(" {name} |");
+    }
+    println!();
+    print!("|---:|");
+    for _ in variants {
+        print!("---:|");
+    }
+    println!();
+    for (i, &hz) in fine.iter().enumerate() {
+        print!("| {hz:.0} |");
+        for c in &cols {
+            print!(" {:+.2} |", c[i]);
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// **What the mono excess *is*, at 1/24 octave and in the time domain**
+/// (`DECISIONS.md` 407).
+///
+/// `keys` says *which* keys carry it; this says what it looks like. Two
+/// readings on the same renders:
+///
+/// * the pooled engine-less-recording mono share at **1/24 octave** over
+///   100-810 Hz, which separates "a resonance" (a few tenths of an octave
+///   wide) from "a tilt" (the whole span);
+/// * for the treble keys, whose 100-810 Hz content is *all* halo and no
+///   partial, the **decay** of a 254 Hz bandpass of the engine's own render
+///   against the recording's — a body mode rings, a noise burst does not.
+fn report_halo(rows: &[KeyRow]) -> Result<(), Box<dyn std::error::Error>> {
+    let ratio = 2.0f64.powf(1.0 / 24.0);
+    let mut fine = Vec::new();
+    let mut hz = SPAN_HZ.0;
+    while hz <= SPAN_HZ.1 {
+        fine.push(hz);
+        hz *= ratio;
+    }
+    println!("\n## 0b. The excess at 1/24 octave, pooled over the treble keys and over all keys\n");
+    println!(
+        "| Hz | ENG share dB | REF share dB | ENG-REF dB | REF pair-over-mono dB | treble keys dB |"
+    );
+    println!("|---:|---:|---:|---:|---:|---:|");
+    let preset = shipped();
+    let bare = without_lobe(&preset);
+    // Re-render at the finer grid: the `Take`s carried by `rows` are on the
+    // sixth-octave grid and cannot be re-banded.
+    let takes: Vec<(u8, Take, Take)> = rows
+        .par_iter()
+        .map(|r| -> Result<(u8, Take, Take), piano_tuner::Error> {
+            let refa = reference_key(r.key, VELOCITY)?;
+            let half = 2.0f64.powf(0.5 / 24.0);
+            let grid: Vec<f64> = fine.clone();
+            let take = |l: &[f32], rr: &[f32]| {
+                let n = l.len().max(rr.len()).next_power_of_two();
+                let mut planner = FftPlanner::<f64>::new();
+                let a = forward(l, n, &mut planner);
+                let b = forward(rr, n, &mut planner);
+                Take {
+                    bands: grid
+                        .iter()
+                        .map(|&hz| band_energies(&a, &b, hz / half, hz * half))
+                        .collect(),
+                }
+            };
+            let (bl, br) = render_key(&bare, r.key);
+            Ok((
+                r.key,
+                take(&refa.channels[0], &refa.channels[1]),
+                take(&bl, &br),
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (i, &hz) in fine.iter().enumerate() {
+        let pooled = |sel: &dyn Fn(u8) -> bool| {
+            let (mut e, mut rf) = (0.0, 0.0);
+            for (key, reference, engine) in &takes {
+                if !sel(*key) {
+                    continue;
+                }
+                e += engine.bands[i][2] / engine.mono_total();
+                rf += reference.bands[i][2] / reference.mono_total();
+            }
+            db(e / rf)
+        };
+        let side = |eng: bool| {
+            let mut acc = 0.0;
+            for (_, reference, engine) in &takes {
+                let t = if eng { engine } else { reference };
+                acc += t.bands[i][2] / t.mono_total();
+            }
+            db(acc / takes.len() as f64)
+        };
+        let ref_pair = {
+            let (mut p, mut m) = (0.0, 0.0);
+            for (_, reference, _) in &takes {
+                let t = reference.mono_total();
+                p += (reference.bands[i][0] + reference.bands[i][1]) / t;
+                m += 2.0 * reference.bands[i][2] / t;
+            }
+            db(p / m)
+        };
+        println!(
+            "| {hz:.0} | {:+.2} | {:+.2} | {:+.2} | {:+.2} | {:+.2} |",
+            side(true),
+            side(false),
+            pooled(&|_| true),
+            ref_pair,
+            pooled(&|k| k >= 81)
+        );
+    }
+    Ok(())
+}
+
+/// **Which keys carry the mono excess, band by band** (`DECISIONS.md` 407).
+///
+/// `mono` pools the keys, which is the right estimator for "of the energy the
+/// recording puts here, how much does the engine put here" and is deliberately
+/// blind to *which* key put it there. The repair has to be written into a fit
+/// that acts per key and per partial, so the attribution is owed: this prints,
+/// per key, that key's own 100-810 Hz-normalised mono share in each band,
+/// engine (bare) less recording, and beside it the key's share of the pooled
+/// band energy so a large per-key number on a key that has nothing in the band
+/// can be told from one that carries it.
+fn report_keys(grid: &[f64], rows: &[KeyRow]) {
+    println!("\n## 0. Which keys carry each band's mono excess (engine bare - recording, dB)\n");
+    let want: Vec<usize> = (0..grid.len()).collect();
+    print!("| key |");
+    for &i in &want {
+        print!(" {:.0} |", grid[i]);
+    }
+    println!();
+    print!("|---|");
+    for _ in &want {
+        print!("---:|");
+    }
+    println!();
+    // Each band's pooled reference energy, for the weight column.
+    let ref_tot: Vec<f64> = want
+        .iter()
+        .map(|&i| {
+            rows.iter()
+                .map(|r| r.reference.bands[i][2] / r.reference.mono_total())
+                .sum::<f64>()
+        })
+        .collect();
+    for r in rows {
+        print!("| {} |", r.label);
+        for (c, &i) in want.iter().enumerate() {
+            if !r.reference.readable(i) || !r.engine_bare.readable(i) {
+                print!("  . |");
+                continue;
+            }
+            let d = r.engine_bare.mono_share_db(i) - r.reference.mono_share_db(i);
+            let w = (r.reference.bands[i][2] / r.reference.mono_total()) / ref_tot[c].max(1e-300);
+            print!(" {d:+.1}<{:.0}%> |", 100.0 * w);
+        }
+        println!();
+    }
+    println!(
+        "\n`<n%>` is that key's share of the pooled reference energy in the band — the weight the \
+pooled row of section 1 gives it."
+    );
+}
+
 fn report_theta(grid: &[f64], rows: &[KeyRow]) {
     println!("\n## 2. The Givens angle the recording asks for, and what it costs the mono sum\n");
     println!(
@@ -1336,8 +1726,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .unwrap_or_else(|| "all".to_string());
     let grid = grid();
-    if section == "mono" || section == "theta" || section == "all" {
+    if section == "mono" || section == "theta" || section == "keys" || section == "all" {
         let rows = mono_section(&grid)?;
+        if section == "keys" || section == "all" {
+            report_keys(&grid, &rows);
+            report_halo(&rows)?;
+            report_parts(&rows)?;
+            report_headroom(&grid, &rows)?;
+        }
         if section == "mono" || section == "all" {
             report_mono(&grid, &rows);
         }

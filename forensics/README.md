@@ -49,6 +49,10 @@ the one-line summaries below are only an index.
 | `drift_line` | The line `estimate::directivity` inverts `voicing.polarization_pan_spread` through, measured on the engine as it stands. |
 | `tail_seam` | Where a note's 0.5-2.0 s brightness comes from, partial by partial, engine against the recording of the same key — the instrument behind `DECISIONS.md` 334-336. |
 | `line_noise` | Which of the engine's two mechanism events the melody render's noise is, both measured whole by silencing them one at a time, and the sampler's own lead-in at the recorded keys — `DECISIONS.md` 338-339. |
+| `stereo_channels` | What the three listening complaints about `renders/stereo/` had in common: the pair geometry exonerated, the side lift convicted, per channel and per note — `DECISIONS.md` 392. |
+| `channel_fidelity` | The recording's own interchannel behaviour at a sixth of an octave over thirty keys, which is what the per-channel board's bars are made of — `DECISIONS.md` 393. |
+| `channel_verify` | The per-channel repair re-measured with its own DSP, against the board that graded it. |
+| `mono_mechanism` | Whether the recording's own mono sum pays for its nodal band, how much of that the engine's mono already inherited, and — sections added for `DECISIONS.md` 407-411 — which keys carry the difference, which stage of the engine carries it (seven one-stage ablations), and the headroom an energy-conserving mechanism needs against what every fitted knob reaches. |
 | `preset_variant` | Writes a copy of a preset with one thing changed, so that a standing board can be run on the variant without a hand-edited file. The only entry here that is a *helper* rather than a measurement, and it is here because the experiments in `DECISIONS.md` 338-341 are only reproducible with it. |
 
 Most of them write into `renders/` or into `target/`, both gitignored, and
