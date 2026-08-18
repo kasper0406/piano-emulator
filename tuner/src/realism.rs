@@ -2821,6 +2821,216 @@ pub const STEREO_PROFILE_PER_OCTAVE: usize = 6;
 /// above 16 kHz the library's own content stops.
 pub const STEREO_PROFILE_RANGE_HZ: (f64, f64) = (40.0, 16_000.0);
 
+// ---------------------------------------------------------------------------
+// The mono question, pooled over keys (`DECISIONS.md` 407-412)
+// ---------------------------------------------------------------------------
+
+/// The span the mono question is asked over, and the span every share is
+/// normalised inside — so a band's number is a *local shape* and not the
+/// engine's standing broadband tilt (`DECISIONS.md` 343, 407).
+pub const MONO_SPAN_HZ: (f64, f64) = (100.0, 810.0);
+
+/// [`stereo_profile`]'s own sixth-octave centres, from 40 Hz, restricted to
+/// [`MONO_SPAN_HZ`].
+///
+/// It is deliberately that grid and not [`STEREO_FINE_BANDS`]: item 408's
+/// headroom table and item 411(b)'s reconciliation are both printed on it, and
+/// a fit whose bands were a different grid from the table it has to move would
+/// be a fit nobody could check. The two grids overlap by 93 % and item 411(b)
+/// measured what that is worth (0.8 % of a band 12.2 % wide).
+pub fn mono_grid() -> Vec<f64> {
+    let ratio = 2.0f64.powf(1.0 / STEREO_PROFILE_PER_OCTAVE as f64);
+    let mut hz = STEREO_PROFILE_RANGE_HZ.0;
+    let mut out = Vec::new();
+    while hz <= MONO_SPAN_HZ.1 {
+        if hz >= MONO_SPAN_HZ.0 {
+            out.push(hz);
+        }
+        hz *= ratio;
+    }
+    out
+}
+
+/// One take's band energies on [`mono_grid`]: `[E_L, E_R, E_M]` per band, with
+/// `M = (L + R)/2`.
+///
+/// In `f64` from the transform down, and with the same band edges, the same
+/// rounding of a frequency to a bin and the same negative-frequency twin as
+/// `forensics/src/bin/mono_mechanism.rs` — which is what lets the fit and the
+/// forensic instrument that graded it be checked against each other to the
+/// digit rather than to a tolerance.
+#[derive(Clone, Debug)]
+pub struct MonoBands {
+    pub bands: Vec<[f64; 3]>,
+    /// The **whole take's** `[E_L, E_R, E_M]`, every bin from DC to Nyquist.
+    ///
+    /// Not used by the level match, which is the span's own total on purpose
+    /// (`MONO_SPAN_HZ`), but needed to ask the one question a within-span share
+    /// cannot: where the span as a whole sits against the rest of the
+    /// instrument. A share has no uniform component — `Σ share = 1` on both
+    /// sides — so the fit's own statistic is structurally blind to it, and it
+    /// has to be measured somewhere.
+    pub total: [f64; 3],
+}
+
+impl MonoBands {
+    pub fn of(left: &[f32], right: &[f32], sample_rate: f64, grid: &[f64]) -> MonoBands {
+        let n = left.len().max(right.len()).next_power_of_two();
+        let mut planner = FftPlanner::<f64>::new();
+        let a = mono_spectrum(left, n, &mut planner);
+        let b = mono_spectrum(right, n, &mut planner);
+        let half = 2.0f64.powf(0.5 / STEREO_PROFILE_PER_OCTAVE as f64);
+        let bin = |hz: f64| (hz * n as f64 / sample_rate).round() as usize;
+        let bands = grid
+            .iter()
+            .map(|&hz| {
+                let (blo, bhi) = (bin(hz / half).max(1), bin(hz * half).min(n / 2));
+                let mut acc = [0.0f64; 3];
+                if bhi >= blo {
+                    for j in blo..=bhi {
+                        for &(x, y) in &[(a[j], b[j]), (a[n - j], b[n - j])] {
+                            acc[0] += x.norm_sqr();
+                            acc[1] += y.norm_sqr();
+                            acc[2] += ((x + y) * 0.5).norm_sqr();
+                        }
+                    }
+                }
+                let scale = 1.0 / n as f64;
+                [acc[0] * scale, acc[1] * scale, acc[2] * scale]
+            })
+            .collect();
+        let mut total = [0.0f64; 3];
+        for (x, y) in a.iter().zip(&b) {
+            total[0] += x.norm_sqr();
+            total[1] += y.norm_sqr();
+            total[2] += ((x + y) * 0.5).norm_sqr();
+        }
+        let scale = 1.0 / n as f64;
+        for v in &mut total {
+            *v *= scale;
+        }
+        MonoBands { bands, total }
+    }
+
+    /// The span's own energy against the whole take's, for `[E_L+E_R, E_M]`.
+    pub fn span_over_take(&self) -> (f64, f64) {
+        let mono: f64 = self.bands.iter().map(|e| e[2]).sum();
+        let pair: f64 = self.bands.iter().map(|e| e[0] + e[1]).sum();
+        (
+            pair / (self.total[0] + self.total[1]),
+            mono / self.total[2],
+        )
+    }
+
+    /// This take's whole [`MONO_SPAN_HZ`] mono energy — the level match.
+    pub fn mono_total(&self) -> f64 {
+        self.bands.iter().map(|e| e[2]).sum()
+    }
+
+    /// This band's share of that total, linear.
+    pub fn mono_share(&self, i: usize) -> f64 {
+        self.bands[i][2] / self.mono_total()
+    }
+}
+
+fn mono_spectrum(
+    x: &[f32],
+    n: usize,
+    planner: &mut FftPlanner<f64>,
+) -> Vec<rustfft::num_complex::Complex<f64>> {
+    let fft = planner.plan_fft_forward(n);
+    let mut buf: Vec<rustfft::num_complex::Complex<f64>> = (0..n)
+        .map(|i| {
+            rustfft::num_complex::Complex::new(f64::from(x.get(i).copied().unwrap_or(0.0)), 0.0)
+        })
+        .collect();
+    fft.process(&mut buf);
+    buf
+}
+
+/// One band of item 408's headroom table, pooled over the keys.
+#[derive(Clone, Copy, Debug)]
+pub struct MonoColumn {
+    pub hz: f64,
+    /// `10 log10((E_L + E_R) / 2 E_M)` for the recording, pooled: how much of
+    /// what the two capsules carry its own mono sum does not.
+    pub reference_pair_db: f64,
+    /// The same for the engine.
+    pub engine_pair_db: f64,
+    /// **Required**: `reference_pair − engine_pair`. An energy-conserving nodal
+    /// mechanism costs the fold-down exactly the pair energy it adds, so this
+    /// is how far above the recording's own mono the *source* has to stand
+    /// before one is applied (`DECISIONS.md` 408).
+    pub required_db: f64,
+    /// **Standing**: pooled, level-matched engine mono share less the
+    /// recording's. What the source actually stands at.
+    pub standing_db: f64,
+    /// The engine's share of its own span energy in this band, pooled — the
+    /// weight the level match gives the band, and what the fit's offset is
+    /// taken against so a colouration moves the *shape* and not the level.
+    pub engine_share: f64,
+}
+
+impl MonoColumn {
+    /// What the colouration owes this band: `required − standing`, before the
+    /// level-preserving offset. Item 409's "cost less headroom" column.
+    pub fn deficit_db(&self) -> f64 {
+        self.required_db - self.standing_db
+    }
+}
+
+/// Item 408's table, pooled over `(reference, engine)` pairs of takes.
+///
+/// Pooled and not a median over keys, which is the estimator question item 411
+/// left open and named: a sixth-octave band of *one* key is dominated by
+/// whether a partial happens to land in it, and pooling the level-matched
+/// energies weights each key by how much it actually has in the band. Every
+/// key is pooled, with no readability filter, which is exactly how item 408's
+/// own table was computed.
+pub fn mono_columns(grid: &[f64], takes: &[(MonoBands, MonoBands)]) -> Vec<MonoColumn> {
+    let mut engine_shares = Vec::with_capacity(grid.len());
+    let mut columns = Vec::with_capacity(grid.len());
+    for i in 0..grid.len() {
+        let pair_over_mono = |pick: fn(&(MonoBands, MonoBands)) -> &MonoBands| {
+            let (mut p, mut m) = (0.0f64, 0.0f64);
+            for t in takes {
+                let take = pick(t);
+                let total = take.mono_total();
+                p += (take.bands[i][0] + take.bands[i][1]) / total;
+                m += 2.0 * take.bands[i][2] / total;
+            }
+            10.0 * (p / m).log10()
+        };
+        fn reference(t: &(MonoBands, MonoBands)) -> &MonoBands {
+            &t.0
+        }
+        fn engine(t: &(MonoBands, MonoBands)) -> &MonoBands {
+            &t.1
+        }
+        let (mut e, mut r) = (0.0f64, 0.0f64);
+        for (reference, engine) in takes {
+            e += engine.mono_share(i);
+            r += reference.mono_share(i);
+        }
+        engine_shares.push(e);
+        let reference_pair_db = pair_over_mono(reference);
+        let engine_pair_db = pair_over_mono(engine);
+        columns.push(MonoColumn {
+            hz: grid[i],
+            reference_pair_db,
+            engine_pair_db,
+            required_db: reference_pair_db - engine_pair_db,
+            standing_db: 10.0 * (e / r).log10(),
+            engine_share: e,
+        });
+    }
+    let total: f64 = engine_shares.iter().sum();
+    for c in &mut columns {
+        c.engine_share /= total;
+    }
+    columns
+}
+
 /// The interchannel image of one signal as a *curve*: sixth-octave bands from
 /// 40 Hz to 16 kHz.
 ///
@@ -3455,6 +3665,32 @@ pub struct ChannelColumn {
     pub mono_scatter: f64,
     pub mono_bar: f64,
     pub mono_pass: bool,
+    /// **The same fold-down question, pooled by energy instead of by rank**
+    /// (`DECISIONS.md` 411's open item, settled in 412).
+    ///
+    /// [`Self::mono_balance`] is `stereo_median` over the items of each item's
+    /// own `mono_db` difference, so a key carrying **1 %** of a band's energy
+    /// and a key carrying **42 %** move it equally. Item 407(a) measured what
+    /// that costs: the 252 Hz row reads the treble keys' sub-fundamental floor
+    /// (+4.7 to +16.8 dB on keys carrying 1-2 % each) while C3 and C4, who own
+    /// 80 % of the band, read +1.4 and +4.2.
+    ///
+    /// This is the estimator the *fit* uses — [`mono_columns`] — read on the
+    /// board's own items and bands: every item's level-matched band energy
+    /// summed, engine over recording. Where a band's energy is spread evenly
+    /// the two agree; where it is not, the difference between them is the
+    /// measurement of that, and both are printed for exactly that reason.
+    ///
+    /// It is deliberately **not** what `mono_pass` is decided on. Item 411
+    /// refused to move the number every item from 405 onward is anchored to
+    /// inside the milestone whose finding is that nothing moved; this milestone
+    /// moves the instrument instead, so re-anchoring the bar in the same breath
+    /// would make the two changes impossible to tell apart. The median keeps
+    /// the gate and the pooled column keeps it honest.
+    pub mono_pooled: f64,
+    /// The recording's own second take through [`Self::mono_pooled`] — the
+    /// floor that column would be read against.
+    pub mono_pooled_floor: f64,
     pub pass: bool,
     pub items: usize,
     pub worst: Option<(String, f64)>,
@@ -3562,6 +3798,19 @@ fn channel_columns_over(
             };
             let mono_balance = stereo_median(&mono_of(engine));
             let mono_floor = stereo_median(&mono_of(alternate)).abs();
+            // Pooled: the level-matched band energies summed over the items
+            // and the two sums divided, which is `mono_columns`' estimator on
+            // the board's own material.
+            let mono_pooled_of = |side: fn(&ChannelItem) -> &ChannelShape| -> f64 {
+                let (mut e, mut r) = (0.0f64, 0.0f64);
+                for it in &readable {
+                    e += 10.0f64.powf(of(side(it))[b].mono_db / 10.0);
+                    r += 10.0f64.powf(of(&it.reference)[b].mono_db / 10.0);
+                }
+                10.0 * (e / r).log10()
+            };
+            let mono_pooled = mono_pooled_of(engine);
+            let mono_pooled_floor = mono_pooled_of(alternate).abs();
             let mono_scatter = stereo_sigma(&pick(|x| x.mono_db, reference));
             let mono_bar = mono_floor.max(if readable.is_empty() {
                 f64::NAN
@@ -3630,6 +3879,8 @@ fn channel_columns_over(
                 mono_pass: mono_balance.is_finite()
                     && mono_bar.is_finite()
                     && mono_balance.abs() <= mono_bar,
+                mono_pooled,
+                mono_pooled_floor,
                 pass: error.is_finite() && bar.is_finite() && error <= bar,
                 items: readable.len(),
                 worst,
@@ -3647,18 +3898,18 @@ pub fn channel_report(columns: &[ChannelColumn]) -> String {
         s,
         "| band | engine L / R | reference L / R | alternate L / R | \\|err\\| | bar | floor | \
 scatter | per-item \\|err\\| / floor | pair E / R | balance | bar | mono E / R | balance | bar | \
-worst | n |"
+pooled | pooled floor | worst | n |"
     );
     let _ = writeln!(
         s,
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
     );
     for c in columns {
         let _ = writeln!(
             s,
             "| `{}` | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:.2} | {:.2}{} | \
 {:.2} | {:.2} | {:.2}{} / {:.2} | {:+.2} / {:+.2} | {:+.2}{} | {:.2} | {:+.2} / {:+.2} | \
-{:+.2}{} | {:.2} | {} | {} |",
+{:+.2}{} | {:.2} | {:+.2} | {:.2} | {} | {} |",
             c.name,
             c.engine_left_db,
             c.engine_right_db,
@@ -3684,6 +3935,8 @@ worst | n |"
             c.mono_balance,
             if c.mono_pass { "" } else { " **RED**" },
             c.mono_bar,
+            c.mono_pooled,
+            c.mono_pooled_floor,
             c.worst
                 .as_ref()
                 .map_or_else(|| "—".to_string(), |(k, d)| format!("{k} {d:.2}")),

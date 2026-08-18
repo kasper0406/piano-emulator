@@ -615,6 +615,26 @@ pub const MAX_BRIDGE_Q: f32 = 50.0;
 /// ([`RADIATED_FACTOR_RANGE`](crate::string::RADIATED_FACTOR_RANGE)).
 pub const MAX_RADIATED_SHARE: f32 = 0.9;
 
+/// Bounds on `[soundboard.radiation]`. As with the bridge, these are the schema
+/// and the tuner's copy states the same numbers.
+///
+/// The count is what a sixth-octave curve over the whole audible band would
+/// need, with room to spare; the frequency rails are the bridge's, for the same
+/// reason. `MIN_RADIATION_SPACING` is a *twelfth* of an octave and is the one
+/// bound that is not taste: the realising cascade solves a square interaction
+/// system over the declared centres (`soundboard::Radiation`), and two centres
+/// closer than that make two nearly identical rows.
+pub const MAX_RADIATION_BANDS: usize = 96;
+pub const MIN_RADIATION_HZ: f32 = 20.0;
+pub const MAX_RADIATION_HZ: f32 = 16_000.0;
+/// Range of any one band's response. The measured deficit item 408 asks for is
+/// +9 dB at one band; ±24 dB is generous headroom and still a colouration
+/// rather than a synthesiser.
+pub const MIN_RADIATION_GAIN_DB: f32 = -24.0;
+pub const MAX_RADIATION_GAIN_DB: f32 = 24.0;
+/// Smallest ratio between two adjacent centres: a twelfth of an octave.
+pub const MIN_RADIATION_SPACING: f32 = 1.059_463_1;
+
 /// One duplex or aliquot segment of a key, as a resonance.
 ///
 /// A string does not end at the bridge or at the agraffe: the front segment
@@ -827,6 +847,64 @@ pub struct SoundboardVoicing {
     /// Body modes. Their frequencies are kept off the equal-tempered grid so
     /// no single key is emphasised.
     pub body_modes: Vec<BodyMode>,
+    /// The strings' **radiated response between their partials**.
+    ///
+    /// Absent — the default, and every preset written before
+    /// `DECISIONS.md` 412 — is no colouration at all and the sounding path bit
+    /// for bit as it was. See [`Radiation`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radiation: Option<Radiation>,
+}
+
+/// The strings' radiated response **between** their partials, as a sixth-octave
+/// curve of decibels (`DECISIONS.md` 407-412).
+///
+/// # Why the engine needed a new field at all
+///
+/// `notes.partial_gains` is the direct path's only fitted spectrum and it is
+/// indexed *by partial*, so it can only move energy where a partial already is.
+/// Item 408 measured what that costs: lifting every partial whose frequency
+/// lands in 160-300 Hz by 9 dB moves the pooled 180 Hz band by **2.9 dB**,
+/// because about 40 % of the reference's pooled energy there is the treble
+/// keys' sub-fundamental floor and no per-partial table can reach a frequency
+/// where the key has no partial. Item 407(c) charged the resulting comb to the
+/// strings' own radiated path by ablation — not to `soundboard.body_modes`, not
+/// to `voicing.bridge` (which is the sympathetic bus's admittance and a
+/// different path), and not to the sympathetic bus or the strike noise.
+///
+/// This is that missing stage: one minimum-phase colouration, applied to the
+/// drive the voices hand the board *before* `board_mix` splits it into the
+/// direct sound and the board's own field, so both inherit it exactly as they
+/// inherit everything else the strings radiate. It is deliberately **not** on
+/// the resonance bus: `resonance.rs`'s bridge admittance is what the other
+/// strings are driven through, and colouring what a listener hears must not
+/// re-tune what the instrument hears of itself.
+///
+/// # What the numbers are
+///
+/// `hz` are band centres, strictly increasing, and `gain_db[i]` is the response
+/// the band centred on `hz[i]` is to have. Outside the declared range the
+/// response returns to 0 dB over about a third of an octave, which is the skirt
+/// of the outermost section and not a design choice — nothing is shelved, so a
+/// preset that declares 100-800 Hz leaves the compass above and below it where
+/// it was.
+///
+/// The curve is fitted by `piano-tuner radiation`, closed on the engine's own
+/// render, against the recording's pooled level-matched mono share **divided by
+/// the pair's own mono transfer** — item 410's target, and the division is the
+/// whole point: the recording's mono sum is a fold-down across a nodal line and
+/// carries that line's cancellation, so fitting a source to it is what folded
+/// the hole into the source in the first place.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Radiation {
+    /// Band centres, Hz, strictly increasing and no closer than a twelfth of an
+    /// octave (the rail that keeps the realising design well-conditioned).
+    #[serde(serialize_with = "short::list")]
+    pub hz: Vec<f32>,
+    /// The response at each centre, dB. Same length as [`Self::hz`].
+    #[serde(serialize_with = "short::list")]
+    pub gain_db: Vec<f32>,
 }
 
 /// One resonance of the cabinet and soundboard.
@@ -1770,6 +1848,9 @@ impl Preset {
             positive("soundboard.body_modes.q", mode.q)?;
             finite("soundboard.body_modes.gain", mode.gain)?;
         }
+        if let Some(radiation) = &s.radiation {
+            validate_radiation(radiation)?;
+        }
 
         // The mechanism events reach a biquad's coefficients and an exponential
         // envelope on the audio path, so the same rule applies as everywhere
@@ -2559,6 +2640,56 @@ fn table_length(name: &str, len: usize) -> Result<(), PresetError> {
     }
 }
 
+/// The rails on `[soundboard.radiation]`.
+///
+/// Two of these are not taste. The **spacing** rail is what keeps the realising
+/// design's square system well-conditioned (`soundboard::Radiation::design`),
+/// and the **gain** rail is what keeps a fit that diverged from arriving on the
+/// audio thread as a 60 dB resonance: the sections are peaking biquads and are
+/// unconditionally stable at any gain, so nothing here is a stability bound —
+/// the stability contract is asserted separately, on the realised
+/// coefficients.
+fn validate_radiation(r: &Radiation) -> Result<(), PresetError> {
+    if r.hz.is_empty() {
+        return Err(PresetError::invalid("soundboard.radiation.hz is empty"));
+    }
+    if r.hz.len() != r.gain_db.len() {
+        return Err(PresetError::invalid(format!(
+            "soundboard.radiation has {} centres and {} gains",
+            r.hz.len(),
+            r.gain_db.len()
+        )));
+    }
+    if r.hz.len() > MAX_RADIATION_BANDS {
+        return Err(PresetError::invalid(format!(
+            "soundboard.radiation has {} bands, at most {MAX_RADIATION_BANDS} are allowed",
+            r.hz.len()
+        )));
+    }
+    for (i, (&hz, &gain)) in r.hz.iter().zip(&r.gain_db).enumerate() {
+        within(
+            &format!("soundboard.radiation.hz[{i}]"),
+            hz,
+            MIN_RADIATION_HZ,
+            MAX_RADIATION_HZ,
+        )?;
+        within(
+            &format!("soundboard.radiation.gain_db[{i}]"),
+            gain,
+            MIN_RADIATION_GAIN_DB,
+            MAX_RADIATION_GAIN_DB,
+        )?;
+        if i > 0 && hz < r.hz[i - 1] * MIN_RADIATION_SPACING {
+            return Err(PresetError::invalid(format!(
+                "soundboard.radiation.hz[{i}] is {hz} and its predecessor is {}, closer than \
+                 the twelfth of an octave two independent bands need",
+                r.hz[i - 1]
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn finite(name: &str, value: f32) -> Result<(), PresetError> {
     if value.is_finite() {
         Ok(())
@@ -2807,6 +2938,7 @@ impl Default for Preset {
                     .iter()
                     .map(|&(hz, q, gain)| BodyMode { hz, q, gain })
                     .collect(),
+                radiation: None,
             },
             notes: NoteTables {
                 f0_hz,
@@ -3002,6 +3134,73 @@ mod tests {
     /// The file in `presets/` next to the workspace root.
     pub(crate) fn default_preset_path() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../presets/default.toml")
+    }
+
+    /// **The radiated response is bounded, and its absence is the old file.**
+    ///
+    /// Three claims in one test, because they are one contract: a preset
+    /// without the section writes no section at all (so every file written
+    /// before `DECISIONS.md` 412 is still byte-identical), a preset with one
+    /// round-trips it, and every rail refuses rather than clamps.
+    #[test]
+    fn the_radiated_response_is_absent_by_default_and_railed_when_it_is_not() {
+        let plain = Preset::default();
+        assert!(plain.soundboard.radiation.is_none());
+        assert!(
+            !plain.to_toml().contains("radiation"),
+            "an absent section is writing itself into the file"
+        );
+
+        let mut preset = Preset::default();
+        preset.soundboard.radiation = Some(Radiation {
+            hz: vec![100.0, 112.25, 126.0, 141.42],
+            gain_db: vec![1.25, -0.5, 8.93, 0.0],
+        });
+        assert!(preset.validate().is_ok());
+        let text = preset.to_toml();
+        assert!(text.contains("[soundboard.radiation]"));
+        assert_eq!(Preset::from_toml(&text).expect("round trip"), preset);
+
+        let refused = |r: Radiation| {
+            let mut p = Preset::default();
+            p.soundboard.radiation = Some(r);
+            p.validate().is_err()
+        };
+        // Ragged, empty, over the count, over the gain rail, off the frequency
+        // rail, out of order, and two centres closer than the design's own
+        // conditioning bound.
+        assert!(refused(Radiation {
+            hz: vec![100.0, 200.0],
+            gain_db: vec![1.0],
+        }));
+        assert!(refused(Radiation {
+            hz: Vec::new(),
+            gain_db: Vec::new(),
+        }));
+        assert!(refused(Radiation {
+            hz: (0..=MAX_RADIATION_BANDS).map(|i| 20.0 * 1.1f32.powi(i as i32)).collect(),
+            gain_db: vec![0.0; MAX_RADIATION_BANDS + 1],
+        }));
+        assert!(refused(Radiation {
+            hz: vec![200.0],
+            gain_db: vec![MAX_RADIATION_GAIN_DB + 0.1],
+        }));
+        assert!(refused(Radiation {
+            hz: vec![MIN_RADIATION_HZ - 1.0],
+            gain_db: vec![0.0],
+        }));
+        assert!(refused(Radiation {
+            hz: vec![200.0, 180.0],
+            gain_db: vec![0.0, 0.0],
+        }));
+        assert!(refused(Radiation {
+            hz: vec![200.0, 200.0 * MIN_RADIATION_SPACING * 0.99],
+            gain_db: vec![0.0, 0.0],
+        }));
+        assert!(refused(Radiation {
+            hz: vec![200.0],
+            gain_db: vec![f32::NAN],
+        }));
     }
 
     #[test]

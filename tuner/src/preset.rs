@@ -467,6 +467,14 @@ pub const MAX_BRIDGE_Q: f32 = 50.0;
 /// Largest share of a partial's decay the admittance may be given
 /// (`engine::preset::MAX_RADIATED_SHARE`).
 pub const MAX_RADIATED_SHARE: f32 = 0.9;
+/// Bounds on `[soundboard.radiation]`, mirroring `engine::preset`.
+pub const MAX_RADIATION_BANDS: usize = 96;
+pub const MIN_RADIATION_HZ: f32 = 20.0;
+pub const MAX_RADIATION_HZ: f32 = 16_000.0;
+pub const MIN_RADIATION_GAIN_DB: f32 = -24.0;
+pub const MAX_RADIATION_GAIN_DB: f32 = 24.0;
+/// Smallest ratio between two adjacent centres: a twelfth of an octave.
+pub const MIN_RADIATION_SPACING: f32 = 1.059_463_1;
 /// Largest `resonance_coupling · max|B|` a preset may ask for
 /// (`engine::resonance::MAX_BRIDGE_LOOP_GAIN`), and largest
 /// `resonance_coupling · max|B| · (Σ|D| + max|D|)`
@@ -551,6 +559,26 @@ pub struct SoundboardVoicing {
     #[serde(serialize_with = "short::scalar")]
     pub fdn_hf_hz: f32,
     pub body_modes: Vec<BodyMode>,
+    /// The strings' radiated response between their partials; absent is the
+    /// uncoloured drive every preset before `DECISIONS.md` 412 has. See
+    /// `engine::preset::Radiation` and `engine::soundboard::Radiation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radiation: Option<Radiation>,
+}
+
+/// The strings' radiated response between their partials, as a sixth-octave
+/// curve of decibels. Fitted by `piano-tuner radiation`; see
+/// `engine::preset::Radiation`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Radiation {
+    /// Band centres, Hz, strictly increasing and no closer than a twelfth of
+    /// an octave.
+    #[serde(serialize_with = "short::list")]
+    pub hz: Vec<f32>,
+    /// The response at each centre, dB. Same length as `hz`.
+    #[serde(serialize_with = "short::list")]
+    pub gain_db: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1363,6 +1391,46 @@ impl Preset {
             positive("soundboard.body_modes.hz", mode.hz)?;
             positive("soundboard.body_modes.q", mode.q)?;
             finite("soundboard.body_modes.gain", mode.gain)?;
+        }
+        if let Some(r) = &s.radiation {
+            if r.hz.is_empty() {
+                return Err(Error::Preset("soundboard.radiation.hz is empty".into()));
+            }
+            if r.hz.len() != r.gain_db.len() {
+                return Err(Error::Preset(format!(
+                    "soundboard.radiation has {} centres and {} gains",
+                    r.hz.len(),
+                    r.gain_db.len()
+                )));
+            }
+            if r.hz.len() > MAX_RADIATION_BANDS {
+                return Err(Error::Preset(format!(
+                    "soundboard.radiation has {} bands, at most {MAX_RADIATION_BANDS} \
+                     are allowed",
+                    r.hz.len()
+                )));
+            }
+            for (i, (&hz, &gain)) in r.hz.iter().zip(&r.gain_db).enumerate() {
+                within(
+                    &format!("soundboard.radiation.hz[{i}]"),
+                    hz,
+                    MIN_RADIATION_HZ,
+                    MAX_RADIATION_HZ,
+                )?;
+                within(
+                    &format!("soundboard.radiation.gain_db[{i}]"),
+                    gain,
+                    MIN_RADIATION_GAIN_DB,
+                    MAX_RADIATION_GAIN_DB,
+                )?;
+                if i > 0 && hz < r.hz[i - 1] * MIN_RADIATION_SPACING {
+                    return Err(Error::Preset(format!(
+                        "soundboard.radiation.hz[{i}] is {hz} and its predecessor is {}, \
+                         closer than the twelfth of an octave two independent bands need",
+                        r.hz[i - 1]
+                    )));
+                }
+            }
         }
 
         // The mechanism events reach a biquad's coefficients and an exponential
@@ -2630,6 +2698,10 @@ mod tests {
                 lift: 2.4,
             }),
         });
+        preset.soundboard.radiation = Some(piano_emulator::preset::Radiation {
+            hz: vec![100.0, 112.2, 125.99, 141.42],
+            gain_db: vec![1.25, -0.5, 8.9, 0.0],
+        });
         preset.noise.strike = piano_emulator::preset::StrikeNoise {
             centroid_hz: 1_450.0,
             decay_s: 0.06,
@@ -2657,6 +2729,7 @@ mod tests {
         assert!(text.contains("false_beat"));
         assert!(text.contains("[voicing.strike_direction]"));
         assert!(text.contains("[voicing.mics]"));
+        assert!(text.contains("[soundboard.radiation]"));
 
         let ours = Preset::from_toml(&text).expect("the tuner reads it");
         assert_eq!(ours.to_toml(), text);
@@ -2678,6 +2751,13 @@ mod tests {
         assert_eq!(ours.duplex_modes(81)[0].hz, 3_121.5);
         assert_eq!(ours.duplex_modes(21).len(), 0);
         assert_eq!(ours.notes.pan_spread[0], 0.02);
+        let radiation = ours
+            .soundboard
+            .radiation
+            .as_ref()
+            .expect("the radiated response came through");
+        assert_eq!(radiation.hz.len(), 4);
+        assert_eq!(radiation.gain_db[2], 8.9);
         assert_eq!(ours.notes.comb_floor[0], 0.18);
         assert_eq!(ours.notes.partial_gains[39], vec![1.4, 0.7, 1.0, 2.5]);
         assert!(ours.notes.partial_gains[1].is_empty());

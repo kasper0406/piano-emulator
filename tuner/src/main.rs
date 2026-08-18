@@ -159,6 +159,7 @@ fn run(args: Vec<String>) -> Exit {
         Some("melody") => tools::melody::run(rest()),
         Some("noise") => tools::noise::run(rest()),
         Some("mics") => tools::mics::run(rest()),
+        Some("radiation") => tools::radiation::run(rest()),
         Some("chain") => tools::chain::run(rest()),
         Some("stereo") => tools::stereo::run(rest()),
         Some("score") => tools::score::run(rest()),

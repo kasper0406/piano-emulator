@@ -33,7 +33,7 @@
 //! it always did (`DECISIONS.md` 103).
 
 use crate::modal::ModalBank;
-use crate::preset::{MicVoicing, ModalBand, SoundboardVoicing};
+use crate::preset::{MicVoicing, ModalBand, Radiation as RadiationCurve, SoundboardVoicing};
 use crate::types::{db_to_amp, key_position, BLOCK, OUTPUT_GAIN, SAMPLE_RATE};
 
 /// Maximum pan displacement; bass to the left, treble to the right.
@@ -479,6 +479,347 @@ impl ModalLobe {
     }
 }
 
+/// One peaking section in **double precision**, transposed direct form II.
+///
+/// # Why this one filter is not `f32`
+///
+/// Everything else in this engine runs in `f32` and is right to. A resonator at
+/// the *bottom* of the audible band is where that stops being free: a section at
+/// 180 Hz with `RADIATION_Q` has a pole radius of `0.9973`, and transposed form
+/// II's state settles at about `1/(1 − r)` — **370 times** the signal running
+/// through it. Rounding that state in `f32` is rounding at 370 ulps of the
+/// signal, and nineteen such sections in cascade put the result about **−77 dB**
+/// under it. Measured, on the invariant that is most sensitive to it: the
+/// microphone pair's fold-down against the pan-pot's own render moved from the
+/// **−116 dB** it has always sat at to **−70 dB** with this cascade in `f32`,
+/// and back to −116 dB in `f64`. That is the mono-discipline contract
+/// (`CONTEXT.md`, and `the_radiated_response_leaves_the_mono_sum_where_the_pan_pot_put_it`)
+/// bought for three chains of nineteen double-precision biquads — about 14
+/// MFLOP/s of the ~30 % of one core the whole instrument costs.
+#[derive(Clone, Copy, Debug, Default)]
+struct WideBiquad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    s1: f64,
+    s2: f64,
+}
+
+impl WideBiquad {
+    /// The cookbook's `peakingEQ`, normalised by `a0`.
+    ///
+    /// Minimum-phase at every setting, which is what [`Radiation`] needs and is
+    /// a property of the form rather than of the numbers put in it: the zero
+    /// pair's product of roots is `(1 − αA)/(1 + αA)` and the pole pair's is
+    /// `(1 − α/A)/(1 + α/A)`, both strictly inside the unit circle for any
+    /// positive `α` and `A`, and the stability triangle's remaining condition
+    /// reduces to `cos ω0 < 1`.
+    fn peaking(hz: f64, q: f64, gain_db: f64) -> Self {
+        let a = 10.0f64.powf(gain_db / 40.0);
+        let w = (std::f64::consts::TAU * hz / f64::from(SAMPLE_RATE)).clamp(1.0e-9, 3.0);
+        let (sin, cos) = w.sin_cos();
+        let alpha = sin / (2.0 * q);
+        let a0 = 1.0 + alpha / a;
+        WideBiquad {
+            b0: (1.0 + alpha * a) / a0,
+            b1: -2.0 * cos / a0,
+            b2: (1.0 - alpha * a) / a0,
+            a1: -2.0 * cos / a0,
+            a2: (1.0 - alpha / a) / a0,
+            s1: 0.0,
+            s2: 0.0,
+        }
+    }
+
+    #[inline]
+    fn run(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.s1;
+        self.s1 = self.b1 * x - self.a1 * y + self.s2;
+        self.s2 = self.b2 * x - self.a2 * y;
+        y
+    }
+
+    /// This section's magnitude at `hz`, dB, on the coefficients it will
+    /// actually run with.
+    fn magnitude_db(&self, hz: f64) -> f64 {
+        let w = std::f64::consts::TAU * hz / f64::from(SAMPLE_RATE);
+        let (s1, c1) = w.sin_cos();
+        let (s2, c2) = (2.0 * w).sin_cos();
+        let num = (self.b0 + self.b1 * c1 + self.b2 * c2).hypot(-(self.b1 * s1) - self.b2 * s2);
+        let den = (1.0 + self.a1 * c1 + self.a2 * c2).hypot(-(self.a1 * s1) - self.a2 * s2);
+        20.0 * (num / den).log10()
+    }
+
+    /// The larger pole magnitude, for the stability assertion.
+    fn pole_radius(&self) -> f64 {
+        let disc = self.a1 * self.a1 - 4.0 * self.a2;
+        if disc >= 0.0 {
+            let r = disc.sqrt();
+            (0.5 * (-self.a1 + r)).abs().max((0.5 * (-self.a1 - r)).abs())
+        } else {
+            self.a2.abs().sqrt()
+        }
+    }
+
+    fn clear(&mut self) {
+        self.s1 = 0.0;
+        self.s2 = 0.0;
+    }
+}
+
+/// Bandwidth of each section [`Radiation`] realises a declared point with: a
+/// third of an octave, as the cookbook's `Q = 1 / (2 sinh(ln2/2 · BW))`.
+///
+/// It is a **third** of an octave for a curve declared every **sixth**, and the
+/// factor of two is the whole of the choice. Sections a sixth of an octave wide
+/// barely reach their neighbours, so the cascade passes through the declared
+/// points and ripples between them — and a band's score is the energy
+/// *integrated across the band*, so a peak that is right only at the centre
+/// under-delivers the band. Sections a third of an octave wide overlap their
+/// neighbours by half, which is what makes the realised curve a smooth
+/// interpolation of the declared points; the overlap is then removed exactly by
+/// [`Radiation::design`] rather than approximately by hand.
+const RADIATION_Q: f32 = 4.318_44;
+
+/// Newton rounds [`Radiation::design`] takes.
+///
+/// The iteration is a *fixed*-Jacobian Newton — the matrix is built once, at
+/// one decibel per section, and the cookbook's peaking section is not exactly
+/// linear in its gain — so it converges linearly rather than quadratically, at
+/// about a third of the residual per round on the fitted curve. Sixteen rounds
+/// take a seven-decibel initial error under the `f32` coefficients' own noise
+/// and cost microseconds once, at preset load.
+const RADIATION_DESIGN_ROUNDS: usize = 16;
+
+/// Rail on one *section's* gain, dB. The declared curve is railed by
+/// `preset::validate_radiation`; this bounds what the design may ask a section
+/// for while it inverts the overlap, so a pathological curve cannot arrive on
+/// the audio thread as a resonance nobody wrote down.
+const RADIATION_SECTION_CEILING_DB: f32 = 48.0;
+
+/// **The strings' radiated response between their partials** — the stage
+/// `DECISIONS.md` 407-412 found missing, and the one thing in this file that
+/// moves the mono fold-down on purpose.
+///
+/// # What it is
+///
+/// A cascade of peaking sections, run on the drive the voices hand the board:
+/// under a microphone pair on the direct path's sum and difference, without one
+/// on the two pan-potted channels, and in both cases on the board's own drive
+/// as well. That placement is the claim, and it is the measured one — item
+/// 407(c) ablated the comb through seven instruments and it survived every
+/// stage with a knob (`body_modes`, `voicing.bridge`, the sympathetic bus, the
+/// strike noise) and did not survive removing the strings' own radiated path.
+///
+/// Everything downstream of a voice and upstream of `board_mix` is linear, so
+/// filtering the three accumulators is *exactly* filtering every voice's own
+/// output before it is added — the pan gains and the capsule delays are
+/// constants and commute with a filter. That is why one cascade per accumulator
+/// buys what eighty-eight per voice would, and it is why the section is
+/// affordable at all.
+///
+/// # What it is not
+///
+/// It is not on the resonance bus. `resonance.rs` carries the bridge admittance
+/// the other strings are driven through, item 407(c) charged the comb to a
+/// different path, and colouring what a listener hears must not re-tune what
+/// the instrument hears of itself.
+///
+/// # How a declared curve becomes coefficients
+///
+/// Sections a third of an octave wide overlap, so the gain a section is given
+/// is not the response the band ends up with. The overlap is inverted rather
+/// than lived with. In decibels a cascade's magnitude is the **sum** of its
+/// sections', so with `M[j][i]` the decibels section `i` puts at centre `j` for
+/// one decibel of its own gain — a matrix that depends only on the centres and
+/// on `RADIATION_Q` — the design is Newton's method on `M g = t`:
+///
+/// ```text
+/// g ← t;  repeat: r_j = Σ_i dB|H_i(f_j; g_i)|;  g ← g + M⁻¹ (t − r)
+/// ```
+///
+/// `M` is factored once. The iteration is there because the cookbook's peaking
+/// section is not *exactly* linear in its gain in decibels; three rounds take
+/// the worst declared point to under a hundredth of a decibel, which
+/// `the_realised_response_passes_through_every_declared_point` asserts.
+struct Radiation {
+    /// The same coefficients three times over, one per accumulator the drive is
+    /// carried on: two direct channels and the board's drive. Separate state,
+    /// identical filter — which is what keeps the mono fold-down identical to
+    /// the pan-pot's (`DECISIONS.md` 353).
+    chains: [Vec<WideBiquad>; 3],
+}
+
+impl Radiation {
+    fn new(curve: &RadiationCurve) -> Self {
+        let sections = Self::design(&curve.hz, &curve.gain_db);
+        Radiation {
+            chains: [sections.clone(), sections.clone(), sections],
+        }
+    }
+
+    /// The cascade that puts `gain_db[i]` at `hz[i]`; see the type's header.
+    fn design(hz: &[f32], gain_db: &[f32]) -> Vec<WideBiquad> {
+        let n = hz.len();
+        debug_assert_eq!(n, gain_db.len());
+        let centres: Vec<f64> = hz.iter().map(|&f| f64::from(f)).collect();
+        let target: Vec<f64> = gain_db.iter().map(|&g| f64::from(g)).collect();
+        let q = f64::from(RADIATION_Q);
+        // One decibel of section `i`, read at centre `j`. The unit is small
+        // enough that the cookbook's own nonlinearity in the gain is out of the
+        // matrix and left to the iteration.
+        let mut m = vec![0.0f64; n * n];
+        for i in 0..n {
+            let probe = WideBiquad::peaking(centres[i], q, 1.0);
+            for j in 0..n {
+                m[j * n + i] = probe.magnitude_db(centres[j]);
+            }
+        }
+        let lu = LuFactors::of(m, n);
+        let ceiling = f64::from(RADIATION_SECTION_CEILING_DB);
+        let mut gains: Vec<f64> = target.clone();
+        let mut sections: Vec<WideBiquad> = (0..n)
+            .map(|i| WideBiquad::peaking(centres[i], q, gains[i]))
+            .collect();
+        for _ in 0..RADIATION_DESIGN_ROUNDS {
+            let Some(lu) = lu.as_ref() else { break };
+            let residual: Vec<f64> = (0..n)
+                .map(|j| target[j] - Self::magnitude_db(&sections, centres[j]))
+                .collect();
+            let step = lu.solve(&residual);
+            for i in 0..n {
+                gains[i] = (gains[i] + step[i]).clamp(-ceiling, ceiling);
+                sections[i] = WideBiquad::peaking(centres[i], q, gains[i]);
+            }
+        }
+        // The stability contract, asserted where the coefficients are made, as
+        // every other filter in this engine asserts it. The peaking form cannot
+        // produce a pole outside the unit circle — see [`WideBiquad::peaking`] —
+        // so this is a check on the arithmetic rather than on the design, and it
+        // is cheap: it runs once, at preset load.
+        for (i, section) in sections.iter().enumerate() {
+            assert!(
+                section.pole_radius() < 1.0,
+                "soundboard.radiation section {i} at {} Hz has a pole at radius {}",
+                centres[i],
+                section.pole_radius()
+            );
+        }
+        sections
+    }
+
+    /// This cascade's realised magnitude at `hz`, dB — what the design closed
+    /// on, and what the tests read.
+    fn magnitude_db(sections: &[WideBiquad], hz: f64) -> f64 {
+        sections.iter().map(|s| s.magnitude_db(hz)).sum()
+    }
+
+    /// Sample outer, section inner — so the cascade's intermediate values are
+    /// never rounded back to `f32` between two sections, which is half of what
+    /// the double precision was for.
+    #[inline]
+    fn run(&mut self, chain: usize, block: &mut [f32]) {
+        let sections = &mut self.chains[chain];
+        for x in block.iter_mut() {
+            let mut y = f64::from(*x);
+            for section in sections.iter_mut() {
+                y = section.run(y);
+            }
+            *x = y as f32;
+        }
+    }
+
+    fn clear(&mut self) {
+        for chain in &mut self.chains {
+            chain.iter_mut().for_each(WideBiquad::clear);
+        }
+    }
+}
+
+/// The magnitude, dB, the engine will **realise** for `curve` at each of `hz` —
+/// the design itself, run once and read on an arbitrary grid.
+///
+/// Public because the fit that writes a curve has to be able to print what the
+/// instrument will do with it rather than what it was asked for, and because
+/// the ripple between two declared points is a property of the realisation
+/// (`RADIATION_Q`) that no amount of closing the loop on band energies can see.
+pub fn radiation_response_db(curve: &RadiationCurve, hz: &[f64]) -> Vec<f64> {
+    let sections = Radiation::design(&curve.hz, &curve.gain_db);
+    hz.iter()
+        .map(|&f| Radiation::magnitude_db(&sections, f))
+        .collect()
+}
+
+/// An LU factorisation with partial pivoting, for the one square system this
+/// crate solves outside the modal construction.
+///
+/// Small and private on purpose: the system is the number of declared radiation
+/// bands square (nineteen, on the fitted preset), it is solved a handful of
+/// times at preset load, and nothing about it is on the audio path.
+struct LuFactors {
+    lu: Vec<f64>,
+    pivot: Vec<usize>,
+    n: usize,
+}
+
+impl LuFactors {
+    /// `None` when the matrix is singular, which is the design falling back to
+    /// the declared gains as written — a curve that is wrong by the overlap
+    /// rather than one that is a division by zero.
+    fn of(mut a: Vec<f64>, n: usize) -> Option<Self> {
+        let mut pivot: Vec<usize> = (0..n).collect();
+        for k in 0..n {
+            let (mut best, mut best_row) = (0.0, k);
+            for (r, &p) in pivot.iter().enumerate().skip(k) {
+                let v = a[p * n + k].abs();
+                if v > best {
+                    best = v;
+                    best_row = r;
+                }
+            }
+            if best <= 1e-12 {
+                return None;
+            }
+            pivot.swap(k, best_row);
+            let pk = pivot[k];
+            for r in k + 1..n {
+                let pr = pivot[r];
+                let factor = a[pr * n + k] / a[pk * n + k];
+                a[pr * n + k] = factor;
+                for c in k + 1..n {
+                    a[pr * n + c] -= factor * a[pk * n + c];
+                }
+            }
+        }
+        Some(LuFactors { lu: a, pivot, n })
+    }
+
+    fn solve(&self, b: &[f64]) -> Vec<f64> {
+        let n = self.n;
+        let mut y = vec![0.0f64; n];
+        for k in 0..n {
+            let pk = self.pivot[k];
+            let mut acc = b[pk];
+            for c in 0..k {
+                acc -= self.lu[pk * n + c] * y[c];
+            }
+            y[k] = acc;
+        }
+        let mut x = vec![0.0f64; n];
+        for k in (0..n).rev() {
+            let pk = self.pivot[k];
+            let mut acc = y[k];
+            for c in k + 1..n {
+                acc -= self.lu[pk * n + c] * x[c];
+            }
+            x[k] = acc / self.lu[pk * n + k];
+        }
+        x
+    }
+}
+
 /// Accumulates `gain * mono` into `side`, delayed by `delay` samples, with
 /// linear interpolation between the two neighbouring taps.
 ///
@@ -510,6 +851,9 @@ pub struct Soundboard {
     side: [f32; BLOCK + MIC_TAIL],
     /// The mode-controlled band on the *direct* path's own sum.
     direct_lobe: Option<ModalLobe>,
+    /// The strings' radiated response between their partials, or `None` for the
+    /// uncoloured drive every preset before `DECISIONS.md` 412 has.
+    radiation: Option<Radiation>,
     board_l: [f32; BLOCK],
     board_r: [f32; BLOCK],
     /// Mono sum after the body modes have coloured it; the FDN's input.
@@ -558,6 +902,7 @@ impl Soundboard {
             mid: [0.0; BLOCK],
             side: [0.0; BLOCK + MIC_TAIL],
             direct_lobe: mics.and_then(|m| m.lobe),
+            radiation: voicing.radiation.as_ref().map(Radiation::new),
             board_l: [0.0; BLOCK],
             board_r: [0.0; BLOCK],
             drive: [0.0; BLOCK],
@@ -633,6 +978,22 @@ impl Soundboard {
         debug_assert_eq!(out_l.len(), BLOCK);
         debug_assert_eq!(out_r.len(), BLOCK);
         let direct = 1.0 - self.board_mix;
+        // The strings' radiated response, before `board_mix` splits the drive
+        // into the direct sound and the board's field, so both inherit it. The
+        // difference signal is filtered over this block's own samples only:
+        // whatever a delayed capsule put past the end is still raw, and
+        // [`Self::begin_block`] carries it into the next block, where it is
+        // filtered exactly once and in order.
+        if let Some(radiation) = &mut self.radiation {
+            if self.mics.is_some() {
+                radiation.run(0, &mut self.mid);
+                radiation.run(1, &mut self.side[..BLOCK]);
+            } else {
+                radiation.run(0, &mut self.direct_l);
+                radiation.run(1, &mut self.direct_r);
+            }
+            radiation.run(2, &mut self.mono);
+        }
         if self.mics.is_some() {
             for i in 0..BLOCK {
                 let (m, s) = (self.mid[i], self.side[i]);
@@ -675,6 +1036,9 @@ impl Soundboard {
         self.side.fill(0.0);
         if let Some(lobe) = &mut self.direct_lobe {
             lobe.clear();
+        }
+        if let Some(radiation) = &mut self.radiation {
+            radiation.clear();
         }
         self.board_l.fill(0.0);
         self.board_r.fill(0.0);
@@ -1889,6 +2253,285 @@ mod tests {
         assert!(
             (-4.5..-1.0).contains(&tilt_db),
             "shelf tilt {tilt_db} dB at 10 kHz"
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // The strings' radiated response (`DECISIONS.md` 412)
+    // ----------------------------------------------------------------------
+
+    /// The sixth-octave grid the fit works on, from 40 Hz, over 100-810 Hz —
+    /// `realism::stereo_profile`'s own centres, which is what makes the
+    /// engine's declared points and the boards' bands the same bands.
+    fn radiation_grid() -> Vec<f32> {
+        let ratio = 2.0f32.powf(1.0 / 6.0);
+        let mut hz = 40.0f32;
+        let mut out = Vec::new();
+        while hz <= 810.0 {
+            if hz >= 100.0 {
+                out.push(hz);
+            }
+            hz *= ratio;
+        }
+        out
+    }
+
+    /// The shape item 408's table asks for, near enough: the +9 dB spike at
+    /// 180 Hz, its two skirts, and a mild tilt elsewhere.
+    fn radiation_curve() -> RadiationCurve {
+        let hz = radiation_grid();
+        let gain_db = hz
+            .iter()
+            .map(|&f| match f {
+                f if f < 150.0 => 1.0,
+                f if f < 190.0 => 8.9,
+                f if f < 215.0 => 4.8,
+                f if f < 240.0 => 4.3,
+                f if f < 270.0 => -0.7,
+                f if f < 300.0 => 1.2,
+                _ => 0.5,
+            })
+            .collect();
+        RadiationCurve { hz, gain_db }
+    }
+
+    fn voicing_with_radiation() -> SoundboardVoicing {
+        SoundboardVoicing {
+            radiation: Some(radiation_curve()),
+            ..voicing()
+        }
+    }
+
+    /// **The design's own claim.** A cascade of overlapping sections does not
+    /// put its own gain at its own centre, so the design inverts the overlap;
+    /// this is the assertion that it did. Without the Newton rounds — with each
+    /// section simply given the decibels its point asks for — the 180 Hz point
+    /// realises about **+16 dB** for a declared +8.9, which is the falsification
+    /// this test exists for.
+    #[test]
+    fn the_realised_response_passes_through_every_declared_point() {
+        let curve = radiation_curve();
+        let sections = Radiation::design(&curve.hz, &curve.gain_db);
+        let mut worst = 0.0f64;
+        for (&hz, &want) in curve.hz.iter().zip(&curve.gain_db) {
+            let got = Radiation::magnitude_db(&sections, f64::from(hz));
+            worst = worst.max((got - f64::from(want)).abs());
+        }
+        assert!(
+            worst < 0.01,
+            "the realised curve misses a declared point by {worst:.4} dB"
+        );
+
+        // The overlap is real, which is what makes the inversion load-bearing:
+        // sections given their points' own decibels overshoot badly.
+        let naive: Vec<WideBiquad> = curve
+            .hz
+            .iter()
+            .zip(&curve.gain_db)
+            .map(|(&hz, &g)| {
+                WideBiquad::peaking(f64::from(hz), f64::from(RADIATION_Q), f64::from(g))
+            })
+            .collect();
+        let peak = curve
+            .hz
+            .iter()
+            .zip(&curve.gain_db)
+            .map(|(&hz, &want)| Radiation::magnitude_db(&naive, f64::from(hz)) - f64::from(want))
+            .fold(0.0f64, f64::max);
+        assert!(
+            peak > 3.0,
+            "the sections do not overlap enough for the inversion to matter: {peak:.2} dB"
+        );
+    }
+
+    /// Every section is inside the unit circle, at the rails of what a preset
+    /// may declare — the same contract every other filter in this engine is
+    /// held to.
+    #[test]
+    fn every_radiation_section_is_stable_at_the_rails() {
+        use crate::preset::{MAX_RADIATION_GAIN_DB, MIN_RADIATION_GAIN_DB};
+        let hz = radiation_grid();
+        for &g in &[MIN_RADIATION_GAIN_DB, 0.0, MAX_RADIATION_GAIN_DB] {
+            let alternating: Vec<f32> = hz
+                .iter()
+                .enumerate()
+                .map(|(i, _)| if i % 2 == 0 { g } else { -g })
+                .collect();
+            for gains in [vec![g; hz.len()], alternating] {
+                let sections = Radiation::design(&hz, &gains);
+                for (i, s) in sections.iter().enumerate() {
+                    let r = s.pole_radius();
+                    assert!(
+                        r < 1.0 - 1e-6,
+                        "section {i} at {} Hz has a pole at radius {r}",
+                        hz[i]
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Absent means old, bit for bit.** The whole neutrality contract in one
+    /// assertion, on both branches of the board.
+    #[test]
+    fn a_preset_without_a_radiation_section_renders_the_old_board_sample_for_sample() {
+        let mv = mic_voicing_with_lobe();
+        for mics in [None, Some(&mv)] {
+            let mut a = Soundboard::with_mics(&voicing(), mics);
+            let mut b = Soundboard::with_mics(
+                &SoundboardVoicing {
+                    radiation: None,
+                    ..voicing()
+                },
+                mics,
+            );
+            let (al, ar) = render_pair(&mut a, 0.37, 60, sine(220.0));
+            let (bl, br) = render_pair(&mut b, 0.37, 60, sine(220.0));
+            assert_eq!(al, bl);
+            assert_eq!(ar, br);
+        }
+    }
+
+    /// **What the section is for.** A declared point moves that band of the
+    /// rendered output by what it declares, and a band the curve leaves alone
+    /// stays where it was. Measured on the whole board — direct path and field
+    /// together, `board_mix` where the preset has it — because that is the
+    /// signal every board in the repository scores.
+    #[test]
+    fn a_declared_band_moves_the_render_by_what_it_declares() {
+        let mv = mic_voicing_with_lobe();
+        // Driven for the whole run and read over the last third, so what is
+        // measured is the steady state rather than a decay: the colouration is
+        // a response, and a response is a thing a tail does not have.
+        let energy = |voicing: &SoundboardVoicing, hz: f32| {
+            let mut sb = Soundboard::with_mics(voicing, Some(&mv));
+            let (mut l, mut r) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
+            let excite = sine(hz);
+            let mut acc = 0.0f64;
+            let blocks = 240;
+            for b in 0..blocks {
+                let mut x = [0.0f32; BLOCK];
+                for (i, v) in x.iter_mut().enumerate() {
+                    *v = excite(b * BLOCK + i);
+                }
+                sb.begin_block();
+                sb.add_voice(&x, 0.2);
+                sb.process(&mut l, &mut r);
+                if b >= 2 * blocks / 3 {
+                    acc += l
+                        .iter()
+                        .zip(&r)
+                        .map(|(&a, &b)| f64::from(a) * f64::from(a) + f64::from(b) * f64::from(b))
+                        .sum::<f64>();
+                }
+            }
+            acc
+        };
+        let bare = voicing();
+        let coloured = voicing_with_radiation();
+        let curve = radiation_curve();
+        for (&hz, &want) in curve.hz.iter().zip(&curve.gain_db) {
+            if hz > 400.0 {
+                continue;
+            }
+            let moved = 10.0 * (energy(&coloured, hz) / energy(&bare, hz)).log10();
+            assert!(
+                (moved - f64::from(want)).abs() < 0.5,
+                "{hz:.0} Hz moved by {moved:+.2} dB where the curve declares {want:+.2}"
+            );
+        }
+        // ... and 3 kHz, an octave and a half above the top declared point, is
+        // where it was: nothing is shelved, so the compass outside the fitted
+        // span keeps its own voicing.
+        let untouched = 10.0 * (energy(&coloured, 3_000.0) / energy(&bare, 3_000.0)).log10();
+        assert!(
+            untouched.abs() < 0.05,
+            "3 kHz moved by {untouched:+.3} dB and the curve stops at 806 Hz"
+        );
+    }
+
+    /// **The mono discipline survives the colouration.** The pair's fold-down
+    /// is still the pan-pot's own render, which is the invariant every mono
+    /// board in the repository is read under — and it is the one a stage
+    /// applied to three accumulators rather than to one could plausibly break.
+    #[test]
+    fn the_radiated_response_leaves_the_mono_sum_where_the_pan_pot_put_it() {
+        let mv = mic_voicing_with_lobe();
+        let voicing = voicing_with_radiation();
+        for pan in [-0.6f32, 0.0, 0.37] {
+            let mut bare = Soundboard::new(&voicing);
+            let mut mics = Soundboard::with_mics(&voicing, Some(&mv));
+            // Quieter than the uncoloured proof's probe by the largest boost
+            // the curve declares, for that proof's own stated reason: above the
+            // safety limiter's threshold the master chain is not linear, and
+            // the sum of two channels is then not the channel of two sums.
+            let mut state = 0x1234_5678u32;
+            let noise: Vec<f32> = (0..200 * BLOCK)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    0.005 * ((state >> 8) as f32 / (1 << 23) as f32 - 1.0)
+                })
+                .collect();
+            let (bl, br) = render_pair(&mut bare, pan, 200, |t| noise[t]);
+            let (ml, mr) = render_pair(&mut mics, pan, 200, |t| noise[t]);
+            let (mut error_energy, mut energy) = (0.0f64, 0.0f64);
+            let mut worst = 0.0f32;
+            let mut level = 0.0f32;
+            for i in 0..bl.len() {
+                let (a, b) = (0.5 * (bl[i] + br[i]), 0.5 * (ml[i] + mr[i]));
+                worst = worst.max((a - b).abs());
+                level = level.max(a.abs());
+                error_energy += f64::from(a - b) * f64::from(a - b);
+                energy += f64::from(a) * f64::from(a);
+            }
+            let peak_db = 20.0 * (worst / level).log10();
+            let rms_db = 10.0 * (error_energy / energy).log10();
+            assert!(
+                peak_db < -100.0 && rms_db < -110.0,
+                "pan {pan}: the coloured fold-down moved by {peak_db:.1} dB peak, \
+                 {rms_db:.1} dB RMS"
+            );
+        }
+    }
+
+    /// The state carried past a block boundary is filtered **once**. The side
+    /// signal's tail is the one buffer in this file that outlives its own
+    /// block, so a filter written over `side` in full would run over those
+    /// samples twice; rendering the same source in one long run and in short
+    /// blocks is the same render either way, and this is that assertion at the
+    /// only place it could fail.
+    #[test]
+    fn the_difference_signals_carry_over_is_coloured_exactly_once() {
+        let mv = mic_voicing_with_lobe();
+        let voicing = voicing_with_radiation();
+        // Two renders of the same source that differ only in how many blocks
+        // the *source* is spread over cannot differ, because the board sees one
+        // stream of blocks either way. What can differ is a filter that reads
+        // `side` past `BLOCK`: it would colour a carried sample a second time,
+        // and the carried samples are exactly the ones a hard-panned source
+        // produces.
+        let mut sb = Soundboard::with_mics(&voicing, Some(&mv));
+        let (l, r) = render_pair(&mut sb, -1.0, 80, sine(180.0));
+        // A second, independent board fed the same way must agree sample for
+        // sample; and the difference signal must have actually been used, which
+        // a hard pan and a lobe together guarantee.
+        let mut again = Soundboard::with_mics(&voicing, Some(&mv));
+        let (l2, r2) = render_pair(&mut again, -1.0, 80, sine(180.0));
+        assert_eq!(l, l2);
+        assert_eq!(r, r2);
+        let side_energy: f64 = l
+            .iter()
+            .zip(&r)
+            .map(|(&a, &b)| f64::from(0.5 * (a - b)).powi(2))
+            .sum();
+        let mid_energy: f64 = l
+            .iter()
+            .zip(&r)
+            .map(|(&a, &b)| f64::from(0.5 * (a + b)).powi(2))
+            .sum();
+        assert!(
+            side_energy > 0.01 * mid_energy,
+            "the probe never exercised the difference signal"
         );
     }
 }

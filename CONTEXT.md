@@ -29,7 +29,7 @@ instrument. MIT, free, open source; App Store via AUv3 planned
   bit-exactly at 48 kHz. The C harness renders sample-exactly what the CLI does.
 - `tuner/` — offline analysis + the preset factory + the boards, all
   subcommands of `piano-tuner`: `track/estimate`, `survey`, `fit --stage`,
-  `sympathetic`, `tail`, `noise`, `mics`, and the boards
+  `sympathetic`, `tail`, `noise`, `mics`, `radiation`, and the boards
   `bench/compass/melody/chain` (each writes its own document into `renders/`),
   audits `score/brilliance/residuals/ab`. Fit loops are batched (rayon);
   reference renders and the calibration corpus are content-cached under
@@ -78,12 +78,14 @@ core; currently ~30%).
    board (D405) before it asserts — that is the readable half of a red.
    **This red is the second half of a two-milestone repair and is gated on
    the first (D411): do not accept a mandate that asks for it on its own.**
+   The first half was built and measured in D412-416 and does **not** land;
+   read those before proposing either half again.
 
 ## Conventions (hard rules for agents)
 
 - Iterate with plain `cargo test` (dev profile is opt-level 3; release-only
   gates self-skip). Full `cargo test --release --workspace` at most twice per
-  agent, at phase ends. Suite baseline: 701 green / 2 documented reds.
+  agent, at phase ends. Suite baseline: 708 green / 2 documented reds.
 - Any command trending past ~5 minutes: parallelize or split the tool; never
   wrap it in a sleep/poll loop. Time-box closed-on-render fit loops; report
   budgets; report-and-stop beats converge-at-any-cost.
@@ -97,23 +99,31 @@ core; currently ~30%).
 
 ## Current open items (beyond the two reds)
 
-**The blocker under the third red** (D407-411): the direct path has per-partial
-gains and *no radiated response between the partials*, so the engine's 100-800
-Hz mono shape cannot be moved where a key has no partial. An energy-conserving
-nodal mechanism needs the source to stand up to **+8.97 dB** above the
-recording's own mono at 180 Hz before it is applied; it stands at +0.04, and
-`body_modes` x8 reaches +1.7 while `partial_gains` +9 dB reaches +2.9. Next
-milestone: a fitted sixth-octave colouration of the mono drive, fitted to the
-recording's mono **divided by the pair's own mono transfer** — measure both
-with `forensics/.../mono_mechanism keys`. It moves every mono board. Its
-acceptance is D408's *standing* column rising to its *required* column, not
-the per-channel gate; **the nodal rotation is not to be built until it lands**
-(D411), in either the Givens or the `C=(A+B)/2, S=(A−B)/2` form, because an
-energy-conserving mechanism on today's source lands the fold-down 4-6 dB under
-the recording across the nodal band. Settle one thing before that fit is
-written: `mono_balance` is a *median over keys*, so it weights a key carrying
-1% of a band like one carrying 42% (D411) — the fit's target is pooled and
-level-matched, and the two agree only if the band's energy is spread evenly.
+**The blocker under the third red** (D407-416). The direct path had per-partial
+gains and *no radiated response between the partials*. That stage now exists —
+`[soundboard.radiation]`, a fitted sixth-octave minimum-phase colouration of the
+drive, absent-means-old, railed, `f64`, +0.5 points of one core (D412) — and
+`piano-tuner radiation` fits it against D410's own target, reproducing D408's
+table to ±0.01 dB. **It is not in the shipped preset and the reason is
+measured** (D414): with the partials free the fit converges (deficit column flat
+to 0.202 dB over nineteen bands, 180 Hz +0.04 → +6.91) and **four gates go red**
+— a 16.7 dB curve moves individual keys' fundamentals, F#4 reads +9.75 dB bright
+on the melody board, and `bench`'s 125-250 Hz `r0` goes 0.057 → 0.340; with the
+partials held it cannot reach the target at all, because 60 % of the band the
+target is written on *is* partials. **What was learned and is worth starting
+from** (D413): D408's "+0.04 against +8.97 required" is two questions read as
+one — **8.93 dB of shape**, which a source colouration can produce and the
+instrument refuses, and **1.99 dB of uniform**, which is arithmetically
+unreachable by any source (a share has no uniform component) and is the
+rotation's own bill; the span's pair average reads **−0.19 dB** against the
+recording, so the source's level over 100-810 Hz is already right. **The nodal
+rotation is still not to be built** (D411's ordering rule, unchanged): the first
+half has not landed. A fourth attempt needs a statistic that separates the floor
+between partials from the partials themselves — that is the missing instrument,
+not another filter design. D411's median-vs-pooled item is settled and printed
+both ways (D415): `mono_balance` (median, still the gate) reads **+7.93** at
+252 Hz where `mono_pooled` (energy-weighted) reads **+2.78**, and eight of
+nineteen bands change sign between them.
 
 Treble sympathetic halo ~21 dB short (board late field); per-key brightness
 tilt not drawn for unsampled keys (needs more recorded keys by policy);

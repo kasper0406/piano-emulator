@@ -26,6 +26,7 @@ pub mod fit;
 pub mod melody;
 pub mod mics;
 pub mod noise;
+pub mod radiation;
 pub mod residuals;
 pub mod score;
 pub mod stereo;
