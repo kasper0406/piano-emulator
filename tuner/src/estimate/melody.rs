@@ -317,8 +317,12 @@ pub const LADDER_REACH: u8 = 9;
 /// (items 298, 336).
 pub const ALLOWANCE: f64 = 1.25;
 
+/// How many columns this board carries. Every per-metric table below is this
+/// long and [`NoteTexture::values`] returns this many numbers.
+pub const METRIC_COUNT: usize = 10;
+
 /// Names in the order [`NoteTexture::values`] returns them.
-pub const METRICS: [&str; 8] = [
+pub const METRICS: [&str; METRIC_COUNT] = [
     "roughness",
     "wobble",
     "hf",
@@ -326,6 +330,8 @@ pub const METRICS: [&str; 8] = [
     "channel",
     "balance",
     "splitting",
+    "comb",
+    "cue",
     "loudness",
 ];
 
@@ -345,9 +351,18 @@ pub const METRICS: [&str; 8] = [
 ///
 /// `splitting` is the fourth, and it is scored on the **line** rather than on
 /// the ladder — see [`METRIC_ON_LINE`], which is what `DECISIONS.md` 448(d)
-/// asked a successor for.
-pub const METRIC_IS_BALANCE: [bool; 8] =
-    [false, false, false, true, true, true, true, true];
+/// asked a successor for. `comb` and `cue` are the fifth and sixth and are
+/// scored there too, and neither takes its **verdict** on a median at all
+/// (`METRIC_IS_SLOPE`, `METRIC_IS_SWING`, `METRIC_IS_BOUND`,
+/// `METRIC_IS_AGREEMENT`): a median over five notes is exactly the statistic a
+/// *ramp* across those five notes cancels out of, which is what item 459 is
+/// about. They are marked here because they are still comparisons with a
+/// recording — the engine's overtone image is scored against the recording's
+/// own and never against nought — and because that is what makes the reference
+/// and layer rows be measured at all.
+pub const METRIC_IS_BALANCE: [bool; METRIC_COUNT] = [
+    false, false, false, true, true, true, true, true, true, true,
+];
 
 /// Which of [`METRICS`] takes its **balance** over the line's own five pitches
 /// instead of over the recorded ladder.
@@ -380,8 +395,25 @@ pub const METRIC_IS_BALANCE: [bool; 8] =
 /// regime: every fundamental inside the band, every overtone above it, which is
 /// the session's own finding and the reason a listener hears the whole tune
 /// come apart rather than one note of it.
-pub const METRIC_ON_LINE: [bool; 8] =
-    [false, false, false, false, false, false, true, false];
+///
+/// **`comb` and `cue` are here for the same arithmetic, and `cue`'s case has a
+/// stated size rather than an exactness** (`DECISIONS.md` 459). `comb` is an
+/// image ratio at the note's own partials, so the argument above is verbatim: a
+/// transposed take's `E_L/E_R` at its `k`-th partial *is* the donor take's at
+/// the donor's `k`-th partial. `cue` is an interchannel **time**, and time is
+/// the one thing a resampler does move: it maps `t → t/ρ` and `f → ρf`, so the
+/// interchannel *phase* at a partial transposes exactly and the delay that
+/// phase implies transposes as `1/ρ`. The library samples every minor third, so
+/// no reference note is more than 1.5 semitones from its donor and `ρ` is
+/// inside `[0.917, 1.091]` — the reference ITD at a transposed note is the
+/// donor's within **+9.1 / −8.4 %**, which on the largest value this
+/// recording's line carries is tens of microseconds and is well inside the
+/// take-to-take floor the bars are built on. That is a bound, not an
+/// approximation of unknown size, and it is why the column is scored on the
+/// tune at all.
+pub const METRIC_ON_LINE: [bool; METRIC_COUNT] = [
+    false, false, false, false, false, false, true, true, true, false,
+];
 
 /// Which of [`METRICS`] is additionally gated on the **line's own spread**: how
 /// far the engine's worst note stands from the engine line's own register
@@ -406,8 +438,17 @@ pub const METRIC_ON_LINE: [bool; 8] =
 /// them) and the spread half convicts a line pulled apart *unevenly*, which is
 /// what a band edge landing between two pitches of the tune does and what item
 /// 448's four green frontier points bought their median with.
-pub const METRIC_IS_SPREAD: [bool; 8] =
-    [true, true, true, false, false, true, true, false];
+///
+/// **`comb` is deliberately not here and that is the whole of item 459's first
+/// lesson.** A residual about the line's own Theil-Sen trend is blind to the
+/// trend, and the defect `comb` was written for *is* a trend: an overtone image
+/// that walks 24 dB from the bottom of the tune to the top has small residuals
+/// and a ruinous slope. It takes [`METRIC_IS_SLOPE`] and [`METRIC_IS_SWING`]
+/// instead, which are the two halves of "the line's slope and swing against the
+/// recording's own".
+pub const METRIC_IS_SPREAD: [bool; METRIC_COUNT] = [
+    true, true, true, false, false, true, true, false, false, false,
+];
 
 /// What `DECISIONS.md` 340's refit moved `[noise.strike]` by, kept here so that
 /// the instrument the `strike` column fails on can be built from the shipped
@@ -432,8 +473,14 @@ pub const BALANCE_METRIC: usize = 5;
 /// The index of `splitting` in [`METRICS`].
 pub const SPLITTING_METRIC: usize = 6;
 
+/// The index of `comb` in [`METRICS`].
+pub const COMB_METRIC: usize = 7;
+
+/// The index of `cue` in [`METRICS`].
+pub const CUE_METRIC: usize = 8;
+
 /// The index of `loudness` in [`METRICS`].
-pub const LOUDNESS_METRIC: usize = 7;
+pub const LOUDNESS_METRIC: usize = 9;
 
 /// Which of [`METRICS`] takes its verdict on the **seam** — how far the
 /// engine's distance from one recorded key departs from the register's median
@@ -458,8 +505,98 @@ pub const LOUDNESS_METRIC: usize = 7;
 /// velocity layer* standing in for the engine, which is two takes of one piano
 /// and therefore the smallest per-key level difference this library can resolve
 /// — times [`ALLOWANCE`]. It is not a bar anyone chose.
-pub const METRIC_IS_SEAM: [bool; 8] =
-    [false, false, false, false, false, false, false, true];
+pub const METRIC_IS_SEAM: [bool; METRIC_COUNT] = [
+    false, false, false, false, false, false, false, false, false, true,
+];
+
+/// Which of [`METRICS`] takes a verdict on the **slope of the line** —
+/// `DECISIONS.md` 459, and it is `comb`'s.
+///
+/// The statistic is `|slope(engine) − slope(recording)|` in dB per semitone,
+/// each slope being the Theil-Sen line through that side's own five pitches, on
+/// the same material and at the same partials. It is the one verdict on this
+/// board that is a function of *pitch* rather than of a note: a stage that
+/// walks a note's overtone image steadily across the loudspeakers as the melody
+/// rises leaves every median, every seam and every residual about its own trend
+/// exactly where it found them, and moves this by the whole of itself.
+///
+/// The bar is the recording's own slope plus how much that slope moves between
+/// **two takes of the same recording**, times [`ALLOWANCE`]. Both terms are
+/// necessary: a bar of the take floor alone would ask the engine to reproduce a
+/// tilt the piano itself does not hold to, and a bar of the recording's own
+/// slope alone would go to nothing wherever the recording happened to be flat.
+pub const METRIC_IS_SLOPE: [bool; METRIC_COUNT] = [
+    false, false, false, false, false, false, false, true, false, false,
+];
+
+/// Which of [`METRICS`] takes a verdict on the **swing of the line**: the
+/// engine's own largest-minus-smallest over the five pitches, against the
+/// recording's own.
+///
+/// The slope's companion and not a duplicate of it (`DECISIONS.md` 459). A
+/// slope of nothing bought by alternating +12 and −12 dB from note to note is
+/// an image no listener would call still, and the slope verdict passes it; a
+/// large slope with no swing is arithmetically impossible over five notes, so
+/// the pair brackets the defect from both sides. Neither is a residual about a
+/// trend, which is what [`METRIC_IS_SPREAD`] already is and what cannot see a
+/// ramp at all.
+pub const METRIC_IS_SWING: [bool; METRIC_COUNT] = [
+    false, false, false, false, false, false, false, true, false, false,
+];
+
+/// Which of [`METRICS`] takes a verdict on a **physical bound**: the largest
+/// magnitude the engine's line reaches, against what a head can produce and
+/// against the recording's own largest.
+///
+/// `DECISIONS.md` 459, and it is `cue`'s. An interchannel time difference is
+/// the one number on this board that has an answer from outside the recording:
+/// a head is about 0.18 m across, so no source anywhere in a room produces more
+/// than about [`HEAD_ITD_US`] microseconds of it, and a pair that hands the ear
+/// more than that is not placing a source at the edge of the image — it is
+/// handing the ear an interval it has no place for. The bar is the larger of
+/// that bound and the recording's own worst note, times [`ALLOWANCE`]: the
+/// recording is a pair of real capsules and if *it* exceeds the head bound the
+/// engine may too, which keeps the verdict a statement about this piano rather
+/// than about a listening theory.
+pub const METRIC_IS_BOUND: [bool; METRIC_COUNT] = [
+    false, false, false, false, false, false, false, false, true, false,
+];
+
+/// Which of [`METRICS`] takes a verdict on **agreement with the level cue**:
+/// how much less the engine's two localisation cues agree with each other over
+/// the line than the recording's do.
+///
+/// `DECISIONS.md` 459, and it is `cue`'s second half. A listener places a
+/// source from two cues at once — which loudspeaker it is louder in
+/// ([`BALANCE_METRIC`]) and which one it arrives at first (this one) — and what
+/// a spaced pair with a filter in it can do that no real pair does is make the
+/// two disagree: the level says left, the time says right, at the same note, and
+/// the image comes apart in a way neither cue alone reports. The statistic is
+/// `corr(ILD, ITD)` over the line's pitches and the verdict is the recording's
+/// minus the engine's — one-sided, because an engine whose two cues agree
+/// *better* than the recording's is not the defect.
+///
+/// The bar is the larger of two things, times [`ALLOWANCE`]: how far that
+/// correlation moves between two takes of the recording, and the sampling
+/// standard error of a correlation read off as few points as a tune has
+/// pitches, `(1 − r²)/√(n − 1)`. The second term is not decoration — five points
+/// pin a correlation loosely, and a gate on the take floor alone would be a
+/// gate on which five notes the tune happens to hold.
+pub const METRIC_IS_AGREEMENT: [bool; METRIC_COUNT] = [
+    false, false, false, false, false, false, false, false, true, false,
+];
+
+/// The largest interchannel time difference a head can produce, in microseconds
+/// — the outside answer [`METRIC_IS_BOUND`] holds `cue` against.
+///
+/// A head is about 0.18 m across and diffraction round it makes the path
+/// difference at the far ear rather more than the straight chord: the standard
+/// figure for a source at the side is `(r/c)(θ + sin θ)` with `r = 0.0875 m`,
+/// which at `θ = π/2` is 660 µs. Every account of lateralisation this
+/// repository could cite puts the usable range inside it, and nothing about the
+/// piano is in the number — it is the one bar on this board that is not
+/// measured off the library.
+pub const HEAD_ITD_US: f64 = 660.0;
 
 /// **The `[voicing.mics.modal]` band `DECISIONS.md` 418 shipped and 446
 /// convicted**, as `(lo_hz, hi_hz, lift)` — kept here so that the instrument
@@ -761,10 +898,43 @@ pub struct NoteTexture {
     /// Its verdict is on the **seam** and not on the median: see
     /// [`METRIC_IS_SEAM`].
     pub loudness_db: f64,
+    /// **Where the note's own overtones sit in the stereo image**: the
+    /// energy-weighted mean of `10 log10(E_L / E_R)` over partials 2-4
+    /// ([`overtone_image_db`]), in dB. Positive is a left lean.
+    ///
+    /// `DECISIONS.md` 459, and it is the term [`NoteTexture::split_db`]
+    /// **subtracts**. That is the whole reason it had to be written: `splitting`
+    /// is `balance_db − comb_db` exactly, so a pair that moved a note's
+    /// fundamental and its overtones the same way — which is what the pair
+    /// *geometry* does, because a comb is a function of frequency and both
+    /// readings move with it — cancels out of `splitting` completely, and
+    /// `balance` reads only the fundamental. The board scored the difference of
+    /// two positions and one of the two positions, and this is the other one.
+    ///
+    /// Partials 2-4 for [`SPLIT_PARTIALS`]' own reasons, which is also what
+    /// makes the two columns readings of one thing: over the Ode line they span
+    /// 523 to 1568 Hz, which is above every band `[voicing.mics.modal]` may be
+    /// declared in and inside the octave where a spaced pair's first
+    /// interference null falls.
+    pub comb_db: f64,
+    /// **When the note's own fundamental arrives at each loudspeaker**: the
+    /// interchannel time difference the pair implies at `f0`, in microseconds,
+    /// read off the interchannel phase of the same heterodyne
+    /// [`NoteTexture::balance_db`] reads a level with ([`fundamental_itd_us`]).
+    /// Positive means the **left** channel leads.
+    ///
+    /// `DECISIONS.md` 459. Every other column of every board in this repository
+    /// is a function of two magnitudes; this is the first that is a function of
+    /// an interchannel *phase*, and it is the other half of where a listener
+    /// puts a note. A pan-pot reads exactly 0.00 at every key — its two channels
+    /// are one signal scaled — and a real spaced pair does not, which is why it
+    /// is scored against the recording's own values and against physics
+    /// ([`HEAD_ITD_US`]) rather than against nought.
+    pub cue_us: f64,
 }
 
 impl NoteTexture {
-    pub fn values(&self) -> [f64; 8] {
+    pub fn values(&self) -> [f64; METRIC_COUNT] {
         [
             self.roughness_db,
             self.wobble_db,
@@ -773,6 +943,8 @@ impl NoteTexture {
             self.channel_db,
             self.balance_db,
             self.split_db,
+            self.comb_db,
+            self.cue_us,
             self.loudness_db,
         ]
     }
@@ -877,6 +1049,27 @@ pub fn measure_line(
                         &left[lo.min(left.len())..hi.min(left.len())],
                         &right[lo.min(right.len())..hi.min(right.len())],
                         &hz,
+                        sample_rate,
+                    ),
+                },
+                comb_db: match stereo {
+                    None => 0.0,
+                    Some((left, right)) => overtone_image_db(
+                        &left[lo.min(left.len())..hi.min(left.len())],
+                        &right[lo.min(right.len())..hi.min(right.len())],
+                        &hz,
+                        sample_rate,
+                    ),
+                },
+                cue_us: match (stereo, hz.first()) {
+                    // One channel is its own pair, and a pair that is one
+                    // signal twice arrives at both loudspeakers at once — the
+                    // same convention `channel` and `balance` take.
+                    (None, _) | (_, None) => 0.0,
+                    (Some((left, right)), Some(&f0)) => fundamental_itd_us(
+                        &left[lo.min(left.len())..hi.min(left.len())],
+                        &right[lo.min(right.len())..hi.min(right.len())],
+                        f0,
                         sample_rate,
                     ),
                 },
@@ -1051,6 +1244,39 @@ pub fn image_split_db(left: &[f32], right: &[f32], partial_hz: &[f64], sample_ra
     if !fundamental.is_finite() {
         return f64::NAN;
     }
+    fundamental - overtone_image_db(left, right, partial_hz, sample_rate)
+}
+
+/// **Where the note's own overtones sit in the stereo image, in dB** — the
+/// column [`NoteTexture::comb_db`] carries and the statistic of
+/// `DECISIONS.md` 459.
+///
+/// ```text
+/// comb = ( Σ_k w_k · image(f_k) ) / ( Σ_k w_k ),   k in SPLIT_PARTIALS
+/// ```
+///
+/// with `image` and `w_k` exactly [`image_split_db`]'s: the same complex
+/// heterodyne, the same partials, the same pair-energy weights that send a
+/// partial which is not sounding — a ratio of two noise floors — to nothing.
+/// **It is the term `image_split_db` subtracts**, and that identity is the
+/// reason this column exists rather than a convenience of the implementation:
+/// `splitting = balance − comb` exactly, so any mechanism that moves a note's
+/// fundamental and its own overtones the *same* way cancels out of `splitting`,
+/// and `balance` reads one frequency per note and never looks at the overtones
+/// at all. The pair **geometry** is precisely such a mechanism — a comb is a
+/// function of frequency and of the source's position, and it moves every
+/// partial of a key together while moving the next key's somewhere else — which
+/// is why it survived a board that scored the difference and one of the two
+/// positions.
+///
+/// Positive is a **left** lean. `NaN` when no overtone of the note is readable,
+/// which the callers drop rather than score.
+pub fn overtone_image_db(
+    left: &[f32],
+    right: &[f32],
+    partial_hz: &[f64],
+    sample_rate: f64,
+) -> f64 {
     let (mut weighted, mut weight) = (0.0f64, 0.0f64);
     for k in SPLIT_PARTIALS.0..=SPLIT_PARTIALS.1 {
         let Some(&hz) = partial_hz.get(k - 1) else {
@@ -1062,16 +1288,116 @@ pub fn image_split_db(left: &[f32], right: &[f32], partial_hz: &[f64], sample_ra
             continue;
         }
         let (image, energy) = partial_balance_db(left, right, hz, sample_rate);
-        if !image.is_finite() || !(energy > 0.0) {
+        if !image.is_finite() || !positive(energy) {
             continue;
         }
         weighted += energy * image;
         weight += energy;
     }
-    if !(weight > 0.0) {
+    if !positive(weight) {
         return f64::NAN;
     }
-    fundamental - weighted / weight
+    weighted / weight
+}
+
+/// **The interchannel time difference at the note's own fundamental, in
+/// microseconds** — the column [`NoteTexture::cue_us`] carries and the statistic
+/// of `DECISIONS.md` 459. Positive means the **left** channel leads.
+///
+/// The band is [`partial_balance_db`]'s exactly — the same complex heterodyne, a
+/// quarter of `f0` wide, centred on the frequency the preset says this key's
+/// first partial has, both channels through one filter — and what is taken from
+/// it is the one thing every other reading in this crate throws away: the
+/// **phase** of one channel against the other.
+///
+/// ```text
+/// z_L(t), z_R(t)  the two complex envelopes, one point per millisecond
+/// C   = Σ_t z_L(t) · conj(z_R(t))         the interchannel cross-spectrum
+/// ITD = arg(C) / (2π f0)                  seconds, positive = left leads
+/// ```
+///
+/// Summed over the window before the angle is taken rather than averaged after
+/// it, which is what makes it a measurement rather than a mean of angles: the
+/// sum weights each instant by how much energy the pair actually had there, so
+/// the tail of the window — where a note is inside its own floor and its phase
+/// is the floor's — contributes in proportion to nothing.
+///
+/// **What it can and cannot see.** The reading wraps at half a period,
+/// `±1/(2 f0)`, which over this line's pitches is ±1911 µs at C4 and ±1276 at
+/// G4 — three times [`HEAD_ITD_US`], so everything a gate on that bound needs to
+/// convict is inside the unambiguous range, and a value that has wrapped is a
+/// defect several times larger than the one being looked for. The sign
+/// convention is chosen so that a source to the left gives a positive
+/// [`NoteTexture::balance_db`] *and* a positive `cue_us`: an ear expects the
+/// louder side to be the earlier side, and [`METRIC_IS_AGREEMENT`] is the
+/// column that asks whether the engine agrees.
+///
+/// `NaN` when either channel is silent in the band, which the callers drop.
+pub fn fundamental_itd_us(left: &[f32], right: &[f32], f0: f64, sample_rate: f64) -> f64 {
+    if !positive(f0) || left.is_empty() || right.is_empty() {
+        return f64::NAN;
+    }
+    let l = crate::estimate::brilliance::narrowband_complex(left, f0, sample_rate);
+    let r = crate::estimate::brilliance::narrowband_complex(right, f0, sample_rate);
+    let (mut re, mut im) = (0.0f64, 0.0f64);
+    for (&(lr, li), &(rr, ri)) in l.iter().zip(r.iter()) {
+        // z_L * conj(z_R)
+        re += lr * rr + li * ri;
+        im += li * rr - lr * ri;
+    }
+    if !re.is_finite() || !im.is_finite() || (re == 0.0 && im == 0.0) {
+        return f64::NAN;
+    }
+    1e6 * im.atan2(re) / (std::f64::consts::TAU * f0)
+}
+
+/// Whether a statistic is inside its own bar, with the convention every verdict
+/// on this board takes: a bar is a **ceiling**, and a statistic that could not
+/// be measured at all (`NaN` — a column the line holds too few scored notes to
+/// read) is not a failure, it is an absence.
+///
+/// Written as a function rather than as `!(value > bar)` at four call sites so
+/// that the `NaN` case is stated once, where it can be read, instead of hiding
+/// in the direction of a negation.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the `NaN` branch is the point
+fn within(value: f64, bar: f64) -> bool {
+    !(value > bar)
+}
+
+/// Whether a number is a usable positive quantity: `false` for zero, for a
+/// negative and for `NaN`.
+fn positive(v: f64) -> bool {
+    v > 0.0
+}
+
+/// Pearson's `r` between two equal-length series, over the points where both are
+/// finite. `NaN` when either side does not vary.
+pub fn correlation(a: &[f64], b: &[f64]) -> f64 {
+    let pairs: Vec<(f64, f64)> = a
+        .iter()
+        .zip(b.iter())
+        .filter(|(x, y)| x.is_finite() && y.is_finite())
+        .map(|(&x, &y)| (x, y))
+        .collect();
+    let n = pairs.len() as f64;
+    if pairs.len() < 3 {
+        return f64::NAN;
+    }
+    let (mx, my) = (
+        pairs.iter().map(|p| p.0).sum::<f64>() / n,
+        pairs.iter().map(|p| p.1).sum::<f64>() / n,
+    );
+    let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+    for (x, y) in &pairs {
+        let (dx, dy) = (x - mx, y - my);
+        sxy += dx * dy;
+        sxx += dx * dx;
+        syy += dy * dy;
+    }
+    if !positive(sxx) || !positive(syy) {
+        return f64::NAN;
+    }
+    sxy / (sxx * syy).sqrt()
 }
 
 /// Where the strike actually is, near where the phrase says it is.
@@ -1169,13 +1495,13 @@ fn hf_share_db(stft: &Stft, window: &[f32], sample_rate: f64) -> f64 {
 /// Median rather than mean because the notes are played into the tail of the
 /// one before them and how much tail there is depends on where in the phrase a
 /// note falls; the median over six occurrences is the note, not the phrasing.
-pub fn per_key(textures: &[NoteTexture]) -> Vec<(u8, [f64; 8])> {
+pub fn per_key(textures: &[NoteTexture]) -> Vec<(u8, [f64; METRIC_COUNT])> {
     let mut keys: Vec<u8> = textures.iter().map(|t| t.key).collect();
     keys.sort_unstable();
     keys.dedup();
     keys.into_iter()
         .map(|key| {
-            let mut out = [0.0; 8];
+            let mut out = [0.0; METRIC_COUNT];
             for (m, slot) in out.iter_mut().enumerate() {
                 let mut values: Vec<f64> = textures
                     .iter()
@@ -1336,6 +1662,71 @@ pub struct Column {
     /// The one note of the *line* that carries a per-note score, and its error.
     /// `None` when the line holds no recorded key at all.
     pub line_error: Option<(u8, f64)>,
+    // --- the line's own shape: slope, swing, bound, agreement --------------
+    //
+    // `DECISIONS.md` 459. Four more statistics of the same line, computed for
+    // every column and gated only where a flag array names one, exactly as the
+    // three halves above are. They are here because the three above cannot see
+    // a **ramp**: a median cancels it, a residual about the line's own trend
+    // subtracts it, and a seam is a per-key departure from a median.
+    /// Whether this column is gated on [`Column::slope_error`] — see
+    /// [`METRIC_IS_SLOPE`].
+    pub gated_on_slope: bool,
+    /// Whether this column is gated on [`Column::swing`] — see
+    /// [`METRIC_IS_SWING`].
+    pub gated_on_swing: bool,
+    /// Whether this column is gated on [`Column::bound`] — see
+    /// [`METRIC_IS_BOUND`].
+    pub gated_on_bound: bool,
+    /// Whether this column is gated on [`Column::agreement`] — see
+    /// [`METRIC_IS_AGREEMENT`].
+    pub gated_on_agreement: bool,
+    /// The Theil-Sen slope of the **engine's** line in key, per semitone.
+    pub slope: f64,
+    /// The same slope on the recordings' line, and on their neighbouring
+    /// velocity layer.
+    pub reference_slope: f64,
+    pub layer_slope: f64,
+    /// `|slope − reference_slope|`: how differently the engine's line tilts
+    /// across the tune from the way the piano's does.
+    pub slope_error: f64,
+    /// What that has to come in under: the recording's own slope plus how far
+    /// that slope moves between two takes of it, times [`ALLOWANCE`].
+    pub slope_bar: f64,
+    pub slope_pass: bool,
+    /// The engine's largest-minus-smallest over the line's pitches.
+    pub swing: f64,
+    /// The same on the recordings' line and on their velocity layer.
+    pub reference_swing: f64,
+    pub layer_swing: f64,
+    /// What the engine's swing has to come in under: the recording's own plus
+    /// how far it moves between two takes, times [`ALLOWANCE`].
+    pub swing_bar: f64,
+    pub swing_pass: bool,
+    /// The largest `|value|` on the engine's line, and the note it is at.
+    pub bound: f64,
+    pub bound_key: u8,
+    /// The same on the recordings' line.
+    pub reference_bound: f64,
+    /// What the engine's largest has to come in under: the larger of
+    /// [`HEAD_ITD_US`] and the recording's own largest, times [`ALLOWANCE`].
+    pub bound_bar: f64,
+    pub bound_pass: bool,
+    /// `corr(balance, this metric)` over the scored notes of the line, for the
+    /// engine, the recordings and the recordings' velocity layer: how well the
+    /// two localisation cues agree with each other.
+    pub engine_corr: f64,
+    pub reference_corr: f64,
+    pub layer_corr: f64,
+    /// `reference_corr − engine_corr`: how much *less* the engine's two cues
+    /// agree than the recording's do. Signed and one-sided — agreeing better
+    /// than the recording is not a defect.
+    pub agreement: f64,
+    /// What that has to come in under: the larger of the take-to-take movement
+    /// of the same correlation and its own sampling standard error over as few
+    /// points as the line has pitches, times [`ALLOWANCE`].
+    pub agreement_bar: f64,
+    pub agreement_pass: bool,
 }
 
 impl Column {
@@ -1399,7 +1790,7 @@ pub fn compare(
         // once and in the window that contains it.
         .filter(|&(m, _)| !(METRIC_IS_BALANCE[m] && window == Window::Tail))
         .map(|(m, &metric)| {
-            let residuals = |rows: &[(u8, [f64; 8])]| -> Vec<f64> {
+            let residuals = |rows: &[(u8, [f64; METRIC_COUNT])]| -> Vec<f64> {
                 let points: Vec<(f64, f64)> =
                     rows.iter().map(|&(k, v)| (f64::from(k), v[m])).collect();
                 let (slope, intercept) = theil_sen(&points);
@@ -1594,8 +1985,126 @@ pub fn compare(
             // that median. See `METRIC_IS_SEAM`. The median is still computed
             // and printed; for `loudness` it is the engine's master gain
             // against the library's mastering and is nobody's error.
+            // ---- the line's own shape (`DECISIONS.md` 459) -----------------
+            //
+            // Four statistics of the same three lines, computed for every
+            // column and asserted only where a flag array names one. Each is
+            // taken over the notes this column **scores** — for a column in
+            // `METRIC_ON_LINE` that is every note of the tune, which is the
+            // whole of why these two columns can be read on a melody at all.
+            let scored_values = |rows: &[(u8, [f64; METRIC_COUNT])], index: usize| -> Vec<f64> {
+                notes
+                    .iter()
+                    .zip(rows.iter())
+                    .filter(|(n, _)| n.scored)
+                    .map(|(_, r)| r.1[index])
+                    .collect()
+            };
+            let slope_of = |rows: &[(u8, [f64; METRIC_COUNT])]| -> f64 {
+                let points: Vec<(f64, f64)> = notes
+                    .iter()
+                    .zip(rows.iter())
+                    .filter(|(n, _)| n.scored && n.engine.is_finite())
+                    .map(|(n, r)| (f64::from(n.key), r.1[m]))
+                    .filter(|p| p.1.is_finite())
+                    .collect();
+                if points.len() < 2 {
+                    return f64::NAN;
+                }
+                theil_sen(&points).0
+            };
+            let swing_of = |rows: &[(u8, [f64; METRIC_COUNT])]| -> f64 {
+                let mut v: Vec<f64> = scored_values(rows, m)
+                    .into_iter()
+                    .filter(|x| x.is_finite())
+                    .collect();
+                if v.len() < 2 {
+                    return f64::NAN;
+                }
+                v.sort_by(f64::total_cmp);
+                v[v.len() - 1] - v[0]
+            };
+            let corr_of = |rows: &[(u8, [f64; METRIC_COUNT])]| -> f64 {
+                correlation(
+                    &scored_values(rows, BALANCE_METRIC),
+                    &scored_values(rows, m),
+                )
+            };
+            let (slope, reference_slope, layer_slope) = (
+                slope_of(&line.engine),
+                slope_of(&line.reference),
+                slope_of(&line.layer),
+            );
+            let slope_error = (slope - reference_slope).abs();
+            // The recording's own tilt, plus how far that tilt moves between
+            // two takes of it. See `METRIC_IS_SLOPE` for why it is both terms
+            // and not either alone.
+            let slope_bar =
+                (reference_slope.abs() + (reference_slope - layer_slope).abs()) * ALLOWANCE;
+            let slope_pass = within(slope_error, slope_bar);
+            let (swing, reference_swing, layer_swing) = (
+                swing_of(&line.engine),
+                swing_of(&line.reference),
+                swing_of(&line.layer),
+            );
+            let swing_bar =
+                (reference_swing + (reference_swing - layer_swing).abs()) * ALLOWANCE;
+            let swing_pass = within(swing, swing_bar);
+            let (bound_key, bound) = worst_by(&notes, |n| {
+                (n.key, if n.scored { n.engine } else { f64::NAN })
+            });
+            let reference_bound = scored_values(&line.reference, m)
+                .into_iter()
+                .filter(|v| v.is_finite())
+                .fold(0.0f64, |a, v| a.max(v.abs()));
+            // The head bound is a statement about **microseconds** and enters
+            // only where the column is one; everywhere else this half is the
+            // recording's own worst note and is printed rather than asserted,
+            // because a bar of 825 dB on `roughness` would be a number nobody
+            // could read.
+            let bound_bar = if METRIC_IS_BOUND[m] {
+                HEAD_ITD_US.max(reference_bound)
+            } else {
+                reference_bound
+            } * ALLOWANCE;
+            let bound_pass = within(bound, bound_bar);
+            let (engine_corr, reference_corr, layer_corr) = (
+                corr_of(&line.engine),
+                corr_of(&line.reference),
+                corr_of(&line.layer),
+            );
+            let agreement = reference_corr - engine_corr;
+            // Two terms, the larger governing, exactly as `balance_bar` has
+            // two: how far this correlation moves between two takes of the
+            // recording, and how loosely as few points as a tune has pitches
+            // pin a correlation at all.
+            let scored_notes = notes.iter().filter(|n| n.scored).count().max(2) as f64;
+            let corr_sigma = if reference_corr.is_finite() {
+                (1.0 - reference_corr * reference_corr) / (scored_notes - 1.0).sqrt()
+            } else {
+                f64::NAN
+            };
+            let agreement_bar = (reference_corr - layer_corr)
+                .abs()
+                .max(corr_sigma)
+                * ALLOWANCE;
+            let agreement_pass = within(agreement, agreement_bar);
+
             let gated_on_seam = METRIC_IS_SEAM[m];
-            let gated_on_balance = METRIC_IS_BALANCE[m] && !gated_on_seam;
+            let gated_on_slope = METRIC_IS_SLOPE[m];
+            let gated_on_swing = METRIC_IS_SWING[m];
+            let gated_on_bound = METRIC_IS_BOUND[m];
+            let gated_on_agreement = METRIC_IS_AGREEMENT[m];
+            // The **median is the default verdict** of a comparison with the
+            // recording, and a column that names another statistic of that same
+            // comparison takes that one instead: `loudness` its seam (item
+            // 456), `comb` its slope and its swing and `cue` its bound and its
+            // agreement (item 459). Every number is still computed and printed;
+            // what a flag decides is which of them the gate asserts.
+            let names_another_statistic =
+                gated_on_seam || gated_on_slope || gated_on_swing || gated_on_bound
+                    || gated_on_agreement;
+            let gated_on_balance = METRIC_IS_BALANCE[m] && !names_another_statistic;
             let gated_on_spread = METRIC_IS_SPREAD[m];
             let balance_pass = balance.abs() <= balance_bar;
             let spread_pass = standout <= bar;
@@ -1632,7 +2141,11 @@ pub fn compare(
                 // of it (`METRIC_IS_SPREAD`).
                 pass: (!gated_on_balance || balance_pass)
                     && (!gated_on_spread || spread_pass)
-                    && (!gated_on_seam || seam_pass),
+                    && (!gated_on_seam || seam_pass)
+                    && (!gated_on_slope || slope_pass)
+                    && (!gated_on_swing || swing_pass)
+                    && (!gated_on_bound || bound_pass)
+                    && (!gated_on_agreement || agreement_pass),
                 notes,
                 population: population_rows,
                 standout,
@@ -1658,6 +2171,32 @@ pub fn compare(
                 seam_key,
                 seam_floor,
                 line_error,
+                gated_on_slope,
+                gated_on_swing,
+                gated_on_bound,
+                gated_on_agreement,
+                slope,
+                reference_slope,
+                layer_slope,
+                slope_error,
+                slope_bar,
+                slope_pass,
+                swing,
+                reference_swing,
+                layer_swing,
+                swing_bar,
+                swing_pass,
+                bound,
+                bound_key,
+                reference_bound,
+                bound_bar,
+                bound_pass,
+                engine_corr,
+                reference_corr,
+                layer_corr,
+                agreement,
+                agreement_bar,
+                agreement_pass,
             }
         })
         .collect()
@@ -1667,16 +2206,16 @@ pub fn compare(
 /// recordings, and the recordings' neighbouring velocity layer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lines {
-    pub engine: Vec<(u8, [f64; 8])>,
-    pub reference: Vec<(u8, [f64; 8])>,
-    pub layer: Vec<(u8, [f64; 8])>,
+    pub engine: Vec<(u8, [f64; METRIC_COUNT])>,
+    pub reference: Vec<(u8, [f64; METRIC_COUNT])>,
+    pub layer: Vec<(u8, [f64; METRIC_COUNT])>,
 }
 
 impl Lines {
     pub fn new(
-        engine: Vec<(u8, [f64; 8])>,
-        reference: Vec<(u8, [f64; 8])>,
-        layer: Vec<(u8, [f64; 8])>,
+        engine: Vec<(u8, [f64; METRIC_COUNT])>,
+        reference: Vec<(u8, [f64; METRIC_COUNT])>,
+        layer: Vec<(u8, [f64; METRIC_COUNT])>,
     ) -> Self {
         Lines {
             engine,
@@ -1804,6 +2343,37 @@ pub fn report(columns: &[Column]) -> String {
             c.seam,
             note_name(c.seam_key),
             c.seam_floor,
+        );
+        // **The line's own shape**, printed for every column and asserted where
+        // a flag names it (`DECISIONS.md` 459). Printed always, for the reason
+        // the balance half is: a number that is not on the page is a dimension
+        // nobody is scoring.
+        let _ = writeln!(
+            out,
+            "{:<15}   slope {:+7.3}/sm (rec {:+.3}, layer {:+.3}) err {:6.3} bar {:5.3}{}\
+|  swing {:7.2} (rec {:5.2}) bar {:6.2}{}\
+|  worst {:8.2} at {:<3} bar {:7.2}{}\
+|  corr {:+.3} (rec {:+.3}) short by {:+.3} bar {:.3}{}",
+            "",
+            c.slope,
+            c.reference_slope,
+            c.layer_slope,
+            c.slope_error,
+            c.slope_bar,
+            verdict(c.gated_on_slope, c.slope_pass),
+            c.swing,
+            c.reference_swing,
+            c.swing_bar,
+            verdict(c.gated_on_swing, c.swing_pass),
+            c.bound,
+            note_name(c.bound_key),
+            c.bound_bar,
+            verdict(c.gated_on_bound, c.bound_pass),
+            c.engine_corr,
+            c.reference_corr,
+            c.agreement,
+            c.agreement_bar,
+            verdict(c.gated_on_agreement, c.agreement_pass),
         );
         let _ = writeln!(
             out,
@@ -1989,10 +2559,24 @@ mod tests {
     /// and not the one column gated on its seam (`METRIC_IS_SEAM`), which is
     /// scored on the recorded keys like a balance and reads its answer off a
     /// different statistic of them.
+    /// The columns with no recording in them at all — `roughness`, `wobble`,
+    /// `hf` — which is what every test below is about.
+    ///
+    /// Written as `!METRIC_IS_BALANCE` rather than as "not gated on a balance
+    /// or a seam", which is what it said until item 459: a column that is a
+    /// comparison with the recording but takes its verdict on some *other*
+    /// statistic of that comparison — `comb`'s slope, `cue`'s agreement — is
+    /// still a comparison with the recording, and a synthetic line built to
+    /// exercise an evenness verdict says nothing about it.
     fn evenness(columns: Vec<Column>) -> Vec<Column> {
         columns
             .into_iter()
-            .filter(|c| !c.gated_on_balance && !c.gated_on_seam)
+            .filter(|c| {
+                METRICS
+                    .iter()
+                    .position(|m| *m == c.metric)
+                    .is_some_and(|i| !METRIC_IS_BALANCE[i])
+            })
             .collect()
     }
 
@@ -2009,15 +2593,15 @@ mod tests {
     /// semitone; `bump` is added to the engine's C4 alone.
     fn lines(bump: f64, slope: f64) -> Lines {
         let keys = [60u8, 62, 64, 65, 67];
-        let reference: Vec<(u8, [f64; 8])> = keys
+        let reference: Vec<(u8, [f64; METRIC_COUNT])> = keys
             .iter()
-            .map(|&k| (k, [slope * f64::from(k - 60); 8]))
+            .map(|&k| (k, [slope * f64::from(k - 60); METRIC_COUNT]))
             .collect();
         // The neighbouring velocity layer: the piano again, on its own line.
         let layer = reference.clone();
         // The engine is the same line 3 dB smoother — a voicing offset — plus a
         // bump on one note.
-        let mut engine: Vec<(u8, [f64; 8])> = reference
+        let mut engine: Vec<(u8, [f64; METRIC_COUNT])> = reference
             .iter()
             .map(|&(k, v)| (k, v.map(|x| x - 3.0)))
             .collect();
@@ -2034,14 +2618,14 @@ mod tests {
         // interpolation lands, and the median offset is still zero.
         const PATTERN: [f64; 9] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.0];
         let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
-        let engine: Vec<(u8, [f64; 8])> = keys
+        let engine: Vec<(u8, [f64; METRIC_COUNT])> = keys
             .iter()
-            .map(|&k| (k, [slope * (f64::from(k) - 60.0) - offset; 8]))
+            .map(|&k| (k, [slope * (f64::from(k) - 60.0) - offset; METRIC_COUNT]))
             .collect();
-        let reference: Vec<(u8, [f64; 8])> = keys
+        let reference: Vec<(u8, [f64; METRIC_COUNT])> = keys
             .iter()
             .zip(PATTERN)
-            .map(|(&k, p)| (k, [slope * (f64::from(k) - 60.0) + scatter * p; 8]))
+            .map(|(&k, p)| (k, [slope * (f64::from(k) - 60.0) + scatter * p; METRIC_COUNT]))
             .collect();
         let mut layer = reference.clone();
         layer[5].1 = layer[5].1.map(|x| x + take);
@@ -2122,10 +2706,10 @@ mod tests {
         // a median over nine reads that as zero.
         let takes = |offset: f64, take: f64| -> Lines {
             let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
-            let engine: Vec<(u8, [f64; 8])> =
-                keys.iter().map(|&k| (k, [-offset; 8])).collect();
-            let reference: Vec<(u8, [f64; 8])> = keys.iter().map(|&k| (k, [0.0; 8])).collect();
-            let layer: Vec<(u8, [f64; 8])> = keys.iter().map(|&k| (k, [take; 8])).collect();
+            let engine: Vec<(u8, [f64; METRIC_COUNT])> =
+                keys.iter().map(|&k| (k, [-offset; METRIC_COUNT])).collect();
+            let reference: Vec<(u8, [f64; METRIC_COUNT])> = keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect();
+            let layer: Vec<(u8, [f64; METRIC_COUNT])> = keys.iter().map(|&k| (k, [take; METRIC_COUNT])).collect();
             Lines::new(engine, reference, layer)
         };
         let line = lines(4.0, 0.0);
@@ -2203,18 +2787,18 @@ mod tests {
         // A piano whose two capsules agree with themselves to 0.2 dB and whose
         // register carries no trend: the honest floor under both halves.
         let rows = |values: &dyn Fn(u8) -> f64| -> Lines {
-            let engine: Vec<(u8, [f64; 8])> =
-                keys.iter().map(|&k| (k, [values(k); 8])).collect();
-            let reference: Vec<(u8, [f64; 8])> = keys.iter().map(|&k| (k, [0.0; 8])).collect();
-            let layer: Vec<(u8, [f64; 8])> = keys.iter().map(|&k| (k, [0.2; 8])).collect();
+            let engine: Vec<(u8, [f64; METRIC_COUNT])> =
+                keys.iter().map(|&k| (k, [values(k); METRIC_COUNT])).collect();
+            let reference: Vec<(u8, [f64; METRIC_COUNT])> = keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect();
+            let layer: Vec<(u8, [f64; METRIC_COUNT])> = keys.iter().map(|&k| (k, [0.2; METRIC_COUNT])).collect();
             Lines::new(engine, reference, layer)
         };
         let line_rows = |values: &dyn Fn(u8) -> f64| -> Lines {
             let line_keys = [60u8, 62, 64, 65, 67];
-            let engine: Vec<(u8, [f64; 8])> =
-                line_keys.iter().map(|&k| (k, [values(k); 8])).collect();
-            let reference: Vec<(u8, [f64; 8])> =
-                line_keys.iter().map(|&k| (k, [0.0; 8])).collect();
+            let engine: Vec<(u8, [f64; METRIC_COUNT])> =
+                line_keys.iter().map(|&k| (k, [values(k); METRIC_COUNT])).collect();
+            let reference: Vec<(u8, [f64; METRIC_COUNT])> =
+                line_keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect();
             Lines::new(engine, reference.clone(), reference)
         };
 
@@ -2381,6 +2965,146 @@ mod tests {
         );
     }
 
+    /// **The two halves of one reading**: `splitting` is `balance − comb`, on
+    /// the same signal, exactly (`DECISIONS.md` 459).
+    ///
+    /// This is not an implementation detail, it is the reason the column had to
+    /// be written: the board scored the *difference* between where a note's
+    /// pitch sits and where its colour sits, plus one of the two positions, and
+    /// left the other unscored — so a mechanism that moved both together was
+    /// invisible to all three columns at once.
+    #[test]
+    fn the_split_is_the_fundamentals_place_minus_the_overtones_own() {
+        let sr = 48_000.0;
+        let n = (0.37 * sr) as usize;
+        let f0 = 261.6;
+        let hz: Vec<f64> = (1..=8).map(|k| f0 * k as f64).collect();
+        let (mut left, mut right) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for i in 0..n {
+            let t = i as f64 / sr;
+            let (mut l, mut r) = (0.0, 0.0);
+            for (k, &f) in hz.iter().enumerate() {
+                let s = (std::f64::consts::TAU * f * t).sin();
+                // The fundamental hard left, the overtones drifting right with
+                // frequency: a note that is panned *and* combed.
+                let (gl, gr) = if k == 0 {
+                    (0.6, 0.2)
+                } else {
+                    (0.3 / (k as f64), 0.1 * k as f64)
+                };
+                l += gl * s;
+                r += gr * s;
+            }
+            left.push(l as f32);
+            right.push(r as f32);
+        }
+        let balance = fundamental_balance_db(&left, &right, f0, sr);
+        let comb = overtone_image_db(&left, &right, &hz, sr);
+        let split = image_split_db(&left, &right, &hz, sr);
+        assert!(
+            (split - (balance - comb)).abs() < 1e-9,
+            "splitting {split:.4} is not balance {balance:.4} minus comb {comb:.4}"
+        );
+        // And the two positions are genuinely different numbers here, or the
+        // identity above would be a statement about nothing.
+        assert!(
+            (balance - comb).abs() > 3.0,
+            "the fixture does not separate the pitch's place from the colour's"
+        );
+    }
+
+    /// **The interchannel time is the delay that was put there**, in the sign
+    /// this board reads it in: positive means the left channel leads
+    /// (`DECISIONS.md` 459).
+    #[test]
+    fn the_cue_reads_the_delay_between_the_two_channels_and_its_sign() {
+        let sr = 48_000.0;
+        let f0 = 261.6;
+        let n = (0.37 * sr) as usize;
+        let tone = |shift_s: f64| -> Vec<f32> {
+            (0..n)
+                .map(|i| {
+                    let t = i as f64 / sr - shift_s;
+                    (std::f64::consts::TAU * f0 * t).sin() as f32
+                })
+                .collect()
+        };
+        let flat = tone(0.0);
+        // (a) The right channel late by 300 µs: the left leads, so the reading
+        // is +300.
+        let late = tone(300e-6);
+        let itd = fundamental_itd_us(&flat, &late, f0, sr);
+        assert!((itd - 300.0).abs() < 5.0, "{itd:.1} µs for a 300 µs lead");
+        // (b) And the other way round, or the sign is not being read at all.
+        let other = fundamental_itd_us(&late, &flat, f0, sr);
+        assert!((other + 300.0).abs() < 5.0, "{other:.1} µs for a 300 µs lag");
+        // (c) A pan-pot puts one signal in both channels at two levels: no
+        // time difference at all, at any pan. This is the control that makes
+        // the column a statement about a *spaced* pair.
+        let quiet: Vec<f32> = flat.iter().map(|&v| 0.25 * v).collect();
+        let panned = fundamental_itd_us(&flat, &quiet, f0, sr);
+        assert!(panned.abs() < 1e-6, "a pan-pot reads {panned:.3} µs");
+        assert!(
+            fundamental_balance_db(&flat, &quiet, f0, sr) > 6.0,
+            "and it has to be a pan, or (c) proves nothing"
+        );
+    }
+
+    /// **A ramp across the tune is exactly what the board's other three
+    /// verdicts cannot see** (`DECISIONS.md` 459), and this is the arithmetic
+    /// of it rather than an argument about it.
+    ///
+    /// The engine's line is tilted about the middle of the tune and the
+    /// recording's is flat. The median error is **zero** — a centred ramp
+    /// cancels in it — the residual about the line's own Theil-Sen trend is
+    /// **zero**, because the ramp *is* the trend, and the seam is zero for the
+    /// same reason the median is. The slope reads the whole of it.
+    #[test]
+    fn a_centred_ramp_moves_the_slope_and_leaves_the_median_and_the_residual() {
+        let line_keys = [60u8, 62, 64, 65, 67];
+        // 2 dB per semitone about the tune's own median pitch.
+        let tilt = |k: u8| 2.0 * (f64::from(k) - 64.0);
+        let line = Lines::new(
+            line_keys.iter().map(|&k| (k, [tilt(k); METRIC_COUNT])).collect(),
+            line_keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect(),
+            line_keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect(),
+        );
+        let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
+        let pop = Lines::new(
+            keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect(),
+            keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect(),
+            keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect(),
+        );
+        let columns = compare(Window::Head, &line, &pop, &salamander_keys());
+        let comb = named(&columns, "comb");
+        assert!(
+            comb.balance.abs() < 1e-9,
+            "the median error reads {:+.3} on a centred ramp",
+            comb.balance
+        );
+        assert!(
+            comb.standout < 1e-9,
+            "the residual about the line's own trend reads {:.3} on a ramp",
+            comb.standout
+        );
+        assert!(
+            comb.seam.abs() < 1e-9,
+            "the seam reads {:+.3} on a ramp the ladder does not carry",
+            comb.seam
+        );
+        assert!(
+            (comb.slope - 2.0).abs() < 1e-9 && (comb.slope_error - 2.0).abs() < 1e-9,
+            "the slope reads {:+.3}/semitone where the line tilts by 2.0",
+            comb.slope
+        );
+        assert!(
+            (comb.swing - 14.0).abs() < 1e-9,
+            "the swing reads {:.3} where the line spans seven semitones at 2 dB each",
+            comb.swing
+        );
+        assert!(!comb.pass, "a 14 dB ramp across the tune passes `comb`");
+    }
+
     /// **`splitting` is scored on the tune's own five pitches, transposed
     /// reference notes included** ([`METRIC_ON_LINE`], `DECISIONS.md` 451), and
     /// every other balance column on this board is not.
@@ -2397,15 +3121,15 @@ mod tests {
         // line-scored one reads eight.
         let line_keys = [60u8, 62, 64, 65, 67];
         let line = Lines::new(
-            line_keys.iter().map(|&k| (k, [8.0; 8])).collect(),
-            line_keys.iter().map(|&k| (k, [0.0; 8])).collect(),
-            line_keys.iter().map(|&k| (k, [0.1; 8])).collect(),
+            line_keys.iter().map(|&k| (k, [8.0; METRIC_COUNT])).collect(),
+            line_keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect(),
+            line_keys.iter().map(|&k| (k, [0.1; METRIC_COUNT])).collect(),
         );
         let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
         let pop = Lines::new(
-            keys.iter().map(|&k| (k, [0.0; 8])).collect(),
-            keys.iter().map(|&k| (k, [0.0; 8])).collect(),
-            keys.iter().map(|&k| (k, [0.1; 8])).collect(),
+            keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect(),
+            keys.iter().map(|&k| (k, [0.0; METRIC_COUNT])).collect(),
+            keys.iter().map(|&k| (k, [0.1; METRIC_COUNT])).collect(),
         );
         let columns = compare(Window::Head, &line, &pop, &salamander_keys());
         for c in columns.iter().filter(|c| c.gated_on_balance) {

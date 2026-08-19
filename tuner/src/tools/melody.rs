@@ -21,6 +21,8 @@
 //! | `--clear-decay K` | one key's `partial_sigma_scale` row: `--clear-decay 60` is the C4 experiment |
 //! | `--clear-low K` | one key's cells under 2 kHz: `--clear-low 60` is item 334's own row, worth 5.33 dB of C4's tail |
 //! | `--before-noise` | `[noise.strike]` at the level and velocity law it carried before `DECISIONS.md` 340 refit it: the instrument the `strike` column fails on |
+//! | `--m17-band` | `[voicing.mics.modal]` put back at `DECISIONS.md` 418's own three numbers: the instrument the `balance`, `splitting` and `cue` columns fail on |
+//! | `--wide-pair` | the two capsules twice as far apart, nothing else moved: the instrument the `comb` column fails on (item 459) |
 //! | `--no-strike` | `[noise.strike]` silenced outright |
 //!
 //! It also writes the four rendered lines into the output directory, because the
@@ -165,6 +167,21 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 preset.noise.strike.velocity_db = melody::STRIKE_VELOCITY_DB_BEFORE;
                 what = "[noise.strike] as DECISIONS 340 found it".into();
+            }
+            // The two instruments `DECISIONS.md` 459's falsifications are built
+            // on, so a reader can hear them as well as read the table.
+            "--m17-band" => {
+                if let Some(mics) = preset.voicing.mics.as_mut() {
+                    let (lo_hz, hi_hz, lift) = melody::M17_MODAL_BAND;
+                    mics.modal = Some(piano_emulator::preset::ModalBand { lo_hz, hi_hz, lift });
+                }
+                what = "[voicing.mics.modal] as DECISIONS 418 shipped it".into();
+            }
+            "--wide-pair" => {
+                if let Some(mics) = preset.voicing.mics.as_mut() {
+                    mics.spacing_m *= 2.0;
+                }
+                what = "the capsules twice as far apart".into();
             }
             "--no-strike" => {
                 preset.noise.strike.level_db = vec![piano_emulator::preset::NoiseAnchor {
@@ -413,6 +430,8 @@ tune with one note wrong in it is what opened `DECISIONS.md` 284.\n\n\
 | `channel` | `10 log10((E_L + E_R) / 2 E_M)` over the note's window, dB | `[voicing.mics]`, against the note's own mono fold-down (`DECISIONS.md` 394) |\n\
 | `balance` | `10 log10(E_L / E_R)` at the note's own `f0`, heterodyned, dB — positive is a left lean | `[voicing.mics]`, against the recording's own lean at the same note (`DECISIONS.md` 446) |\n\
 | `splitting` | that same image position at `f0` **minus** its energy-weighted mean over the note's own partials 2-4, dB — positive means the pitch is left of the note's own colour | `[voicing.mics]`, against the recording's own split at the same note (`DECISIONS.md` 451) |\n\
+| `comb` | the energy-weighted mean image position over the note's own partials 2-4, dB — **where the note's colour sits**, which is the term `splitting` subtracts | the pair **geometry**, against the recording's own slope and swing across the tune (`DECISIONS.md` 459) |\n\
+| `cue` | the interchannel **time** difference at the note's own `f0`, µs, from the phase of the same heterodyne — positive means the left channel leads | `[voicing.mics]`, against the head's own 660 µs and against how well the recording's two localisation cues agree (`DECISIONS.md` 460) |\n\
 | `loudness` | A-weighted energy of the note's own window on the **mono fold-down**, dB | `notes.partial_gains`' per-key level, against the recording of the same key (`DECISIONS.md` 456-457) |\n\n\
 The first three are measured in **two windows** of the same note, found again \
 inside the phrase by the largest rise in a 1 ms envelope — the sampler plays \
@@ -566,6 +585,10 @@ note arriving from two places at once, with zero cents of tuning error anywhere 
 mono-domain pair — this column is the image half of the session's findings). The \
 weights are the pair energy each reading was taken from, so a partial that is \
 not sounding — a ratio of two noise floors — weighs nothing.\n\n\
+Two more columns are comparisons with the recording and appear in neither table \
+below, because neither takes its verdict on a median: `comb` and `cue` are in \
+*The line's own shape*, and `DECISIONS.md` 459-460 is why a median is the wrong \
+statistic for them.\n\n\
 `balance` and `splitting` are the **two columns of this board that carry both \
 verdicts**: the balance half convicts a whole line pulled the same way, which a \
 median can see and the line's own trend cannot, and the spread half convicts \
@@ -645,6 +668,90 @@ recorded register's trend, whichever is larger — times {:.2}.\n\n\
     }
     let _ = write!(
         out,
+        "\n## The line's own shape\n\n\
+`DECISIONS.md` 459, and it is the two columns that were missing from this board \
+when the owner's standing complaint was re-measured: **higher melody pitches \
+lean toward one loudspeaker and lower toward the other**, on renders every \
+column above was green or accounted for.\n\n\
+The reason no column read it is arithmetic and it has two halves. \
+**(i)** `splitting` is `balance − comb` **exactly** — it is written that way, in \
+one function — so a mechanism that moves a note's fundamental and that note's \
+own overtones *together*, and moves the next note's somewhere else, cancels out \
+of `splitting` completely; and `balance` reads one frequency per note and never \
+looks at an overtone. The board scored a difference of two image positions and \
+one of the two positions. `comb` is the other one. A spaced pair is exactly \
+such a mechanism by construction: two capsules `d` apart hear one source at an \
+interchannel delay set by where along the keyboard it is, `L = mid + side` and \
+`R = mid − side` then comb against frequency, and every partial of one key \
+moves together while the next key's sit somewhere else on the comb.\n\n\
+**(ii)** Every column above is a function of two *magnitudes*. Half of where a \
+listener puts a note is the interchannel **time**, and nothing here had ever \
+read a phase. `cue` does, off the same heterodyne `balance` reads a level with.\n\n\
+Neither column takes a median or a residual, and that is the point: the defect \
+is a **ramp across the tune**, a median cancels a ramp and a residual about the \
+line's own trend subtracts it. `comb` is gated on the line's **slope** — \
+Theil-Sen in key, engine against recording — and on its **swing**, largest \
+minus smallest over the five pitches. `cue` is gated on a **bound** — no source \
+in a room produces more than about {:.0} µs of interchannel time, a head being \
+0.18 m across — and on **agreement**, `corr(ILD, ITD)` over the line, the \
+recording's minus the engine's, one-sided because agreeing better than the \
+recording is not a defect.\n\n\
+Every bar is measured off the recording the same way the rest of this board's \
+are: the recording's own slope plus how far that slope moves between two takes \
+of it; the recording's own swing plus the same; the larger of the head bound and \
+the recording's own worst note; and for the correlation the larger of its \
+take-to-take movement and its own sampling standard error over as few points as \
+a tune has pitches. All four are times {:.2}.\n\n\
+| metric | window | slope /semitone | recording | error | bar | verdict | swing | recording | bar | verdict |\n\
+|---|---|--:|--:|--:|--:|---|--:|--:|--:|---|\n",
+        melody::HEAD_ITD_US,
+        melody::ALLOWANCE,
+    );
+    for c in columns.iter().filter(|c| c.gated_on_slope || c.gated_on_swing) {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | **{:+.3}** | {:+.3} | {:.3} | {:.3} | {} | **{:.2}** | {:.2} | {:.2} | {} |",
+            c.metric,
+            c.window.name(),
+            c.slope,
+            c.reference_slope,
+            c.slope_error,
+            c.slope_bar,
+            if c.slope_pass { "pass" } else { "**FAIL**" },
+            c.swing,
+            c.reference_swing,
+            c.swing_bar,
+            if c.swing_pass { "pass" } else { "**FAIL**" },
+        );
+    }
+    let _ = write!(
+        out,
+        "\n| metric | window | worst \\|value\\| | at | bar | head | recording | verdict | \
+corr(ILD,ITD) | recording | layer | short by | bar | verdict |\n\
+|---|---|--:|---|--:|--:|--:|---|--:|--:|--:|--:|--:|---|\n"
+    );
+    for c in columns.iter().filter(|c| c.gated_on_bound || c.gated_on_agreement) {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | **{:.0}** | {} | {:.0} | {:.0} | {:.0} | {} | **{:+.3}** | {:+.3} | {:+.3} | {:+.3} | {:.3} | {} |",
+            c.metric,
+            c.window.name(),
+            c.bound,
+            melody::note_name(c.bound_key),
+            c.bound_bar,
+            melody::HEAD_ITD_US,
+            c.reference_bound,
+            if c.bound_pass { "pass" } else { "**FAIL**" },
+            c.engine_corr,
+            c.reference_corr,
+            c.layer_corr,
+            c.agreement,
+            c.agreement_bar,
+            if c.agreement_pass { "pass" } else { "**FAIL**" },
+        );
+    }
+    let _ = write!(
+        out,
         "\n`clone bar` is what the bar **would** have been under the retired rule — \
 the same statistic on the line's own reference notes and on their neighbouring \
 velocity layer — kept so the size of the change is visible rather than asserted:\n\n\
@@ -695,7 +802,8 @@ velocity layer — kept so the size of the change is visible rather than asserte
                 v[v.len() / 2]
             }
         };
-        let rows: [(&str, fn(&melody::LineNoteScore) -> f64); 3] = [
+        type Pick = fn(&melody::LineNoteScore) -> f64;
+        let rows: [(&str, Pick); 3] = [
             ("engine", |n| n.engine),
             ("recordings", |n| n.reference),
             ("error", |n| n.error),
@@ -712,18 +820,70 @@ velocity layer — kept so the size of the change is visible rather than asserte
             }
             let _ = writeln!(table, " **{:+.2}** |", median(&pick));
         }
-        let _ = writeln!(
-            table,
-            "\nbalance **{:+.2}** against a bar of {:.2} — {}; the line's own spread \
-{:.2} at {} against {:.2} — {}.",
-            c.balance,
-            c.balance_bar,
-            if c.balance_pass { "pass" } else { "**FAIL**" },
-            c.standout,
-            melody::note_name(c.standout_key),
-            c.bar,
-            if c.spread_pass { "pass" } else { "**FAIL**" },
-        );
+        // The verdict line names the halves this column is actually gated on
+        // and nothing else — item 459 added four more of them and a footer that
+        // always printed the median would be reporting a statistic the gate
+        // does not assert.
+        let mut verdicts: Vec<String> = Vec::new();
+        let mark = |ok: bool| if ok { "pass" } else { "**FAIL**" };
+        if c.gated_on_balance {
+            verdicts.push(format!(
+                "balance **{:+.2}** against a bar of {:.2} — {}",
+                c.balance,
+                c.balance_bar,
+                mark(c.balance_pass)
+            ));
+        }
+        if c.gated_on_spread {
+            verdicts.push(format!(
+                "the line's own spread {:.2} at {} against {:.2} — {}",
+                c.standout,
+                melody::note_name(c.standout_key),
+                c.bar,
+                mark(c.spread_pass)
+            ));
+        }
+        if c.gated_on_slope {
+            verdicts.push(format!(
+                "slope **{:+.3}**/semitone against the recording's {:+.3}, an error of \
+{:.3} against a bar of {:.3} — {}",
+                c.slope,
+                c.reference_slope,
+                c.slope_error,
+                c.slope_bar,
+                mark(c.slope_pass)
+            ));
+        }
+        if c.gated_on_swing {
+            verdicts.push(format!(
+                "swing **{:.2}** against the recording's {:.2}, bar {:.2} — {}",
+                c.swing,
+                c.reference_swing,
+                c.swing_bar,
+                mark(c.swing_pass)
+            ));
+        }
+        if c.gated_on_bound {
+            verdicts.push(format!(
+                "worst **{:.0}** at {} against a bar of {:.0} — {}",
+                c.bound,
+                melody::note_name(c.bound_key),
+                c.bound_bar,
+                mark(c.bound_pass)
+            ));
+        }
+        if c.gated_on_agreement {
+            verdicts.push(format!(
+                "the two cues agree at **{:+.3}** where the recording's agree at {:+.3}, \
+short by {:+.3} against a bar of {:.3} — {}",
+                c.engine_corr,
+                c.reference_corr,
+                c.agreement,
+                c.agreement_bar,
+                mark(c.agreement_pass)
+            ));
+        }
+        let _ = writeln!(table, "\n{}.", verdicts.join("; "));
         table
     };
     let _ = write!(
@@ -746,6 +906,28 @@ line's, and the column's verdict is taken over the recorded ladder."
 energy-weighted mean over that note's own partials 2-4. Every note of the line is \
 scored, because a resampler carries an image ratio through unchanged \
 (`melody::METRIC_ON_LINE`), and the median row **is** the column's verdict."
+        ),
+    );
+    let _ = writeln!(
+        out,
+        "{}{}",
+        image_table(
+            "comb",
+            "**`comb`** — the energy-weighted mean of that same reading over partials \
+2-4 alone: **where the note's colour sits**, and the term the row above \
+subtracts. `splitting` is `balance − comb` exactly, so this row and the one above \
+it are the two halves of that arithmetic and the row between them is their \
+difference. Its verdict is the line's slope and its swing, never a median: the \
+defect is a ramp and a median cancels a ramp (`DECISIONS.md` 459)."
+        ),
+        image_table(
+            "cue",
+            "**`cue`** — the interchannel **time** at each pitch's own fundamental, \
+microseconds, positive when the left channel leads. Read off the *phase* of the \
+same heterodyne every row above reads a level with, which is the one thing no \
+other column of any board here has ever looked at. Its verdicts are physics (no \
+source in a room produces more than about 660 µs) and agreement with the level \
+cue, which is the row `balance` above."
         ),
     );
     let _ = write!(
@@ -808,14 +990,14 @@ only where the reference note is a recording of that key.\n\n"
         let _ = write!(
             out,
             "## Every note of the `{title}` window, in time order\n\n\
-| at | key | source | roughness e/r | wobble e/r | hf e/r | strike e/r | balance e/r | splitting e/r |\n\
-|--:|---|---|--:|--:|--:|--:|--:|--:|\n"
+| at | key | source | roughness e/r | wobble e/r | hf e/r | strike e/r | balance e/r | splitting e/r | comb e/r | cue e/r |\n\
+|--:|---|---|--:|--:|--:|--:|--:|--:|--:|--:|\n"
         );
         for (e, r) in engine.iter().zip(reference) {
             let _ = writeln!(
                 out,
                 "| {:.2} | {} | {} | {:.2}/{:.2} | {:.2}/{:.2} | {:.1}/{:.1} | {:.1}/{:.1} | \
-{:+.1}/{:+.1} | {:+.1}/{:+.1} |",
+{:+.1}/{:+.1} | {:+.1}/{:+.1} | {:+.1}/{:+.1} | {:+.0}/{:+.0} |",
                 e.onset_s,
                 melody::note_name(e.key),
                 if recorded.is_recorded(e.key) {
@@ -834,7 +1016,11 @@ only where the reference note is a recording of that key.\n\n"
                 e.balance_db,
                 r.balance_db,
                 e.split_db,
-                r.split_db
+                r.split_db,
+                e.comb_db,
+                r.comb_db,
+                e.cue_us,
+                r.cue_us
             );
         }
         let _ = writeln!(out);

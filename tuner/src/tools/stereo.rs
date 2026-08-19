@@ -14,7 +14,7 @@
 //! | `*_panpot.wav` | `[voicing.mics]` deleted: one mono voice scaled into two channels, and the board's two orthogonal taps. What the instrument was before item 351. |
 //! | `*_pair.wav` | the virtual capsule pair alone (`[voicing.mics.modal]` deleted): item 359's fitted geometry, four of six bands. |
 //! | `*_engine.wav` | the shipped preset. |
-//! | `*_m17.wav` | **written only when the shipped preset has no `[voicing.mics.modal]`**: today's pair with the band item 418 fitted and item 449 shipped put back, and nothing else moved. The instrument item 451's corner stage exists to retire. |
+//! | `*_m17.wav` | **written whenever the shipped band is not that band** — absent, or moved (`DECISIONS.md` 461): today's pair with the band item 418 fitted and item 449 shipped put back, and nothing else moved. The instrument item 451's corner stage exists to retire. |
 //! | `*_reference.wav` | the Salamander recording of the same music. |
 //!
 //! # What is being listened for, and why the levels are shared
@@ -98,7 +98,22 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // The band is `melody::M17_MODAL_BAND` — the same constant the melody
     // board's two falsifications install — so this take is built from whatever
     // preset ships rather than from a file somebody has to keep in step.
-    let m17 = (shipped.voicing.mics.and_then(|m| m.modal).is_none()).then(|| {
+    // **Written whenever the shipped band is not that band**, which since item
+    // 461 includes "the band is still there and has moved": the corner stage
+    // kept a band and the fit walked it out of the melodic register, so the A/B
+    // a listener needs is `174.3-456.5 Hz` against wherever it is now, exactly
+    // as it would be against no band at all. The test is on the three numbers
+    // and not on `is_none`, so it stays right under either outcome.
+    let is_m17 = |b: piano_emulator::preset::ModalBand| {
+        let (lo_hz, hi_hz, lift) = melody::M17_MODAL_BAND;
+        (b.lo_hz, b.hi_hz, b.lift) == (lo_hz, hi_hz, lift)
+    };
+    let m17 = (!shipped
+        .voicing
+        .mics
+        .and_then(|m| m.modal)
+        .is_some_and(is_m17))
+    .then(|| {
         let mut p = shipped.clone();
         let (lo_hz, hi_hz, lift) = melody::M17_MODAL_BAND;
         p.voicing.mics = Some(piano_emulator::preset::MicVoicing {
@@ -124,10 +139,12 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             },
             Take {
                 name: "engine",
-                title: if m17.is_some() {
-                    "the shipped preset: the pair, and no mode-controlled band"
-                } else {
-                    "the shipped preset: the pair and the mode-controlled band"
+                title: match (m17.is_some(), shipped.voicing.mics.and_then(|m| m.modal)) {
+                    (true, None) => "the shipped preset: the pair, and no mode-controlled band",
+                    (true, Some(_)) => {
+                        "the shipped preset: the pair and the band the fit moved it to"
+                    }
+                    _ => "the shipped preset: the pair and the mode-controlled band",
                 },
                 audio: render_engine(&shipped, phrase),
             },
@@ -183,10 +200,41 @@ today's pair — the instrument this milestone replaced",
     // take and the `_engine` take are the same instrument, and the comparison
     // a listener wants is against the band that used to be there — which is
     // what `_m17` is.
+    let lowest_fundamental_hz = melody::line_keys()
+        .iter()
+        .map(|&k| f64::from(shipped.string_params(k).partial_freq(1)))
+        .fold(f64::INFINITY, f64::min);
+    let where_it_is = match shipped.voicing.mics.and_then(|m| m.modal) {
+        None => "absent, so `_engine` and `_pair` are the same instrument sample for \
+sample"
+            .to_string(),
+        // The line's own lowest fundamental, read off the line rather than
+        // written down, so this sentence cannot go stale when the tune does.
+        Some(b) => format!(
+            "{:.1}-{:.1} Hz at a lift of {:.2} — the fit moved it rather than \
+removing it, and {}",
+            b.lo_hz,
+            b.hi_hz,
+            b.lift,
+            if f64::from(b.hi_hz) < lowest_fundamental_hz {
+                format!(
+                    "where it moved it to is below the whole melodic register: this \
+line's lowest fundamental is {lowest_fundamental_hz:.1} Hz, so the band no longer acts \
+on any note of the tune"
+                )
+            } else {
+                format!(
+                    "it still overlaps the melodic register, whose lowest fundamental is \
+{lowest_fundamental_hz:.1} Hz"
+                )
+            }
+        ),
+    };
     let milestone = if m17.is_some() {
-        "\n## What removing the band changed, and what these files are\n\n\
-         **The shipped preset carries no `[voicing.mics.modal]`.** So `_engine` and\n\
-         `_pair` are the same instrument, sample for sample, and the fourth engine take\n\
+        format!(
+        "\n## What the band's own A/B is, and what these files are\n\n\
+         **The shipped preset's `[voicing.mics.modal]` is {where_it_is}.** The fourth\n\
+         engine take\n\
          `_m17` is the band that shipped from item 418 to item 449 — `174.3-456.5 Hz`\n\
          at a lift of `0.99` — put back on today's pair and on nothing else. That is\n\
          the A/B this board now exists for, and it is the one the listener made: play\n\
@@ -206,8 +254,9 @@ today's pair — the instrument this milestone replaced",
          and decay defects — and the preset's own `f0` table is right to 0.3 cents.\n\n\
          The mono fold-down of all four engine takes is identical, so none of this is a\n\
          level and none of it is audible in mono.\n\n"
+        )
     } else {
-        ""
+        String::new()
     };
     let report = format!(
         "# The stereo image, heard\n\n\
@@ -238,6 +287,19 @@ today's pair — the instrument this milestone replaced",
          one speaker 9 dB up and the other 21 dB *down* at a single note's\n\
          fundamental — which is what the mode-controlled band did, and what a listener\n\
          reported three separate ways while every gate stayed green (item 392).\n\n\
+         **And none of the four tables here is a function of pitch, which is what\n\
+         items 459-460 are about.** Every row below is a *band* aggregate over a\n\
+         whole piece of music: it can say that 500-2k is decorrelated and cannot say\n\
+         that the note at the top of the tune has its overtones in one loudspeaker\n\
+         and the note at the bottom has them in the other. That is a per-note\n\
+         reading and it lives on the melody board, in two columns written for it —\n\
+         `comb` (where a note's own partials 2-4 sit in the image, gated on the\n\
+         line's slope and swing against the recording's own) and `cue` (the\n\
+         interchannel **time** at the note's fundamental, gated against the head's\n\
+         own 660 µs and against how well the two localisation cues agree). Read\n\
+         `renders/melody/MELODY.md` beside this page: the owner's standing complaint\n\
+         — *higher pitches lean one way and lower the other* — is a statement no\n\
+         table on this page can be true or false about.\n\n\
          ## What item 418's rail changed, complaint by complaint\n\n\
          `[voicing.mics.modal].lift` is railed at **one** since item 418 and the pair is\n\
          refitted under it, so these takes are not the ones items 392-394 were written\n\

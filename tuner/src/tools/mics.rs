@@ -23,6 +23,7 @@
 //! | `coherence` | `width`, `diffuse_coherence` | engine renders against the same recordings | a two-parameter search on `realism::stereo_columns` |
 //! | `modal` | `[voicing.mics.modal]`'s two edges and its lift | the same | a coarse grid then the same search |
 //! | `band` | the two edges, the lift, `width` and `diffuse_coherence` | the same | `modal`'s grid and search over all five at once |
+//! | `place` | `spacing_m`, `span_m`, `width`, `diffuse_coherence` | the same | the geometry again, after the band is settled, under the constrained objective (`DECISIONS.md` 459) |
 //!
 //! `band` is what to run: since `DECISIONS.md` 379 the mode-controlled term is
 //! an anti-phase copy of the pair's own sum rather than a gain on a signal
@@ -440,8 +441,8 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             .cloned()
             .unwrap_or_else(|| "presets/salamander-c5.toml".into()),
     );
-    const STAGES: [&str; 7] = [
-        "geometry", "profile", "coherence", "image", "modal", "band", "grid",
+    const STAGES: [&str; 8] = [
+        "geometry", "profile", "coherence", "image", "modal", "band", "place", "grid",
     ];
     if let Some(unknown) = stages.iter().find(|s| !STAGES.contains(&s.as_str())) {
         return Err(format!(
@@ -918,6 +919,52 @@ rather than at its own optimum {:.1}-{:.1} Hz x{:.3})",
         voicing = choose_band_or_none(&base, &rows, &phrases, &melody_board, banded, &feasible);
     }
 
+    // ---- stage 4: where the pair stands, once the band is settled ----------
+    //
+    // **`DECISIONS.md` 459's stage, and it exists because the defect that
+    // milestone scored is a property of the geometry rather than of the band.**
+    // The `image` stage above moves the same four knobs, but it runs *before*
+    // the band is chosen and under item 363's relaxed objective; the comb a
+    // spaced pair puts across a melody's overtones is decided by the spacing and
+    // the span, and whether it is tolerable is decided by columns that only
+    // enter the objective with a penalty on them. So the geometry gets one more
+    // pass, from wherever the corner stage left the instrument, under the same
+    // constrained objective the band was chosen with — and against the same
+    // delay term, which is what keeps a spacing that improves the comb from
+    // silently walking away from the delays the recording measured. Whichever
+    // of the two the objective prefers is what ships, and both are printed.
+    if wants("place") {
+        println!(
+            "\nplace: the geometry again, with the band settled and the gate's own penalty on"
+        );
+        let feasible = Feasible::default();
+        let placed = search(
+            &base,
+            &rows,
+            &phrases,
+            &melody_board,
+            voicing,
+            IMAGE_KNOBS,
+            true,
+            &feasible,
+        );
+        let objective = modal_objective(&base, &rows, &phrases, &melody_board);
+        let scored = batch(&[voicing, placed], &objective);
+        println!(
+            "  as the band stage left it: spacing {:.4} span {:.4} width {:.4} \
+coherence {:.4} -> {:.3} bars out",
+            voicing.spacing_m, voicing.span_m, voicing.width, voicing.diffuse_coherence, scored[0]
+        );
+        println!(
+            "  after moving the pair:     spacing {:.4} span {:.4} width {:.4} \
+coherence {:.4} -> {:.3} bars out",
+            placed.spacing_m, placed.span_m, placed.width, placed.diffuse_coherence, scored[1]
+        );
+        if scored[1] < scored[0] {
+            voicing = placed;
+        }
+    }
+
     if let (Some(trim), true) = (trimmed, wants("image")) {
         let held = gate_excess(&columns_for_voicing(&base, &rows, trim, FIT_VELOCITY));
         let free = gate_excess(&columns_for_voicing(&base, &rows, voicing, FIT_VELOCITY));
@@ -1141,7 +1188,36 @@ impl Knob {
             // less, which is the first thing item 418's clamp bought back and
             // the reason its refit has room item 395's did not.
             Knob::ModalLo => (170.0, 400.0),
-            Knob::ModalHi => (200.0, 1_500.0),
+            // **The upper edge has a floor for the same reason the lower edge
+            // has one, and item 461 is what found it.** Item 419 swept
+            // `lo_hz` against `the_estimator_reads_back_a_spacing_the_engine_was_given`
+            // and put the rail at 170 Hz with the *upper* edge left wherever
+            // the shipped band had it; a fit given the two edges freely then
+            // chose **170.0-234.0 Hz**, and that band reads a 0.12 m pair back
+            // as **0.090 m, −25 %**, against the gate's own 20 %. Swept here,
+            // at the fitted trims and `lo_hz` on its rail:
+            //
+            // | band | 0.12 m | 0.24 m | 0.48 m |
+            // |---|--:|--:|--:|
+            // | 170-234 | **−25 %** | −9 % | −15 % |
+            // | 170-280 | −13 % | −4 % | −14 % |
+            // | 170-330 | −5 % | −1 % | −14 % |
+            // | 170-400 | +2 % | +1 % | −15 % |
+            // | 170-456 | +7 % | +2 % | −15 % |
+            // | 234-456 | −12 % | −12 % | **−24 %** |
+            // | 400-800 | **−16 %** | −12 % | **−24 %** |
+            //
+            // A twelfth-order cascade's group delay grows as its passband
+            // narrows, and that delay is not common to the two channels — it
+            // is added to the side and subtracted from it — so a narrow band
+            // walks straight into the phase-transform delay reading. **280 Hz
+            // is where the sweep comes back inside the gate** and it is the
+            // floor. The consequence is item 461's wall and it is worth
+            // knowing before a successor re-opens this: the melodic register's
+            // lowest fundamental is **261.5 Hz**, so no band that keeps this
+            // estimator honest can clear the tune from below, and one that
+            // clears it from above (400-800, 400-1200) fails the gate too.
+            Knob::ModalHi => (280.0, 1_500.0),
             // **Under the rail, and a hair inside it** (`DECISIONS.md` 418).
             // `soundboard::MIC_MODAL_LIFT` is clamped at 1.0 — the lift is the
             // side-over-mid amplitude the band carries, so one is where
@@ -1861,15 +1937,25 @@ fn boards_for(
 
 /// The columns of `piano-tuner melody` that this fit's knobs can move.
 ///
-/// `strike`, `roughness`, `wobble` and `hf` are all functions of the mono
-/// fold-down and of tables no microphone parameter touches, so charging them
-/// here would add a constant and its render noise. `channel`, `balance` and
+/// `strike`, `roughness`, `wobble`, `hf` and `loudness` are all functions of the
+/// mono fold-down and of tables no microphone parameter touches, so charging
+/// them here would add a constant and its render noise. `channel`, `balance` and
 /// `splitting` are the three the pair writes, and they are three rather than
 /// two since `DECISIONS.md` 451: a pair can put a note's fundamental in the
 /// right loudspeaker and its own overtones in the other one, and the first two
 /// columns are both blind to that — `channel` because it is a sum over the
 /// pair, `balance` because it reads one frequency per note.
-const MELODY_METRICS: [&str; 3] = ["channel", "balance", "splitting"];
+///
+/// **Five since `DECISIONS.md` 459, and the two that were added are the ones
+/// this stage's *geometry* writes.** `splitting` is `balance − comb` exactly, so
+/// the three above are all blind to a mechanism that moves a note's fundamental
+/// and its own overtones **together** and moves the next note's somewhere else
+/// — which is what a spaced pair's comb does by construction, and which no
+/// column of any board here read until `comb` was written. `cue` is the other
+/// missing half of the same pair: every one of the four above is a function of
+/// two *magnitudes*, and half of where a listener puts a note is the
+/// interchannel *phase*.
+const MELODY_METRICS: [&str; 5] = ["channel", "balance", "splitting", "comb", "cue"];
 
 /// **The melody board's three stereo columns, in this objective** — the term
 /// `DECISIONS.md` 447 adds and item 451 widens, with item 416's own lesson
@@ -1895,12 +1981,12 @@ struct MelodyBoard {
     recorded: realism::RecordedKeys,
     line: Phrase,
     line_notes: Vec<melody::LineNote>,
-    line_reference: Vec<(u8, [f64; 8])>,
-    line_layer: Vec<(u8, [f64; 8])>,
+    line_reference: Vec<(u8, [f64; melody::METRIC_COUNT])>,
+    line_layer: Vec<(u8, [f64; melody::METRIC_COUNT])>,
     ladder: Phrase,
     ladder_notes: Vec<melody::LineNote>,
-    ladder_reference: Vec<(u8, [f64; 8])>,
-    ladder_layer: Vec<(u8, [f64; 8])>,
+    ladder_reference: Vec<(u8, [f64; melody::METRIC_COUNT])>,
+    ladder_layer: Vec<(u8, [f64; melody::METRIC_COUNT])>,
 }
 
 impl MelodyBoard {
@@ -1927,7 +2013,7 @@ impl MelodyBoard {
                     notes: &[melody::LineNote],
                     name: &str,
                     events: &[TimedEvent]|
-         -> Result<Vec<(u8, [f64; 8])>, piano_tuner::Error> {
+         -> Result<Vec<(u8, [f64; melody::METRIC_COUNT])>, piano_tuner::Error> {
             let audio = melody::reference_line(sfz, data, phrase, name, events)?;
             Ok(melody::per_key(&melody::measure_line(
                 &audio,
@@ -1958,7 +2044,7 @@ impl MelodyBoard {
     /// One candidate's melody columns, off two engine renders.
     fn columns(&self, preset: &Preset) -> Vec<melody::Column> {
         let hz = partial_hz_of(preset);
-        let engine = |phrase: &Phrase, notes: &[melody::LineNote]| -> Vec<(u8, [f64; 8])> {
+        let engine = |phrase: &Phrase, notes: &[melody::LineNote]| -> Vec<(u8, [f64; melody::METRIC_COUNT])> {
             let events = engine_events::to_render_events(&phrase.events);
             let (left, right) = render_to_buffer(preset, &events, phrase.duration_s as f32);
             let audio =
@@ -2019,6 +2105,24 @@ fn melody_excess(columns: &[melody::Column]) -> f64 {
             }
             if c.gated_on_spread && c.standout.is_finite() && c.bar > 0.0 {
                 excess += (c.standout / c.bar - PASS_MARGIN).max(0.0);
+            }
+            // The four halves `DECISIONS.md` 459 adds, charged the same way and
+            // each only where it is a verdict. `slope` and `swing` are `comb`'s,
+            // `bound` and `agreement` are `cue`'s, and the last of them is
+            // **one-sided**: an engine whose two localisation cues agree better
+            // than the recording's do is not a defect and is not charged for
+            // being one.
+            if c.gated_on_slope && c.slope_error.is_finite() && c.slope_bar > 0.0 {
+                excess += (c.slope_error / c.slope_bar - PASS_MARGIN).max(0.0);
+            }
+            if c.gated_on_swing && c.swing.is_finite() && c.swing_bar > 0.0 {
+                excess += (c.swing / c.swing_bar - PASS_MARGIN).max(0.0);
+            }
+            if c.gated_on_bound && c.bound.is_finite() && c.bound_bar > 0.0 {
+                excess += (c.bound / c.bound_bar - PASS_MARGIN).max(0.0);
+            }
+            if c.gated_on_agreement && c.agreement.is_finite() && c.agreement_bar > 0.0 {
+                excess += (c.agreement / c.agreement_bar - PASS_MARGIN).max(0.0);
             }
             excess
         })

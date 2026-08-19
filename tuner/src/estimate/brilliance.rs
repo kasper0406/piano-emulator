@@ -244,7 +244,36 @@ pub fn band_decay(
 /// separates a partial from its own neighbours at every key on the compass and
 /// is the same filter on both signals.
 pub fn narrowband_db(mono: &[f32], hz: f64, sample_rate: f64) -> Vec<f64> {
-    let width = ((sample_rate / hz) * HETERODYNE_CYCLES).round().max(4.0) as usize;
+    let width = heterodyne_width(hz, sample_rate) as f64;
+    narrowband_complex(mono, hz, sample_rate)
+        .into_iter()
+        .map(|(re, im)| 20.0 * ((re * re + im * im).sqrt() / width).max(1e-30).log10())
+        .collect()
+}
+
+/// The boxcar length [`narrowband_complex`] integrates over, in samples:
+/// [`HETERODYNE_CYCLES`] periods of `hz`, and never under four.
+pub fn heterodyne_width(hz: f64, sample_rate: f64) -> usize {
+    ((sample_rate / hz) * HETERODYNE_CYCLES).round().max(4.0) as usize
+}
+
+/// **The same filter as [`narrowband_db`], before the magnitude is taken**: the
+/// complex analytic amplitude of the band around `hz`, one point per
+/// millisecond, as the raw `(Σ re, Σ im)` of the boxcar.
+///
+/// `narrowband_db` *is* this, mapped through `20 log10(|z| / width)`, and it is
+/// written that way rather than duplicated so that the two can never drift
+/// apart — every band this crate reads a level in and every band it reads a
+/// **phase** in are one filter, run at one width, on both channels.
+///
+/// The phase is what item 459's `cue` column needs and no other reader here has
+/// ever wanted: a level tells you which loudspeaker a partial is louder in and
+/// says nothing at all about *when* it arrives, which for a spaced pair is the
+/// other half of where a listener puts it. The sums are returned unnormalised
+/// because only their ratio between two channels is ever used, and dividing
+/// both by the same `width` would change nothing but the rounding.
+pub fn narrowband_complex(mono: &[f32], hz: f64, sample_rate: f64) -> Vec<(f64, f64)> {
+    let width = heterodyne_width(hz, sample_rate);
     let (mut re, mut im) = (0.0f64, 0.0f64);
     let mut ring: Vec<(f64, f64)> = vec![(0.0, 0.0); width];
     let step = (sample_rate / 1000.0).max(1.0) as usize;
@@ -258,7 +287,7 @@ pub fn narrowband_db(mono: &[f32], hz: f64, sample_rate: f64) -> Vec<f64> {
         im += di - old.1;
         ring[n % width] = (dr, di);
         if n % step == 0 && n >= width {
-            out.push(20.0 * ((re * re + im * im).sqrt() / width as f64).max(1e-30).log10());
+            out.push((re, im));
         }
     }
     out
