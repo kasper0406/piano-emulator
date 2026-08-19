@@ -319,6 +319,15 @@ pub struct MicVoicing {
     /// length is; 1.0 is isotropic.
     #[serde(serialize_with = "short::scalar")]
     pub diffuse_coherence: f32,
+    /// How long the key's own radiating region is along the keyboard axis,
+    /// metres; zero — the default — is the point source every preset before
+    /// `DECISIONS.md` 468 describes. See `engine::preset::MicVoicing`.
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        serialize_with = "short::scalar"
+    )]
+    pub source_extent_m: f32,
     /// The board's mode-controlled band; absent is the diffuse coherence alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalBand>,
@@ -1798,17 +1807,34 @@ impl Preset {
         if table.is_empty() {
             return 0.0;
         }
+        let scales: Vec<f32> = (0..table.len())
+            .map(|i| self.duplex_scale_at(i))
+            .collect();
         let mut worst = 0.0f32;
         for probe in table.iter().flatten() {
             let (mut total, mut largest) = (0.0f32, 0.0f32);
-            for row in table {
-                let d = duplex_magnitude(row, probe.hz);
+            for (row, &scale) in table.iter().zip(&scales) {
+                let d = duplex_magnitude(row, scale, probe.hz);
                 total += d;
                 largest = largest.max(d);
             }
             worst = worst.max(total + largest);
         }
         worst
+    }
+
+    /// The bridge scale one key's `notes.duplex` row is stated against
+    /// (`DECISIONS.md` 481), by index.
+    pub fn duplex_scale_at(&self, index: usize) -> f32 {
+        crate::response::bridge_excitation_scale_per_hz(
+            self.voicing.excitation_scale,
+            self.notes.bridge_gain.get(index).copied().unwrap_or(1.0),
+        )
+    }
+
+    /// The bridge scale one key's `notes.duplex` row is stated against, by key.
+    pub fn duplex_scale(&self, key: u8) -> f32 {
+        key_index(key).map_or(1.0, |i| self.duplex_scale_at(i))
     }
 
     /// The segments of one key, or nothing when the preset has no table.
@@ -2697,6 +2723,7 @@ mod tests {
             span_m: 1.0,
             width: 1.5,
             diffuse_coherence: 5.0,
+            source_extent_m: 0.0,
             modal: Some(piano_emulator::preset::ModalBand {
                 lo_hz: 190.0,
                 hi_hz: 330.0,
@@ -2800,8 +2827,15 @@ mod tests {
         }
         for hz in [3_121.5f32, 3_130.0, 4_703.0, 9_000.0] {
             assert_eq!(
-                crate::response::duplex_magnitude(ours.duplex_modes(81), hz),
-                piano_emulator::duplex::magnitude(preset.duplex_modes(81), hz)
+                crate::response::duplex_magnitude(ours.duplex_modes(81), ours.duplex_scale(81), hz),
+                piano_emulator::duplex::magnitude(
+                    preset.duplex_modes(81),
+                    piano_emulator::string::bridge_excitation_scale_per_hz(
+                        &preset.string_params(81),
+                        &preset.voicing
+                    ),
+                    hz
+                )
             );
         }
     }
@@ -2857,6 +2891,7 @@ mod tests {
             span_m: 1.0,
             width: 1.5,
             diffuse_coherence: 5.0,
+            source_extent_m: 0.0,
             modal: Some(ModalBand {
                 lo_hz: 190.0,
                 hi_hz: 330.0,

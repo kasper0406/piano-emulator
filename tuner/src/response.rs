@@ -335,30 +335,44 @@ const T60_DECADES: f32 = 3.0 * std::f32::consts::LN_10;
 
 /// Pole radius, pole angle and input gain of one segment.
 ///
-/// `gain_db` is the segment's response *at its own frequency*, so the input
-/// gain that realises it is `2 G (1 - r)`: a mode driven at resonance settles
-/// at `g / (2 (1 - r))`, and the factor of two is the negative-frequency image.
-/// Computed in `f32` because the engine computes it in `f32`.
-fn resonator(mode: &DuplexMode) -> (f32, f32, f32) {
+/// Since `DECISIONS.md` 481 `gain_db` is an **impulse** normalisation stated
+/// against the key's own bridge scale — the same one `string.rs` builds a
+/// partial's gain from — so the input gain is `G * scale / SAMPLE_RATE` and the
+/// steady response at resonance is the derived quantity. Computed in `f32`
+/// because the engine computes it in `f32`.
+fn resonator(mode: &DuplexMode, scale: f32) -> (f32, f32, f32) {
     let sigma = T60_DECADES / mode.t60_s;
     let r = (-sigma / crate::SAMPLE_RATE as f32).exp();
     let w = std::f32::consts::TAU * mode.hz / crate::SAMPLE_RATE as f32;
-    (r, w, 2.0 * 10f32.powf(mode.gain_db / 20.0) * (1.0 - r))
+    (
+        r,
+        w,
+        10f32.powf(mode.gain_db / 20.0) * scale * mode.hz / crate::SAMPLE_RATE as f32,
+    )
 }
 
+/// The key's bridge-force scale per hertz of the resonator's own fundamental,
+/// mirroring `engine::string`'s `bridge_excitation_scale_per_hz`.
+pub fn bridge_excitation_scale_per_hz(excitation_scale: f32, bridge_gain: f32) -> f32 {
+    excitation_scale * bridge_gain / REFERENCE_F0
+}
+
+/// Note the per-note output gains are normalised against (`engine::string`).
+pub const REFERENCE_F0: f32 = 261.6256;
+
 /// `|D(f)|` of a whole row of segments as realised: signal out per unit of
-/// drive at `hz` (`engine::duplex::magnitude`).
+/// **steady** drive at `hz` (`engine::duplex::magnitude`).
 ///
 /// Magnitudes are summed rather than complex responses — the conservative
 /// reading, and the right one for a stability bound, because the relative phase
 /// of two segments that land on one frequency is not something a preset
 /// controls.
-pub fn duplex_magnitude(modes: &[DuplexMode], hz: f32) -> f32 {
+pub fn duplex_magnitude(modes: &[DuplexMode], scale: f32, hz: f32) -> f32 {
     let w = std::f32::consts::TAU * hz / crate::SAMPLE_RATE as f32;
     modes
         .iter()
         .map(|mode| {
-            let (r, wk, g) = resonator(mode);
+            let (r, wk, g) = resonator(mode, scale);
             let delta = wk - w;
             let (re, im) = (1.0 - r * delta.cos(), -r * delta.sin());
             0.5 * g / (re * re + im * im).sqrt()
@@ -437,11 +451,12 @@ mod tests {
         assert!((max_db - 18.0).abs() < 0.5, "{max_db:.2} dB");
     }
 
-    /// The normalisation is the whole reason level and length are separate
-    /// preset fields: a segment answers its own frequency at `gain_db`
-    /// whatever its `t60_s`.
+    /// Since `DECISIONS.md` 481 the realised response at a segment's own
+    /// frequency is a *derived* quantity — the gain over the mode's own
+    /// bandwidth — so it scales with `t60_s` as a Q does, and the loop bound
+    /// this mirror exists to compute sees that.
     #[test]
-    fn a_segments_response_at_its_own_frequency_is_its_gain_and_not_its_length() {
+    fn a_segments_realised_response_is_its_gain_over_its_own_bandwidth() {
         for t60_s in [0.1f32, 0.5, 1.5, 3.0] {
             for gain_db in [-30.0f32, -12.0, 0.0] {
                 let mode = DuplexMode {
@@ -449,10 +464,12 @@ mod tests {
                     gain_db,
                     t60_s,
                 };
-                let realised = 20.0 * duplex_magnitude(&[mode], mode.hz).log10();
+                let sigma = T60_DECADES / t60_s;
+                let predicted = 10f32.powf(gain_db / 20.0) * mode.hz / (2.0 * sigma);
+                let realised = duplex_magnitude(&[mode], 1.0, mode.hz);
                 assert!(
-                    (realised - gain_db).abs() < 0.05,
-                    "t60 {t60_s} gain {gain_db}: {realised:.3} dB"
+                    (realised / predicted - 1.0).abs() < 0.01,
+                    "t60 {t60_s} gain {gain_db}: {realised:.3e} against {predicted:.3e}"
                 );
             }
         }
@@ -468,7 +485,8 @@ mod tests {
             DuplexMode { hz: 4_400.0, gain_db: 0.0, t60_s: 1.0 },
             DuplexMode { hz: 9_100.0, gain_db: 0.0, t60_s: 1.0 },
         ];
-        assert!((duplex_magnitude(&together, 4_400.0) - 2.0).abs() < 0.02);
-        assert!((duplex_magnitude(&apart, 4_400.0) - 1.0).abs() < 0.02);
+        let one = 4_400.0 / (2.0 * T60_DECADES);
+        assert!((duplex_magnitude(&together, 1.0, 4_400.0) / (2.0 * one) - 1.0).abs() < 0.02);
+        assert!((duplex_magnitude(&apart, 1.0, 4_400.0) / one - 1.0).abs() < 0.02);
     }
 }

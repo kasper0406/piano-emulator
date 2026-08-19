@@ -342,14 +342,21 @@ fn gate(metric: &str, window: Window) {
     if c.gated_on_balance {
         assert!(
             c.balance_pass,
-            "{} ({}) reads {:+.2} dB over the recorded keys of the register \
-             against a bar of {:.2} (one recorded key's two takes, {:.2}, x{:.2})\n{}",
+            "{} ({}) reads {:+.2} {} against a bar of {:.2} (one recorded key's two \
+             takes, {:.2}, x{:.2}); against the recording's own image it reads \
+             {:+.2}\n{}",
             c.metric,
             c.window.name(),
             c.balance,
+            if c.neutral_target {
+                "off a neutral image, median magnitude over the notes it scores"
+            } else {
+                "dB over the recorded keys of the register"
+            },
             c.balance_bar,
             c.balance_bar / melody::ALLOWANCE,
             melody::ALLOWANCE,
+            c.balance_vs_reference,
             melody::report(std::slice::from_ref(c))
         );
     }
@@ -376,9 +383,10 @@ fn gate(metric: &str, window: Window) {
     if c.gated_on_slope {
         assert!(
             c.slope_pass,
-            "{} ({}) tilts {:+.3} dB per semitone across the tune where the recording \
-             tilts {:+.3} — an error of {:.3} against a bar of {:.3} (the recording's own \
-             slope plus how far it moves between two takes of it, {:+.3}, x{:.2})\n{}",
+            "{} ({}) tilts {:+.3} dB per semitone across the tune where a neutral image \
+             is flat and the recording tilts {:+.3} — an error of {:.3} against a bar of \
+             {:.3} (the recording's own slope plus how far it moves between two takes of \
+             it, {:+.3}, x{:.2})\n{}",
             c.metric,
             c.window.name(),
             c.slope,
@@ -407,31 +415,32 @@ fn gate(metric: &str, window: Window) {
     if c.gated_on_bound {
         assert!(
             c.bound_pass,
-            "{} ({}) reaches {:.0} at {} against a bar of {:.0} (the larger of the head's \
-             own {:.0} µs and the recording's own worst note, {:.0}, x{:.2})\n{}",
+            "{} ({}) puts {} {:.0} µs apart between the two loudspeakers, against the \
+             head's own {:.0} — a bound every note carries, and no longer the larger of \
+             it and the recording's own worst note ({:.0}, item 417's C4)\n{}",
             c.metric,
             c.window.name(),
-            c.bound,
             melody::note_name(c.bound_key),
+            c.bound,
             c.bound_bar,
-            melody::HEAD_ITD_US,
             c.reference_bound,
-            melody::ALLOWANCE,
             melody::report(std::slice::from_ref(c))
         );
     }
     if c.gated_on_agreement {
         assert!(
             c.agreement_pass,
-            "{} ({}): the engine's two localisation cues agree at r = {:+.2} over the line \
-             where the recording's agree at {:+.2} — short by {:+.2} against a bar of {:.2} \
-             (the layer reads {:+.2})\n{}",
+            "{} ({}): the engine's two localisation cues point opposite ways over the \
+             line, r = {:+.2}, where the policy asks only that they point the same way \
+             at all — the level cue swings {:.2} dB across the tune against a floor of \
+             {:.2}, so it is a cue and not a rounding (the recording's two cues read \
+             {:+.2}, its layer {:+.2})\n{}",
             c.metric,
             c.window.name(),
             c.engine_corr,
+            c.ild_swing,
+            c.ild_floor,
             c.reference_corr,
-            c.agreement,
-            c.agreement_bar,
             c.layer_corr,
             melody::report(std::slice::from_ref(c))
         );
@@ -556,7 +565,7 @@ fn the_two_loudspeakers_play_this_line_as_the_recording_does() {
 /// uniform lean the line's own trend cannot see, and the line's own spread
 /// convicts note-to-note jumps a median cannot see because they cancel in it.
 #[test]
-#[ignore = "D446/D463 known gap: the line's fundamentals lean +8.61 dB left of the recording's; run with --ignored to read the current distance"]
+#[ignore = "D446/D466/D463 known gap, re-barred to the neutral target: the ladder's median fundamental sits 3.98 dB off centre against a bar of 1.73 (it read +8.61 against the recording's own image before D466); run with --ignored to read the current distance"]
 fn the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do() {
     gate("balance", Window::Head);
 }
@@ -590,7 +599,7 @@ fn the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do() {
 /// successor for "a statistic scored on the tune's own register rather than on
 /// the whole recorded ladder"; this is it.
 #[test]
-#[ignore = "D451/D463 known gap: the band splits each note's fundamental +7.39 dB from its own overtones; run with --ignored to read the current distance"]
+#[ignore = "D451/D466/D463 known gap, re-barred to the neutral target: the line's median note splits its fundamental 7.06 dB from its own overtones against a bar of 3.26 (+7.39 against the recording before D466); run with --ignored to read the current distance"]
 fn no_note_of_the_line_arrives_from_two_places_at_once() {
     gate("splitting", Window::Head);
 }
@@ -728,7 +737,7 @@ fn the_splitting_gate_fails_on_the_band_the_milestone_started_from() {
 /// factor and touches neither channel's amplitude, so a transposed note's
 /// `E_L/E_R` at its `k`-th partial *is* the donor take's.
 #[test]
-#[ignore = "D459/D463 known gap: the pair geometry combs the line's overtones at 5x the recording's slope (D462's frontier: unreachable without breaking green boards); run with --ignored to read the current distance"]
+#[ignore = "D459/D466/D463 known gap, re-barred to the neutral target: the pair geometry and the alternating polarization spread (D467) tilt the line's overtones -2.725 dB/semitone against a bar of 0.643 and swing them 18.52 against 5.15; D468's mechanism reaches both bars and is not installed; run with --ignored to read the current distance"]
 fn the_tunes_overtones_stay_where_the_recordings_do() {
     gate("comb", Window::Head);
 }
@@ -760,7 +769,7 @@ fn the_tunes_overtones_stay_where_the_recordings_do() {
 /// reports that: `balance` is the level and this column's other half is the
 /// time, and it is only their *product* that is wrong.
 #[test]
-#[ignore = "D460/D463 known gap: the band sets the level cue against the time cue (corr -0.539 vs the recording's +0.831); run with --ignored to read the current distance"]
+#[ignore = "D460/D469/D463 known gap, re-barred: the line's two cues point opposite ways (corr -0.539, where the policy asks only for positive) and C4 carries 1102 us against the head's own 660, which is now a per-note bound with the recording's C4 no longer inflating it; run with --ignored to read the current distance"]
 fn the_lines_two_localisation_cues_agree_as_the_recordings_do() {
     gate("cue", Window::Head);
 }
@@ -810,6 +819,90 @@ fn the_cue_gate_fails_on_the_band_the_milestone_started_from() {
         cue.notes.iter().any(|n| n.engine.abs() > melody::HEAD_ITD_US),
         "the band produces no note past the head's own 660 µs, so this test is not \
          about the mechanism it names\n{text}"
+    );
+}
+
+/// **The second falsification for `comb`, and the diagnosis of
+/// `DECISIONS.md` 467**: the two polarizations of one key are placed at two
+/// *positions*, the sign of the displacement alternates with key parity, and
+/// the image reads the position.
+///
+/// `voicing.polarization_pan_spread` exists to buy a **directivity** — the
+/// measured drift of a single note's balance while it rings, 1.2-6.2 dB in the
+/// recordings against 0.02-0.14 in a pan-potted engine — and it buys it by
+/// moving where the two planes *are*: `voice.rs` renders the horizontal one at
+/// `pan + spread·sign` and the vertical at `pan − spread·sign`, with `sign`
+/// flipping on `key % 2` so that the instrument does not walk to one side. At
+/// the shipped spread that is C4's two polarizations at pan **−0.42 and +0.30**
+/// — over a metre of the string band apart — and D4's at the mirror image of
+/// that.
+///
+/// Through a pan-pot that was a level trim and nothing more. Through a spaced
+/// pair it is two *places*, so it is two interchannel delays and two comb
+/// phases, and it alternates note by note: it is the dominant term of the ramp
+/// `comb` reads, and the tune's colour crossing the whole image between E4 and
+/// F4 (item 459) is exactly the parity of those five keys — C4, D4, E4 even and
+/// F4, G4 odd.
+///
+/// This is the A/B: the shipped instrument, and the same instrument with the
+/// spread at zero and nothing else changed. It asserts that `comb` **convicts
+/// the alternation** — the shipped spread is worse in both of the column's own
+/// verdicts — which is what item 451's pattern calls a tautology today and an
+/// A/B the moment the mechanism is replaced by the per-polarization gain trim
+/// item 467 names.
+#[test]
+fn the_comb_gate_fails_on_an_instrument_whose_polarization_spread_alternates_in_pan() {
+    let Some(sfz) = sfz() else {
+        eprintln!("no data/salamander in this tree; skipping the pan-spread falsification");
+        return;
+    };
+    let mut flat = shipped_preset();
+    // Both homes of the number: the per-key table when the preset draws one,
+    // and the one global spread when it does not (`Preset::pan_spread`).
+    let shipped_spread = melody::line_keys()
+        .iter()
+        .map(|&k| flat.pan_spread(k))
+        .fold(0.0f32, f32::max);
+    flat.voicing.polarization_pan_spread = 0.0;
+    for cell in flat.notes.pan_spread.iter_mut() {
+        *cell = 0.0;
+    }
+    flat.validate().expect("no spread is a legal preset");
+    assert!(
+        shipped_spread > 0.0,
+        "the shipped preset spreads no polarization over the line, so this A/B is \
+         of nothing"
+    );
+    let (columns, _, _) = score(&flat, &sfz);
+    let text = melody::report(&columns);
+    println!("{text}");
+    let without = column(&columns, "comb", Window::Head);
+    let Some(shipped_columns) = shipped() else {
+        return;
+    };
+    let with = column(shipped_columns, "comb", Window::Head);
+    println!(
+        "the polarization spread, on the column that reads a position: slope {:+.3}/semitone with it and {:+.3} without, swing {:.2} and {:.2}, note by note {:?} against {:?}",
+        with.slope,
+        without.slope,
+        with.swing,
+        without.swing,
+        with.notes.iter().map(|n| (n.key, (100.0 * n.engine).round() / 100.0)).collect::<Vec<_>>(),
+        without.notes.iter().map(|n| (n.key, (100.0 * n.engine).round() / 100.0)).collect::<Vec<_>>(),
+    );
+    assert!(
+        !with.pass,
+        "the shipped instrument passes `comb`, so this A/B convicts nothing
+{text}"
+    );
+    assert!(
+        with.slope_error > without.slope_error && with.swing > without.swing,
+        "zeroing the alternating polarization spread does not improve the tune's own          comb (slope error {:.3} -> {:.3}, swing {:.2} -> {:.2}), so `comb` is not          reading the position the spread puts the two planes at
+{text}",
+        with.slope_error,
+        without.slope_error,
+        with.swing,
+        without.swing
     );
 }
 
@@ -869,17 +962,35 @@ fn the_comb_gate_fails_on_a_pair_that_stands_twice_as_wide() {
         comb.swing,
         comb.swing_bar,
     );
+    // **The arithmetic this test exists for, and `DECISIONS.md` 466 moved
+    // where it is visible.** `splitting = balance − comb` exactly, so a
+    // mechanism that moves a note's fundamental and that note's own overtones
+    // together cancels out of `splitting` — and under item 459's target, which
+    // was the recording's own image, the cancellation was a *verdict*: this
+    // instrument took `splitting` green while `comb` got worse. Under the
+    // neutral target `splitting`'s statistic is the median **magnitude** of the
+    // line's own splits, which no longer cancels, so the same instrument now
+    // fails both. What is asserted is therefore the cancellation itself rather
+    // than a verdict built on it: on this instrument the column read the way
+    // item 451 read it — the median of `engine − recording` — is **inside its
+    // own bar**, and `comb` is five times outside its.
     let splitting = column(&columns, "splitting", Window::Head);
     println!(
         "the same instrument on the column that mostly cancels it: splitting swings \
-{:.2} where comb swings {:.2}, and splitting's own median is {:+.2} against a bar of {:.2}",
-        splitting.swing, comb.swing, splitting.balance, splitting.balance_bar
+{:.2} where comb swings {:.2}; splitting against the recording reads {:+.2} of {:.2} and \
+its own median magnitude reads {:+.2} of the same bar",
+        splitting.swing,
+        comb.swing,
+        splitting.balance_vs_reference,
+        splitting.balance_bar,
+        splitting.balance
     );
     assert!(
-        splitting.balance_pass,
-        "the pair-widening instrument fails `splitting` too, so this test no longer \
-         shows what only `comb` can see: splitting {:+.2} of {:.2}\n{text}",
-        splitting.balance, splitting.balance_bar
+        splitting.balance_vs_reference.abs() <= splitting.balance_bar,
+        "the pair-widening instrument moves `splitting` against the recording too, so \
+         this test no longer shows what only `comb` can see: splitting {:+.2} of {:.2}\n{text}",
+        splitting.balance_vs_reference,
+        splitting.balance_bar
     );
     let shipped_comb = shipped().map_or(f64::NAN, |cs| column(cs, "comb", Window::Head).swing);
     assert!(
@@ -891,18 +1002,34 @@ fn the_comb_gate_fails_on_a_pair_that_stands_twice_as_wide() {
     );
 }
 
-/// **The control the falsification needs to mean anything**: the recordings
-/// scored against themselves pass this column.
+/// **The control the falsifications need to mean anything, and since
+/// `DECISIONS.md` 466 it is two statements instead of one.**
 ///
-/// A column that failed everything would fail item 418's band too, and the test
-/// above would prove nothing. So the same measurement is run with the
+/// A column that failed everything would fail item 418's band too and the tests
+/// above would prove nothing, so the same measurement is run with the
 /// **reference render standing in for the engine** — the recordings' own line
 /// against the recordings' own line, with the neighbouring velocity layer still
-/// the floor — and every half of the column must be inside its own bar. It is
-/// exactly zero on the balance half by construction and is asserted anyway,
-/// because the construction is what a successor would change.
+/// the floor.
+///
+/// **(a) Against the recording's own image, every column is exactly zero and
+/// passes.** That is the old control, unchanged, and it is what says the
+/// machinery has no bias of its own: `Column::balance_vs_reference`,
+/// `slope_error`, `agreement` are all identically zero here by construction and
+/// are asserted anyway, because the construction is what a successor changes.
+///
+/// **(b) Against a *neutral* image, the recording fails — and by how much is
+/// the size of the exclusion this milestone's policy rests on.** The three
+/// columns of `melody::METRIC_IS_NEUTRAL` and the head-bound half of `cue` are
+/// now scored against flat-and-centred rather than against this take, and this
+/// take is **not** flat and centred: item 417 measured why (two capsules placed
+/// asymmetrically across the board's nodal lines, one session's microphone
+/// stand) and item 448(ii) and item 460 measured the size (C4's fundamental
+/// 16.86 dB into the right capsule, carrying −949 µs with it, against −1.0 dB
+/// at its neighbours). A policy that excludes something ought to be able to say
+/// what it excluded and how large it was; this asserts that it is still there,
+/// still that large, and still the C4 both other items named.
 #[test]
-fn the_recordings_own_line_passes_the_balance_column() {
+fn the_recordings_own_line_is_the_image_the_neutral_policy_excludes() {
     let Some(sfz) = sfz() else {
         eprintln!("no data/salamander in this tree; skipping the balance control");
         return;
@@ -947,15 +1074,18 @@ fn the_recordings_own_line_passes_the_balance_column() {
     println!("{text}");
     let balance = column(&columns, "balance", Window::Head);
     assert!(
-        balance.balance.abs() < 1e-9,
+        balance.balance_vs_reference.abs() < 1e-9,
         "the recordings differ from themselves by {:+.3} dB\n{text}",
-        balance.balance
+        balance.balance_vs_reference
     );
+    // (b): and against neutral it is the recording that fails.
     assert!(
-        balance.pass,
-        "the recordings' own line fails the column that scores instruments \
-         against it: balance {:+.2} of {:.2}, spread {:.2} of {:.2}\n{text}",
-        balance.balance, balance.balance_bar, balance.standout, balance.bar
+        !balance.balance_pass,
+        "the recording's own image passes a neutral target, so the exclusion this \
+         milestone's policy rests on is not a measurement of anything: own {:+.2} of \
+         {:.2}\n{text}",
+        balance.balance,
+        balance.balance_bar
     );
     // **And the same for `splitting`, which is the column this control matters
     // most for** (`DECISIONS.md` 451). A real AB pair does split a note a
@@ -968,15 +1098,9 @@ fn the_recordings_own_line_passes_the_balance_column() {
     // does not.
     let splitting = column(&columns, "splitting", Window::Head);
     assert!(
-        splitting.balance.abs() < 1e-9,
+        splitting.balance_vs_reference.abs() < 1e-9,
         "the recordings split differently from themselves by {:+.3} dB\n{text}",
-        splitting.balance
-    );
-    assert!(
-        splitting.pass,
-        "the recordings' own line fails the splitting column that scores instruments \
-         against it: balance {:+.2} of {:.2}, spread {:.2} of {:.2}\n{text}",
-        splitting.balance, splitting.balance_bar, splitting.standout, splitting.bar
+        splitting.balance_vs_reference
     );
     assert!(
         splitting
@@ -995,12 +1119,20 @@ fn the_recordings_own_line_passes_the_balance_column() {
     // are 12 cm apart; the assertions below are that the fixture actually
     // carries both, so a pass here is not a pass on nothing.
     let comb = column(&columns, "comb", Window::Head);
+    // Under the neutral target `slope_error` is `|slope|` and is no longer zero
+    // by construction; what is zero by construction is the distance between the
+    // two lines, which is `slope − reference_slope` on the same two rows.
     assert!(
-        comb.slope_error.abs() < 1e-9 && comb.pass,
-        "the recordings' own line fails the comb column that scores instruments \
-         against it: slope {:+.3} of {:.3}, swing {:.2} of {:.2}\n{text}",
-        comb.slope_error,
-        comb.slope_bar,
+        (comb.slope - comb.reference_slope).abs() < 1e-9,
+        "the recordings' own overtone image tilts differently from itself: {:+.4} \
+         against {:+.4}\n{text}",
+        comb.slope,
+        comb.reference_slope
+    );
+    assert!(
+        comb.swing_pass,
+        "the recordings' own line fails the swing half, which is measured off it: \
+         swing {:.2} of {:.2}\n{text}",
         comb.swing,
         comb.swing_bar
     );
@@ -1012,13 +1144,27 @@ fn the_recordings_own_line_passes_the_balance_column() {
     );
     let cue = column(&columns, "cue", Window::Head);
     assert!(
-        cue.agreement.abs() < 1e-9 && cue.pass,
-        "the recordings' own line fails the cue column that scores instruments \
-         against it: worst {:.0} µs of {:.0}, agreement {:+.2} of {:.2}\n{text}",
+        cue.agreement.abs() < 1e-9,
+        "the recordings' two cues agree differently with themselves: {:+.3}\n{text}",
+        cue.agreement
+    );
+    // The agreement half is the one verdict of these four the recording keeps
+    // under the neutral policy, and it keeps it *because* the policy asks only
+    // for a positive correlation: the recording's two cues agree at +0.83.
+    assert!(
+        cue.agreement_pass && cue.engine_corr > 0.0,
+        "the recording's own two localisation cues do not agree, so the half of \
+         `cue` that survives item 469 is a bar on nothing: r = {:+.2}\n{text}",
+        cue.engine_corr
+    );
+    // And the bound half is the one it fails, at the note item 417 named.
+    assert!(
+        !cue.bound_pass && cue.bound_key == 60,
+        "the recording's own line is inside the head's own {:.0} µs at every note, so \
+         `cue`'s per-note bound is not excluding anything: worst {:.0} µs at {}\n{text}",
+        melody::HEAD_ITD_US,
         cue.bound,
-        cue.bound_bar,
-        cue.agreement,
-        cue.agreement_bar
+        melody::note_name(cue.bound_key)
     );
     assert!(
         cue.notes.iter().any(|n| n.reference.abs() > 100.0),
@@ -1037,16 +1183,43 @@ cue worst {:.0} µs at {}, and its two localisation cues agree at r = {:+.2} \
         cue.reference_corr,
         cue.layer_corr
     );
-    // Every column, not just this one: a control that only holds for the column
-    // it was written for is not a control.
+    // Every column, not just these: a control that only holds for the column it
+    // was written for is not a control. **Against the recording's own image**,
+    // which is what the columns outside `METRIC_IS_NEUTRAL` are still scored
+    // against, and which is the whole of the old assertion.
     for c in &columns {
         assert!(
-            c.pass,
-            "{} ({}) fails on the recordings against themselves\n{text}",
+            c.balance_vs_reference.abs() < 1e-9,
+            "{} ({}) differs from the recordings by {:+.3} on the recordings \
+             themselves\n{text}",
             c.metric,
-            c.window.name()
+            c.window.name(),
+            c.balance_vs_reference
         );
+        if !c.neutral_target && c.metric != "cue" {
+            assert!(
+                c.pass,
+                "{} ({}) fails on the recordings against themselves\n{text}",
+                c.metric,
+                c.window.name()
+            );
+        }
     }
+    // **The size of the exclusion, printed rather than only asserted** — this is
+    // the number `DECISIONS.md` 466 quotes and the one a successor re-opening
+    // the policy has to argue with.
+    println!(
+        "the image this policy excludes: the recording's own ladder median magnitude is \
+{:.2} dB against a neutral bar of {:.2}, its line splits by {:.2} dB, its overtone image \
+tilts {:+.3}/semitone, and its worst note carries {:.0} µs at {} against the head's own {:.0}",
+        balance.balance,
+        balance.balance_bar,
+        splitting.balance,
+        comb.slope,
+        cue.bound,
+        melody::note_name(cue.bound_key),
+        melody::HEAD_ITD_US
+    );
 }
 
 /// The tail gate is a statement about a preset, and the statement it was

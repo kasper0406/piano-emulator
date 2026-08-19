@@ -43,6 +43,7 @@ fn mic_preset() -> Preset {
         span_m: 1.2,
         width: 1.4,
         diffuse_coherence: 2.5,
+        source_extent_m: 0.0,
         modal: Some(ModalBand {
             lo_hz: 220.0,
             hi_hz: 300.0,

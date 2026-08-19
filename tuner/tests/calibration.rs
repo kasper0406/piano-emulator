@@ -1400,20 +1400,28 @@ fn without_mechanism(preset: &EnginePreset) -> EnginePreset {
 }
 
 /// A duplex segment the pipeline never saw, recovered from the engine's own
-/// render of it — and the two things that recovery says about the model.
+/// render of it — frequency, level **and decay**.
 ///
 /// This is the gate's answer to the obvious objection to `notes.duplex`: the
 /// estimator free-tracks peaks nobody told it about, so what stops it returning
 /// the note, or the room, or nothing? Here the truth is known.
 ///
-/// What comes back exactly is the **frequency**, which is what `PHYSICS.md` §3
-/// says the field is *for* ("store measured frequencies, not ratios"), and the
+/// **This is the gate `DECISIONS.md` 260 left red and 481 closed**, and what
+/// closing it moved is the *drive*: the segments are launched by the hammer's
+/// own broadband knock across the bridge rather than by the note's settled line
+/// spectrum, and `gain_db` is normalised to that knock rather than to a steady
+/// drive at the segment's own frequency. What comes back now is all three
+/// numbers a segment is: the **frequency** (which is what `PHYSICS.md` §3 says
+/// the field is *for* — "store measured frequencies, not ratios"), the
 /// **linearity** of the level in `gain_db`, which is what makes the field
-/// estimable at all. What does not come back is the level's absolute value or
-/// the decay, and the reason is measured here rather than guessed at — see
-/// [`DUPLEX_LEVEL_OFFSET_DB`] and `DECISIONS.md`.
+/// estimable at all, and the **decay**, which under the old normalisation was a
+/// mode that never built.
+///
+/// Its falsification is
+/// [`the_round_trip_reader_finds_nothing_when_the_duplex_is_silenced`]: the same
+/// reader, the same render, the segments taken out, and it must find nothing.
 #[test]
-#[ignore = "D260/D463 known gap: duplex segments need broadband drive and the field's semantics are to be re-decided; release-only besides; run with --ignored --release to read the current distance"]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
 fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
     let config = DuplexConfig::default();
     // Where a real duplex sits, which is the case worth testing: Öberg &
@@ -1431,15 +1439,24 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
         let k = f64::from(k);
         (k * f64::from(preset.f0(KEY)) * (1.0 + b * k * k).sqrt() * (cents / 1200.0).exp2()) as f32
     };
+    // The levels are the schema's own zero and six under it. Under D481's
+    // normalisation `gain_db = 0` is a segment excited exactly as hard by the
+    // hammer's knock as one of the note's own partials at the same frequency
+    // would be, which is where `docs/history/TUNING_REPORT.md` §5's `harm*`
+    // ratio for C5 lands once the second this key is held before the halo is
+    // read is accounted for (a 1.4 s segment loses 43 dB in it). Below about
+    // −6 dB the segment is under `ModalBank`'s culling floor by the time the
+    // damper lands and there is nothing left in the halo to read — which is the
+    // culling doing what it is for, and is measured by block (b)'s sweep.
     let truth = [
         piano_emulator::preset::DuplexMode {
             hz: partial(5, 52.0),
-            gain_db: -14.0,
+            gain_db: 0.0,
             t60_s: 1.4,
         },
         piano_emulator::preset::DuplexMode {
             hz: partial(9, -38.0),
-            gain_db: -20.0,
+            gain_db: -6.0,
             t60_s: 0.9,
         },
     ];
@@ -1497,43 +1514,23 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
     // (a) The frequency, which is the field's whole point.
     let modes = track(&preset);
     {
-        // The finding this gate now carries, printed whether it passes or not:
-        // under the coupled construction the halo a held-and-released C5 leaves
-        // behind is **90 dB under its own strike**, and the segments in it ring
-        // for tens of milliseconds instead of the 1.4 s they were given. The
-        // estimator is not what changed: moving the band cut before the peak
-        // picking does make chains form in this residual again, and they are
-        // still not the segments — see `DECISIONS.md` 247 for why that change is
-        // not shipped either. What the segment is charged by
-        // is the key's own speaking length through `Voice::process`, and that is
-        // engine-side arithmetic; `docs/history/FUNDAMENTALS.md` §7.7 does not list it, and
-        // this is the one gate of item 232's eight that this milestone leaves
-        // where it found it.
+        // What this block prints is the distance `DECISIONS.md` 260 measured and
+        // 481 closed, in the two numbers it was always quoted in: how far the
+        // halo of a held-and-released C5 sits under its own strike, and how many
+        // segments the free tracker gets back out of it.
         //
-        // **What is now measured, and settles which half is at fault**
-        // (`DECISIONS.md` 260). Two renders say it between them:
-        //
-        // * with `CULL_AMPLITUDE` set to zero, both segments come back — the
-        //   2719 Hz one at **-0.05 cents** and **1.38 s of the 1.4 s** it was
-        //   given, the 4734 Hz one at 4734.4. So the field reaches the bank, the
-        //   bank rings for the T60 it was told, and the estimator recovers both:
-        //   nothing on either side of the round trip is wrong.
-        // * ... and at that level it is **-97 dB under the strike**, i.e. about
-        //   -144 dBFS, where `ModalBank::cull` zeroes anything under -90. The
-        //   culling is doing exactly what it is for.
-        //
-        // So the defect is neither the estimator nor the culling: it is that a
-        // segment is normalised for a **steady drive at its own frequency**
-        // (`duplex::resonator`, `g = 2 G (1 - r)`) and only ever receives an
-        // **impulsive** one, because a real duplex is deliberately tuned off the
-        // speaking length's partials. The factor between the two is `1 - r`, a
-        // part in ten thousand, which is the whole of `DUPLEX_LEVEL_OFFSET_DB`'s
-        // 93.7 dB — and the printout below shows that at the schema's own
-        // ceiling the halo is still under the culling floor. Fixing it means
-        // re-deciding what `gain_db` means, which moves `MAX_DUPLEX_LOOP_GAIN`,
-        // this constant, the fitted `notes.duplex` rows of
-        // `presets/salamander-c5.toml`, and the sound. That is a milestone, not
-        // a tolerance.
+        // Before 481 the halo read **-96.0 dB** with the segments at -14 and
+        // -20 dB, the loudest one came back **-105 dB** under the strike, and it
+        // rang **0.51 s of the 1.4 s** it was given — because a segment was
+        // normalised for a *steady* drive at its own frequency
+        // (`g = 2 G (1 - r)`, a part in ten thousand at these decays) while the
+        // only drive it ever received was **impulsive**, a real duplex being
+        // deliberately tuned off the speaking length's partials. Two things
+        // changed and the module header derives both: the segments are now
+        // launched by the hammer's own broadband knock across the bridge, and
+        // `gain_db` is an impulse normalisation against the key's own bridge
+        // scale, so level and length are still separate measurements and the
+        // level is no longer a mode that never builds.
         let halo = halo_only(&preset, KEY, 1.0, 6.0);
         let rms = |x: &[f32]| {
             (x.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / x.len() as f64).sqrt()
@@ -1548,13 +1545,9 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
             truth[0].hz,
             truth[1].hz
         );
-        // The ceiling, which is what says this gate is not an estimator
-        // question. `gain_db` tops out at `MAX_DUPLEX_GAIN_DB` and the level is
-        // linear in it (block (b) below measures the slope at one dB per dB), so
-        // the loudest segment the schema can express is
-        // `MAX_DUPLEX_GAIN_DB - DUPLEX_LEVEL_OFFSET_DB` under its own strike —
-        // and `ModalBank::cull` zeroes a mode below -90 dBFS. Rendered here
-        // rather than argued: the same halo with both segments at the rail.
+        // The ceiling, kept because it is what says the schema's range is now a
+        // *voicing* range rather than a wall: at `MAX_DUPLEX_GAIN_DB` the same
+        // halo is this much louder, and the linear level law below predicts it.
         let mut loudest = preset.clone();
         for mode in loudest.notes.duplex[key_index(KEY).unwrap()].iter_mut() {
             mode.gain_db = piano_emulator::preset::MAX_DUPLEX_GAIN_DB;
@@ -1562,16 +1555,20 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
         let ceiling = halo_only(&loudest, KEY, 1.0, 6.0);
         println!(
             "the same halo with both segments at the schema's {:+.1} dB ceiling: rms {:.3e} \
-             ({:.1} dB under the strike, {} modes) against the {:.1} dB the linear level law \
-             predicts",
+             ({:.1} dB under the strike, {} modes)",
             piano_emulator::preset::MAX_DUPLEX_GAIN_DB,
             rms(&ceiling),
             20.0 * (rms(&ceiling) / rms(&strike)).log10(),
             track(&loudest).len(),
-            f64::from(piano_emulator::preset::MAX_DUPLEX_GAIN_DB) - DUPLEX_LEVEL_OFFSET_DB,
         );
         for m in modes.iter().take(4) {
-            println!("  mode {:.1} Hz, t60 {:.2} s", m.hz, m.t60_s);
+            println!(
+                "  mode {:.1} Hz, t60 {:.2} s, {:+.1} dB re strike, fit {:.3} dB",
+                m.hz,
+                m.t60_s,
+                20.0 * (m.amplitude / reference).log10(),
+                m.fit_db
+            );
         }
     }
     assert!(!modes.is_empty(), "nothing came back at all");
@@ -1607,7 +1604,7 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
     // field invertible: one measured constant turns a measured ratio into a
     // preset value, and `DUPLEX_LEVEL_OFFSET_DB` is that constant.
     let mut offsets = Vec::new();
-    for gain_db in [-26.0f32, -20.0, -14.0, -8.0] {
+    for gain_db in [-6.0f32, -2.0, 2.0, 6.0] {
         let mut candidate = preset.clone();
         for mode in candidate.notes.duplex[key_index(KEY).unwrap()].iter_mut() {
             mode.gain_db = gain_db;
@@ -1637,31 +1634,153 @@ fn a_known_duplex_comes_back_from_the_engines_own_render_of_it() {
          DUPLEX_LEVEL_OFFSET_DB = {DUPLEX_LEVEL_OFFSET_DB:+.2}"
     );
 
-    // (c) And the finding the offset's *size* is: 94 dB is not a gain-staging
-    // constant, it is a mode that never builds. `gain_db` is normalised to the
-    // steady response at resonance, so the per-sample input gain is
-    // `2 G (1 - r)` — a part in ten thousand at these decays — and
-    // `ModalBank`'s culling zeroes a state that small before the drive has had
-    // time to raise it. The segment therefore shows its *impulse* response and
-    // stops, whatever `t60_s` says, which this pins: the recovered decay is a
-    // small fraction of the one asked for, and the day the drive path changes
-    // this test fails and the constant above has to be re-measured.
+    // (c) And the decay, which is the number `DECISIONS.md` 260 could not get
+    // back at all. Under the old normalisation the per-sample input gain was
+    // `2 G (1 - r)` — a part in ten thousand at these decays — and `ModalBank`'s
+    // culling zeroed the state before the drive had time to raise it, so what a
+    // render showed was the segment's *impulse* response and then nothing,
+    // whatever `t60_s` said: 0.51 s of the 1.4 s asked for, and the gate pinned
+    // that as a finding rather than a defect. It is a defect, and this is the
+    // line that says so.
     let modes = track(&preset);
     let decayed = modes
         .iter()
         .find(|m| (1200.0 * (m.hz / f64::from(truth[0].hz)).log2()).abs() < 2.0)
         .expect("the segment");
     println!(
-        "the segment asked to ring {:.1} s rang {:.2} s: the bank is culled before it builds",
-        truth[0].t60_s, decayed.t60_s
+        "the segment asked to ring {:.1} s rang {:.2} s (fit residual {:.3} dB)",
+        truth[0].t60_s, decayed.t60_s, decayed.fit_db
     );
+    let decay_error = 100.0 * (decayed.t60_s / f64::from(truth[0].t60_s) - 1.0);
     assert!(
-        decayed.t60_s < 0.5 * f64::from(truth[0].t60_s),
-        "the segment rang for {:.2} s of the {} s it was given — the culling finding has been \
-         fixed, and `estimate::duplex`'s level convention has to be re-derived",
+        decay_error.abs() < 10.0,
+        "the segment rang {:.2} s of the {} s it was given ({decay_error:+.1} %) — the drive \
+         reaches the bank but the bank is still being cut off",
         decayed.t60_s,
         truth[0].t60_s
     );
+    // ... and it is one resonator, not a chain of fragments: a segment fits a
+    // straight line in log amplitude to a hundredth of a dB, which is what
+    // separates it from the sidelobe of a partial or two resonances beating.
+    assert!(
+        decayed.fit_db < 0.5,
+        "the recovered segment departs from its own decay line by {:.3} dB RMS",
+        decayed.fit_db
+    );
+}
+
+/// The falsification the duplex round trip never had: **the same reader, the
+/// same render, the segments taken out — and it must find nothing.**
+///
+/// `a_known_duplex_comes_back_from_the_engines_own_render_of_it` proves a
+/// mechanism only if its reader would notice the mechanism's absence. It would
+/// not have proved one if the free tracker were picking up something the halo
+/// always contains at those frequencies — the sympathetic bus, a sideband of
+/// the note, the difference of two renders' own arithmetic — so this renders the
+/// identical scenario with `notes.duplex` empty and asserts the reader comes
+/// back with nothing inside two cents of where the segments would have been.
+///
+/// It is a *falsification*, not a gap: it passes by failing a deliberately
+/// silenced instrument, and it is the reason the gate above may come out of
+/// `#[ignore]` (`DECISIONS.md` 481, 463).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the gate is only meaningful in --release")]
+fn the_round_trip_reader_finds_nothing_when_the_duplex_is_silenced() {
+    const KEY: u8 = 72;
+    let config = DuplexConfig::default();
+    let mut preset = without_mechanism(&gate_preset());
+    let partial = |k: u32, cents: f64| -> f32 {
+        let b = f64::from(preset.notes.inharmonicity_b[key_index(KEY).unwrap()]);
+        let k = f64::from(k);
+        (k * f64::from(preset.f0(KEY)) * (1.0 + b * k * k).sqrt() * (cents / 1200.0).exp2()) as f32
+    };
+    let truth = [
+        piano_emulator::preset::DuplexMode {
+            hz: partial(5, 52.0),
+            gain_db: 0.0,
+            t60_s: 1.4,
+        },
+        piano_emulator::preset::DuplexMode {
+            hz: partial(9, -38.0),
+            gain_db: -6.0,
+            t60_s: 0.9,
+        },
+    ];
+    let partials: Vec<f64> = piano_tuner::estimate::duplex::partial_frequencies(
+        f64::from(preset.f0(KEY)),
+        f64::from(preset.notes.inharmonicity_b[key_index(KEY).unwrap()]),
+        0.0,
+        80,
+    );
+    let loose = DuplexConfig {
+        min_t60_s: 0.0,
+        max_onset_s: 10.0,
+        max_fit_db: 40.0,
+        ..config
+    };
+    let track = |preset: &EnginePreset| -> Vec<piano_tuner::estimate::duplex::ResidualMode> {
+        let halo = halo_only(preset, KEY, 1.0, 6.0);
+        piano_tuner::estimate::duplex::residual_modes_above(
+            &halo,
+            SAMPLE_RATE,
+            &partials,
+            f64::from(preset.f0(KEY)),
+            &loose,
+        )
+        .expect("the residual tracks")
+    };
+
+    // The control: with the segments in, the reader finds them. Without this
+    // line the test could pass because the reader is broken rather than because
+    // the mechanism is absent.
+    preset.notes.duplex = vec![Vec::new(); 88];
+    preset.notes.duplex[key_index(KEY).unwrap()] = truth.to_vec();
+    assert!(preset.validate().is_ok(), "{:?}", preset.validate().err());
+    let voiced = track(&preset);
+    let near = |modes: &[piano_tuner::estimate::duplex::ResidualMode], hz: f32| {
+        modes
+            .iter()
+            .find(|m| (1200.0 * (m.hz / f64::from(hz)).log2()).abs() < 2.0)
+            .copied()
+    };
+    assert!(
+        near(&voiced, truth[0].hz).is_some(),
+        "the reader lost the segment it is supposed to read"
+    );
+
+    // Silenced two ways, because there are two ways a preset can carry no
+    // segments and the neutral path is a different branch of `Voice::process`
+    // from the empty-row one.
+    for (what, silenced) in [
+        ("an empty row", {
+            let mut p = preset.clone();
+            p.notes.duplex[key_index(KEY).unwrap()] = Vec::new();
+            p
+        }),
+        ("no table at all", {
+            let mut p = preset.clone();
+            p.notes.duplex = Vec::new();
+            p
+        }),
+    ] {
+        let modes = track(&silenced);
+        println!(
+            "duplex silenced ({what}): {} residual modes, nearest to {:.1} Hz is {}",
+            modes.len(),
+            truth[0].hz,
+            near(&modes, truth[0].hz).map_or("nothing".to_string(), |m| format!(
+                "{:.1} Hz at {:.3e}",
+                m.hz, m.amplitude
+            ))
+        );
+        for hz in [truth[0].hz, truth[1].hz] {
+            assert!(
+                near(&modes, hz).is_none(),
+                "with the duplex silenced ({what}) the reader still returned a mode at \
+                 {hz:.1} Hz — the round trip is reading something the segments are not"
+            );
+        }
+    }
 }
 
 /// The halo's level answers the coupling the way the fit assumes it does —

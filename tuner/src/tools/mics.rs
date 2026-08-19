@@ -408,21 +408,30 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     .split(',')
                     .map(|f| f.trim().parse::<f32>())
                     .collect::<Result<Vec<f32>, _>>()?;
-                if n.len() != 5 && n.len() != 8 {
-                    return Err("--set takes spacing,height,span,width,coherence \
-                                and optionally modal lo_hz,hi_hz,lift"
-                        .into());
-                }
+                // Five is the geometry and the two trims; six adds the source
+                // extent (`DECISIONS.md` 468); either may be followed by the
+                // band's three numbers.
+                let (head, extent) = match n.len() {
+                    5 | 8 => (5, 0.0),
+                    6 | 9 => (6, n[5]),
+                    _ => {
+                        return Err("--set takes spacing,height,span,width,coherence, \
+                                    optionally source_extent_m, and optionally modal \
+                                    lo_hz,hi_hz,lift"
+                            .into())
+                    }
+                };
                 set = Some(MicVoicing {
                     spacing_m: n[0],
                     height_m: n[1],
                     span_m: n[2],
                     width: n[3],
                     diffuse_coherence: n[4],
-                    modal: (n.len() == 8).then(|| ModalBand {
-                        lo_hz: n[5],
-                        hi_hz: n[6],
-                        lift: n[7],
+                    source_extent_m: extent,
+                    modal: (n.len() > head).then(|| ModalBand {
+                        lo_hz: n[head],
+                        hi_hz: n[head + 1],
+                        lift: n[head + 2],
                     }),
                 });
             }
@@ -441,8 +450,8 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             .cloned()
             .unwrap_or_else(|| "presets/salamander-c5.toml".into()),
     );
-    const STAGES: [&str; 8] = [
-        "geometry", "profile", "coherence", "image", "modal", "band", "place", "grid",
+    const STAGES: [&str; 9] = [
+        "geometry", "profile", "coherence", "image", "modal", "band", "place", "extent", "grid",
     ];
     if let Some(unknown) = stages.iter().find(|s| !STAGES.contains(&s.as_str())) {
         return Err(format!(
@@ -725,6 +734,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         span_m: geometry.span_m as f32,
         width: base.voicing.mics.map_or(1.0, |m| m.width),
         diffuse_coherence: base.voicing.mics.map_or(1.0, |m| m.diffuse_coherence),
+        source_extent_m: base.voicing.mics.map_or(0.0, |m| m.source_extent_m),
         modal: base.voicing.mics.and_then(|m| m.modal),
     };
     let mut voicing = set.unwrap_or(measured);
@@ -965,6 +975,61 @@ coherence {:.4} -> {:.3} bars out",
         }
     }
 
+    // ---- stage 5: how long the source is ----------------------------------
+    //
+    // **`DECISIONS.md` 468's stage.** The four stages above all move the
+    // *pair*; this one moves the **source**, and it is last because the point
+    // it starts from has to be a settled instrument — the extent is read by
+    // exactly the columns the band and the place stages were chosen with, and
+    // fitting it first would be fitting it against a geometry that is about to
+    // move. One knob, the same constrained objective, the same delay term, and
+    // both scores printed: the instrument as the earlier stages left it, and
+    // the same instrument with a line source under the capsules.
+    if wants("extent") {
+        println!("\nextent: the source's own length, with the pair and the band settled");
+        let feasible = Feasible::default();
+        // **The search is multiplicative and zero is a fixed point of it**, so a
+        // preset that describes a point source has to be handed a length before
+        // the compass can move one. The seed is [`EXTENT_SEED_M`]; the point
+        // source itself is still scored below and still wins if it is better,
+        // so seeding decides where the search starts and never what it returns.
+        let start = if voicing.source_extent_m > 0.0 {
+            voicing
+        } else {
+            println!(
+                "  the preset describes a point source; the search is seeded at \
+{EXTENT_SEED_M:.2} m and the point source is scored against whatever it finds"
+            );
+            MicVoicing {
+                source_extent_m: EXTENT_SEED_M,
+                ..voicing
+            }
+        };
+        let extended = search(
+            &base,
+            &rows,
+            &phrases,
+            &melody_board,
+            start,
+            EXTENT_KNOBS,
+            true,
+            &feasible,
+        );
+        let objective = modal_objective(&base, &rows, &phrases, &melody_board);
+        let scored = batch(&[voicing, extended], &objective);
+        println!(
+            "  as a point source:      source_extent_m {:.4} -> {:.3} bars out",
+            voicing.source_extent_m, scored[0]
+        );
+        println!(
+            "  as a line source:       source_extent_m {:.4} -> {:.3} bars out",
+            extended.source_extent_m, scored[1]
+        );
+        if scored[1] < scored[0] {
+            voicing = extended;
+        }
+    }
+
     if let (Some(trim), true) = (trimmed, wants("image")) {
         let held = gate_excess(&columns_for_voicing(&base, &rows, trim, FIT_VELOCITY));
         let free = gate_excess(&columns_for_voicing(&base, &rows, voicing, FIT_VELOCITY));
@@ -985,6 +1050,15 @@ geometry held, {free:.3} with it free"
     println!("  span_m            {:.4}", voicing.span_m);
     println!("  width             {:.4}", voicing.width);
     println!("  diffuse_coherence {:.4}", voicing.diffuse_coherence);
+    println!(
+        "  source_extent_m   {:.4}{}",
+        voicing.source_extent_m,
+        if voicing.source_extent_m > 0.0 {
+            ""
+        } else {
+            "   (a point source: the pre-468 instrument, bit for bit)"
+        }
+    );
     match voicing.modal {
         None => println!("  [modal]           absent — the diffuse coherence alone"),
         Some(b) => println!(
@@ -1119,6 +1193,8 @@ enum Knob {
     ModalHi,
     /// How much more difference than sum the pair sees inside it.
     ModalLift,
+    /// How long the key's own radiating region is, `source_extent_m`.
+    SourceExtent,
 }
 
 /// The trims: what a pair does with its difference, not where it is.
@@ -1126,6 +1202,29 @@ const TRIM_KNOBS: &[Knob] = &[Knob::Width, Knob::Coherence];
 
 /// Everything but the height, which `data/salamander/readme.txt` states.
 const IMAGE_KNOBS: &[Knob] = &[Knob::Spacing, Knob::Span, Knob::Width, Knob::Coherence];
+
+/// Where the extent stage starts when the preset it is given describes a point
+/// source, metres.
+///
+/// The pattern search steps multiplicatively (`SEARCH_STEP` is a log-ratio), so
+/// **zero is a fixed point of it** and a stage seeded at the preset's own value
+/// would return the preset. Half the length the frontier of `DECISIONS.md` 468
+/// was measured at, which is inside `Knob::SourceExtent`'s range by a factor of
+/// six each way — five steps of the compass reach either bound.
+const EXTENT_SEED_M: f32 = 0.3;
+
+/// The source's own length, alone (`DECISIONS.md` 468).
+///
+/// A separate stage for the reason `MODAL_KNOBS` is one: everything else in
+/// `[voicing.mics]` is a property of the **pair**, pinned either by the
+/// recording's own interchannel delays or by the coherence surfaces, and this
+/// is a property of the **instrument** — how much of a board one key sets in
+/// motion. Letting it into `IMAGE_KNOBS` would let the search buy a flatter
+/// comb by moving the capsules, which is what the delay term exists to forbid.
+/// It runs last, from wherever the band and the place stages left the
+/// instrument, under the same constrained objective and against the same delay
+/// term.
+const EXTENT_KNOBS: &[Knob] = &[Knob::SourceExtent];
 
 /// The mode-controlled band alone, with the pair held where the delays put it.
 ///
@@ -1188,36 +1287,42 @@ impl Knob {
             // less, which is the first thing item 418's clamp bought back and
             // the reason its refit has room item 395's did not.
             Knob::ModalLo => (170.0, 400.0),
-            // **The upper edge has a floor for the same reason the lower edge
-            // has one, and item 461 is what found it.** Item 419 swept
-            // `lo_hz` against `the_estimator_reads_back_a_spacing_the_engine_was_given`
-            // and put the rail at 170 Hz with the *upper* edge left wherever
-            // the shipped band had it; a fit given the two edges freely then
-            // chose **170.0-234.0 Hz**, and that band reads a 0.12 m pair back
-            // as **0.090 m, −25 %**, against the gate's own 20 %. Swept here,
-            // at the fitted trims and `lo_hz` on its rail:
+            // **The upper edge's floor is back at 200 Hz, and item 465 is why.**
+            // Item 462 put it at **280** because a fit given the two edges
+            // freely chose 170.0-234.0 Hz and that band read a 0.12 m pair back
+            // as 0.090 m — **−25 %** against
+            // `the_estimator_reads_back_a_spacing_the_engine_was_given`'s own
+            // 20 % — while 280 Hz was where the sweep came back inside the
+            // gate. The consequence was a wall: the melodic register's lowest
+            // fundamental is 261.5 Hz, so **no band that kept the estimator
+            // honest could clear the tune from below**, and eighteen hertz was
+            // the whole of it.
             //
-            // | band | 0.12 m | 0.24 m | 0.48 m |
-            // |---|--:|--:|--:|
-            // | 170-234 | **−25 %** | −9 % | −15 % |
-            // | 170-280 | −13 % | −4 % | −14 % |
-            // | 170-330 | −5 % | −1 % | −14 % |
-            // | 170-400 | +2 % | +1 % | −15 % |
-            // | 170-456 | +7 % | +2 % | −15 % |
-            // | 234-456 | −12 % | −12 % | **−24 %** |
-            // | 400-800 | **−16 %** | −12 % | **−24 %** |
+            // That reading was the band's own group delay entering a
+            // phase-transform delay estimator, and
+            // `estimate::mics::LagConfig::band` now subtracts it. Re-swept with
+            // it subtracted (`what_the_bands_group_delay_was_doing_to_the_readback`,
+            // the same eleven keys and the same three spacings):
             //
-            // A twelfth-order cascade's group delay grows as its passband
-            // narrows, and that delay is not common to the two channels — it
-            // is added to the side and subtracted from it — so a narrow band
-            // walks straight into the phase-transform delay reading. **280 Hz
-            // is where the sweep comes back inside the gate** and it is the
-            // floor. The consequence is item 461's wall and it is worth
-            // knowing before a successor re-opens this: the melodic register's
-            // lowest fundamental is **261.5 Hz**, so no band that keeps this
-            // estimator honest can clear the tune from below, and one that
-            // clears it from above (400-800, 400-1200) fails the gate too.
-            Knob::ModalHi => (280.0, 1_500.0),
+            // | band | raw (against 1.58) | corrected (against 1.36) |
+            // |---|--:|--:|
+            // | 170-456 (ships) | +6 / +1 / −13 % | −4 / −0 / −9 % |
+            // | 170-234 (item 462's refusal) | **−24** / −8 / −11 % | +3 / +4 / +2 % |
+            // | 170-280 | −13 / −3 / −10 % | +1 / +3 / −1 % |
+            // | 170-200 (this floor) | **−36** / −14 / −13 % | +2 / +4 / +4 % |
+            // | none | −15 / −12 / −20 % | −1 / +2 / −7 % |
+            //
+            // (The two columns are against two different values of
+            // `ENGINE_LAG_PER_ITD`, because re-measuring that constant *is* the
+            // same fix read as a number: 1.58 was measured on renders carrying
+            // the shipped band and 1.36 is what it becomes when the band is
+            // taken out of the reading.) Every band now reads inside 9 %,
+            // including the
+            // narrowest one this floor allows, so the floor goes back to where
+            // item 419 had it. **It is still a floor and not nothing**: below
+            // 200 Hz nothing has been measured, and a band narrower than 30 Hz
+            // is a resonance rather than a region of a plate.
+            Knob::ModalHi => (200.0, 1_500.0),
             // **Under the rail, and a hair inside it** (`DECISIONS.md` 418).
             // `soundboard::MIC_MODAL_LIFT` is clamped at 1.0 — the lift is the
             // side-over-mid amplitude the band carries, so one is where
@@ -1228,6 +1333,13 @@ impl Knob {
             // every other knob here stops short of its rail: a fitted number
             // written at a bound is a fit that wanted to keep going.
             Knob::ModalLift => (0.05, 0.99),
+            // **Zero is a point source and it is in range, because absent is
+            // what ships** (`DECISIONS.md` 468). The ceiling is a metre and a
+            // half rather than the engine's three: the frontier is flat past
+            // 0.9 m — the two capsule pressures have stopped telling a longer
+            // line from an infinite one at this height — and a fit that walks
+            // past the instrument's own string band is describing a room.
+            Knob::SourceExtent => (0.0, 1.5),
         }
     }
 
@@ -1240,6 +1352,7 @@ impl Knob {
             Knob::ModalLo => v.modal.map_or(f32::NAN, |b| b.lo_hz),
             Knob::ModalHi => v.modal.map_or(f32::NAN, |b| b.hi_hz),
             Knob::ModalLift => v.modal.map_or(f32::NAN, |b| b.lift),
+            Knob::SourceExtent => v.source_extent_m,
         })
     }
 
@@ -1269,6 +1382,7 @@ impl Knob {
                     b.lift = value;
                 }
             }
+            Knob::SourceExtent => v.source_extent_m = value,
         }
     }
 }
@@ -1770,11 +1884,12 @@ fn compass(
         }
         println!(
             "  step {step:.4}: spacing {:.3} span {:.3} width {:.3} coherence {:.3} \
-modal {} -> {score:.3} bars out ({evaluations} sets rendered)",
+extent {:.3} modal {} -> {score:.3} bars out ({evaluations} sets rendered)",
             best.spacing_m,
             best.span_m,
             best.width,
             best.diffuse_coherence,
+            best.source_extent_m,
             best.modal.map_or_else(
                 || "absent".to_string(),
                 |b| format!("{:.0}-{:.0} Hz x{:.3}", b.lo_hz, b.hi_hz, b.lift)

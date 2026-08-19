@@ -57,23 +57,58 @@ const RENDER_S: f32 = 5.0;
 const HALO_PASSES: usize = 8;
 /// Damping on the halo step (`estimate::halo::refine`).
 const HALO_RATE: f64 = 0.6;
-/// Share of the sympathetic loop the duplex segments are allowed to occupy.
-/// See `fit_duplex`: they are never damped, so what they take they keep, and
-/// what they take comes out of the coupling that moves the halo.
-const DUPLEX_LOOP_BUDGET: f32 = 0.05;
+/// How much room the coupling must still have above where it stands, once the
+/// segments have taken their share of the undamped loop bound.
+///
+/// They are never damped, so what they take they keep, and what they take comes
+/// out of the coupling that moves the halo — but "what they take" is a *loop
+/// gain*, not a bare response factor. Until `DECISIONS.md` 481 this was written
+/// as a ceiling of 0.05 on `duplex_response_factor`, which corresponded to a
+/// coupling ceiling of about 3.3 against a fitted coupling of 0.0104: three
+/// hundred times more headroom than the halo fit could ever use, and it cost
+/// nothing to reserve because a segment was inaudible anyway. It is not free
+/// now — under 481's normalisation the measured instrument lands 20.7 dB under
+/// that ceiling — so the reserve is stated as what it is for: the coupling may
+/// still move by this factor before the segments become the binding
+/// constraint, which is more room than any halo fit has ever asked for.
+const DUPLEX_COUPLING_HEADROOM: f32 = 4.0;
 
 struct Options {
     sfz: PathBuf,
     base: PathBuf,
     out: Option<PathBuf>,
+    /// `--only duplex`: run stage 1 and leave the halo and the pan spread
+    /// exactly as the file has them.
+    ///
+    /// It exists because `DECISIONS.md` 481 re-decided what `notes.duplex`
+    /// means and nothing else, so the rows have to be re-estimated while the
+    /// coupling, the bridge and the spread stay where the fits that own them
+    /// put them. Re-running the whole stage to move one table would put three
+    /// closed-on-the-render fits back in play for no reason.
+    only_duplex: bool,
 }
 
 fn parse(args: Vec<String>) -> Result<Options> {
     let mut sfz = None;
     let (mut base, mut out) = (None, None);
+    let mut only_duplex = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--only" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| Error::Config("--only needs a stage".into()))?;
+                match value.as_str() {
+                    "duplex" => only_duplex = true,
+                    other => {
+                        return Err(Error::Config(format!(
+                            "--only {other}: the only stage that can be run alone is `duplex`"
+                        )))
+                    }
+                }
+                i += 1;
+            }
             "--preset" | "--out" => {
                 let value = args
                     .get(i + 1)
@@ -93,6 +128,7 @@ fn parse(args: Vec<String>) -> Result<Options> {
         sfz: sfz.ok_or_else(|| Error::Config("no instrument file".into()))?,
         base: base.ok_or_else(|| Error::Config("--preset is required".into()))?,
         out,
+        only_duplex,
     })
 }
 
@@ -114,24 +150,34 @@ pub fn run(args: Vec<String>) -> Result<()> {
     let duplex = fit_duplex(&library, &preset)?;
     preset.notes.duplex = duplex;
 
-    // ------------------------------------------------------------ 2. halo
-    let peaks = peaks_from_body_modes(&preset);
-    let voicing = fit_halo(&preset, &peaks, &survey)?;
-    voicing.apply(&mut preset, peaks.clone())?;
+    if options.only_duplex {
+        preset.validate()?;
+        println!(
+            "\nfinal (--only duplex): resonance_coupling {:.5} and the bridge, the spread and \
+             everything else untouched; duplex loop gain {:.5}",
+            preset.voicing.resonance_coupling,
+            preset.duplex_loop_gain(),
+        );
+    } else {
+        // ------------------------------------------------------------ 2. halo
+        let peaks = peaks_from_body_modes(&preset);
+        let voicing = fit_halo(&preset, &peaks, &survey)?;
+        voicing.apply(&mut preset, peaks.clone())?;
 
-    // ------------------------------------------------------ 3. pan spread
-    preset.notes.pan_spread = fit_pan_spread(&library, &preset, &survey)?;
+        // ------------------------------------------------------ 3. pan spread
+        preset.notes.pan_spread = fit_pan_spread(&library, &preset, &survey)?;
 
-    preset.validate()?;
-    println!(
-        "\nfinal: resonance_coupling {:.5}, backbone {:+.2} dB, tilt {:+.2} dB, \
-         bridge loop gain {:.4}, duplex loop gain {:.5}",
-        preset.voicing.resonance_coupling,
-        voicing.backbone_gain_db,
-        voicing.treble_tilt_db,
-        voicing.loop_gain(&peaks),
-        preset.duplex_loop_gain(),
-    );
+        preset.validate()?;
+        println!(
+            "\nfinal: resonance_coupling {:.5}, backbone {:+.2} dB, tilt {:+.2} dB, \
+             bridge loop gain {:.4}, duplex loop gain {:.5}",
+            preset.voicing.resonance_coupling,
+            voicing.backbone_gain_db,
+            voicing.treble_tilt_db,
+            voicing.loop_gain(&peaks),
+            preset.duplex_loop_gain(),
+        );
+    }
 
     let Some(out) = &options.out else {
         println!("\n(no --out: nothing written)");
@@ -171,12 +217,12 @@ fn fit_duplex(library: &SampleLibrary, preset: &Preset) -> Result<Vec<Vec<Duplex
     }
 
     // Two passes, because the level convention needs the whole instrument
-    // before it can write any of it. `DUPLEX_LEVEL_OFFSET_DB` is +94 dB and the
-    // measured levels are tens of dB *below* a strike, so every segment on the
-    // instrument asks for more than the schema's +6 dB ceiling. Clamping each
-    // row on its own would flatten the compass to one level; one shift for all
-    // of them keeps the relative structure, which is the part the gate proves
-    // is recoverable.
+    // before it can write any of it: a shift that keeps the loudest segment
+    // under the schema's ceiling, and one that keeps the whole undamped bank
+    // out of the coupling's way, and neither can be known from one key.
+    // Clamping each row on its own would flatten the compass to one level; one
+    // shift for all of them keeps the relative structure, which is the part the
+    // gate proves is recoverable.
     struct Measured<'a> {
         key: u8,
         index: usize,
@@ -230,17 +276,15 @@ fn fit_duplex(library: &SampleLibrary, preset: &Preset) -> Result<Vec<Vec<Duplex
         .fold(f64::NEG_INFINITY, f64::max);
     // Two things bound the shift, and the second is the binding one.
     //
-    // The schema's own +6 dB ceiling is the obvious one. The other is the
+    // The schema's own +6 dB ceiling is the obvious one, and since
+    // `DECISIONS.md` 481 re-normalised the field it is no longer the binding
+    // one: the loudest segment this library carries asks for +4.0 dB, so the
+    // measurement fits inside the schema with no shift at all. The other is the
     // *loop*: 88 permanently undamped banks stand in the sympathetic path, and
     // whatever share of the bound they take is taken away from the coupling —
-    // which is the parameter that actually moves the halo. Since a segment
-    // written from these measurements is inaudible in this engine anyway (the
-    // culling finding, `estimate::duplex::DUPLEX_LEVEL_OFFSET_DB`), spending
-    // the halo's headroom on it would be paying for nothing: the first run of
-    // this fit did exactly that and came out 5 dB *worse* at `harmLC3`. So the
-    // level is set to whatever leaves the segments a twentieth of the loop,
-    // and the measured thing — the relative structure, which is what the gate
-    // proves recoverable — is preserved by shifting every row together.
+    // which is the parameter that actually moves the halo. That one is stated
+    // as `DUPLEX_COUPLING_HEADROOM`, and the measured instrument is under it,
+    // so what ships is the measurement and not a policy.
     let ceiling_shift =
         (f64::from(piano_tuner::preset::MAX_DUPLEX_GAIN_DB) - loudest_asked).min(0.0);
     let mut probe = preset.clone();
@@ -253,19 +297,21 @@ fn fit_duplex(library: &SampleLibrary, preset: &Preset) -> Result<Vec<Vec<Duplex
         rows
     };
     let factor = probe.duplex_response_factor();
-    let loop_shift = if factor > DUPLEX_LOOP_BUDGET {
-        ceiling_shift + 20.0 * (f64::from(DUPLEX_LOOP_BUDGET / factor)).log10()
+    let loop_gain = probe.duplex_loop_gain();
+    let budget = f64::from(piano_tuner::preset::MAX_DUPLEX_LOOP_GAIN / DUPLEX_COUPLING_HEADROOM);
+    let shift_db = if f64::from(loop_gain) > budget {
+        ceiling_shift + 20.0 * (budget / f64::from(loop_gain)).log10()
     } else {
         ceiling_shift
     };
-    let shift_db = loop_shift;
     let config = DuplexConfig { shift_db, ..config };
     println!(
         "\nduplex segments, from the release resonances\n  the loudest segment on the instrument \
          asks for {loudest_asked:+.1} dB against the schema's {:+.1} ceiling ({ceiling_shift:+.1} \
-         dB of shift); at that level the segments would take {factor:.2} of the sympathetic loop \
-         and leave the coupling nothing, so the shift is {shift_db:+.1} dB and the levels are \
-         relative",
+         dB of shift); at that level the segments realise {factor:.3} per unit of drive and close \
+         an undamped loop of {loop_gain:.5} against the {budget:.5} that leaves the coupling \
+         {DUPLEX_COUPLING_HEADROOM}x of room, so the shift is {shift_db:+.1} dB and the levels \
+         are relative",
         piano_tuner::preset::MAX_DUPLEX_GAIN_DB
     );
     println!("  key   n   strongest Hz   re strike   T60 s   cents off the nearest partial");

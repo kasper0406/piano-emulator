@@ -506,6 +506,7 @@ fn mic_geometry_sweep() {
             span_m: n[2],
             width: n[3],
             diffuse_coherence: n[4],
+            source_extent_m: 0.0,
             modal: (n.len() == 8).then(|| piano_emulator::preset::ModalBand {
                 lo_hz: n[5],
                 hi_hz: n[6],

@@ -1856,6 +1856,36 @@ impl PianoString {
     }
 }
 
+/// The key's bridge-force scale **per hertz of the resonator's own
+/// fundamental**: what one newton-second of hammer impulse is worth, in the
+/// engine's signal unit, at this note's end of the bridge, before the modal
+/// mass is filled in.
+///
+/// Mode `k`'s force on the bridge for a hammer impulse `J` is
+/// `4 f0 J sin(k pi x_strike)`: the modal mass of the string is `Z / (2 f0)`,
+/// and turning the mode's displacement back into bridge force cancels the wave
+/// impedance exactly. The `f0` in that expression is the ringing *length's*
+/// fundamental — it is the same for every partial of one string because they
+/// all share the wire — so it is the factor a partial of the speaking length
+/// and an undamped segment beyond the bridge do **not** have in common: a rear
+/// duplex is a much shorter piece of the same wire and its modal mass is set by
+/// its own frequency. This is everything except that factor, and it is what
+/// [`crate::duplex`] builds its resonators from (`DECISIONS.md` 481).
+pub fn bridge_excitation_scale_per_hz(params: &StringParams, voicing: &Voicing) -> f32 {
+    voicing.excitation_scale * params.bridge_gain / REFERENCE_F0
+}
+
+/// [`bridge_excitation_scale_per_hz`] with the speaking length's own
+/// fundamental filled in: the scale every partial of this key shares.
+///
+/// Written out in the original association order rather than as
+/// `bridge_excitation_scale_per_hz(..) * f0` because the two differ in the last
+/// bit of an `f32` and this one is on the sounding path — the fingerprint of
+/// `the_sounding_path_is_what_it_was_before_the_mechanism` sees it.
+pub fn bridge_excitation_scale(params: &StringParams, voicing: &Voicing) -> f32 {
+    voicing.excitation_scale * params.bridge_gain * params.f0 / REFERENCE_F0
+}
+
 /// The per-partial input gain `g_k`: the strike comb with its floor, the
 /// contact taper, `notes.partial_gains`, and the gain staging that turns the
 /// per-sample accumulation of the excitation into an integral over the hammer's
@@ -1869,11 +1899,7 @@ fn partial_gain(
     shaping: &PartialShaping<'_>,
     k: usize,
 ) -> f64 {
-    // Mode k's force on the bridge for a hammer impulse J is
-    // `4 f0 J sin(k pi x_strike)`: the modal mass of the string is Z / (2 f0),
-    // and turning the mode's displacement back into bridge force cancels the
-    // wave impedance exactly.
-    let output_scale = voicing.excitation_scale * params.bridge_gain * params.f0 / REFERENCE_F0;
+    let output_scale = bridge_excitation_scale(params, voicing);
     f64::from(
         output_scale
             * comb_magnitude(k, params.strike_position, params.comb_floor)

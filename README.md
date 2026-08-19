@@ -151,14 +151,18 @@ the recording's is a field. It is deliberately **not** a room, whose absence
 317 (a) asks for: a stage built to fix something nothing scores is a stage
 nobody can regress (`DECISIONS.md` 346-350).
 
-`a_known_duplex_comes_back_from_the_engines_own_render_of_it` fails and has
-since the unison became a coupled eigenproblem. It is not a tolerance and it is
-not the estimator — with the modal culling switched off the injected segment
-comes back at −0.05 cents having rung 1.38 s of the 1.4 s it was given — it is
-the duplex bullet below (`DECISIONS.md` 260).
-
-It is left failing rather than skipped because that is the only honest way to
-carry a defect nobody has fixed.
+`a_known_duplex_comes_back_from_the_engines_own_render_of_it` **passes**, and it
+is worth knowing what it took, because it failed from the day the unison became
+a coupled eigenproblem until `DECISIONS.md` 481: a duplex segment is
+deliberately tuned tens of cents off the speaking length's partials, and the
+only drive it was ever given was that speaking length's settled bridge force,
+which has energy nowhere else. It is launched by the hammer's own broadband
+knock across the bridge now — the same wire, continuous over it — and `gain_db`
+is normalised to that knock. The injected segment comes back at **+0.00 cents**
+having rung **1.40 s of the 1.4 s** it was given.
+`the_round_trip_reader_finds_nothing_when_the_duplex_is_silenced` is the
+falsification beside it: the same reader on the same render with the segments
+taken out has to find nothing.
 
 `the_hammer_is_no_louder_against_the_note_than_the_pianos_is` is the newest
 column of that gate and it is **green** after being written red. A listener
@@ -265,7 +269,7 @@ Every number that voices the instrument — the per-note tables (tuning, inharmo
 
 The `f0` table is the tuning, so a stretch-tuned (Railsback) instrument is a preset like any other. The default table is equal temperament.
 
-`presets/salamander-c5.toml` is the first preset *measured* rather than tuned by hand: the tuning, inharmonicity (including the signed fourth-order term the wound bass needs), damping, unison detuning, per-string decay spread, stereo directivity and action noise of the Yamaha C5 recorded as the [Salamander Grand Piano](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html) (Alexander Holm, CC-BY 3.0), estimated from 480 recordings by the tuner. It also carries what only a *second* stage can measure, because it depends on the whole instrument at once rather than on one note: the bridge admittance, the sympathetic coupling, a per-key stereo spread, and 100 duplex segments over 23 keys taken from the library's release-resonance recordings at their measured frequencies — a median of 27 cents off the nearest partial of their own note, which is the scatter that makes a duplex sound like one. Everything the recordings cannot identify — strike position, hammer contact width, felt, soundboard, dampers — is inherited from the default. To reproduce it:
+`presets/salamander-c5.toml` is the first preset *measured* rather than tuned by hand: the tuning, inharmonicity (including the signed fourth-order term the wound bass needs), damping, unison detuning, per-string decay spread, stereo directivity and action noise of the Yamaha C5 recorded as the [Salamander Grand Piano](https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html) (Alexander Holm, CC-BY 3.0), estimated from 480 recordings by the tuner. It also carries what only a *second* stage can measure, because it depends on the whole instrument at once rather than on one note: the bridge admittance, the sympathetic coupling, a per-key stereo spread, and 79 duplex segments over 17 keys taken from the library's release-resonance recordings at their measured frequencies — a median of 36 cents off the nearest partial of their own note, which is the scatter that makes a duplex sound like one. (Only where the note's own partials are far enough apart for the ±25 cent guard to be a *cut* rather than the whole band: below that the release recording's content in the segment band is the rest of the instrument ringing sympathetically, which the resonance bus already models — `DECISIONS.md` 482.) Everything the recordings cannot identify — strike position, hammer contact width, felt, soundboard, dampers — is inherited from the default. To reproduce it:
 
 ```sh
 data/fetch_salamander.sh                       # 707 MiB, checksummed, into the gitignored data/
@@ -349,7 +353,9 @@ segments from the library's release-resonance recordings, the sympathetic
 coupling and bridge admittance by rendering the engine and measuring it against
 `docs/history/TUNING_REPORT.md`'s own numbers, and the per-key stereo spread by inverting
 each key's drift on a line measured on the engine. Run it without `--out` to
-measure and print without writing anything.
+measure and print without writing anything, or with `--only duplex` to re-fit
+the segments alone and leave the two closed-on-the-render fits beside them
+where they are.
 
 ## MIDI replay
 

@@ -223,6 +223,17 @@ fn probe_mics() -> MicVoicing {
         span_m: 1.1,
         width: 1.3,
         diffuse_coherence: 2.0,
+        // **Zero, and the day a preset installs an extent this probe has to
+        // gain a second entry that carries one** (`DECISIONS.md` 468). The key
+        // of a cached render is this fingerprint *plus the preset's own TOML*,
+        // and `source_extent_m` is written into that TOML whenever it is not
+        // zero — so two extents can never share an entry, and no entry written
+        // today can be stale under the new branch, because no preset in the
+        // tree takes it. What the fingerprint would have to cover is a change
+        // to the quadrature itself under a preset that uses it, and there is
+        // none to cover yet. Adding the probe now would re-render the whole
+        // cache to prove that nothing sounds different.
+        source_extent_m: 0.0,
         // The lift is **0.99 and not 2.0** since item 418 railed it at one: a
         // fingerprint probe is a preset, and a preset the schema refuses is not
         // a description of what this engine renders. Changing it misses every

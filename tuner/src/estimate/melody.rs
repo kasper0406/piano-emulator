@@ -450,6 +450,48 @@ pub const METRIC_IS_SPREAD: [bool; METRIC_COUNT] = [
     true, true, true, false, false, true, true, false, false, false,
 ];
 
+/// Which of [`METRICS`] is scored against a **neutral image** — flat, centred,
+/// the same at every pitch — instead of against the image the recording has.
+///
+/// **`DECISIONS.md` 466, and it is a re-bar of three columns' target and of
+/// nothing else: every bar stays where it was measured and every falsification
+/// stays red on the instrument it was built from.** The three are `balance`
+/// (the fundamental's place), `splitting` (the fundamental's place against its
+/// own overtones') and `comb` (the overtones' place across the tune, whose
+/// [`METRIC_IS_SLOPE`] half takes the neutral target and whose
+/// [`METRIC_IS_SWING`] half already had one).
+///
+/// The reason is item 417 and it has been in `CONTEXT.md`'s unscored-dimensions
+/// list since. The recording's own image is **not a piano's**: its C4 puts the
+/// fundamental 16.86 dB into the right capsule against −1.0 at its neighbours
+/// and carries −949 µs of interchannel time with it, its ladder median leans
+/// −5.73 dB, and the whole of that is one session's microphone stand — the
+/// capsule-placement asymmetry item 417 measured, named, and accepted as
+/// *unscored* rather than modelled. A column whose target is that image asks
+/// this engine to reproduce a mic-placement accident, and the two things it can
+/// answer with are a lean nothing in the schema can build (the feasible set
+/// reaches −2.0 dB against the −5.73 asked) or a band edge parked between two
+/// notes of the tune (item 448's four green frontier points, which take D4 to
+/// +23 dB). Both were measured and both were refused.
+///
+/// So the target moves to the one image a listener has no complaint about and
+/// an instrument can actually hold: **flat with pitch, cues in agreement,
+/// neither loudspeaker favoured.** What does *not* move is the bar: it is still
+/// the recording's own take-to-take repeatability of the same statistic, or the
+/// register's own scatter, whichever is larger, times [`ALLOWANCE`] — measured
+/// off the library exactly as before, because the question "how well can this
+/// be resolved" is answered by the recording whatever the target is.
+///
+/// **What this is not**: it is not a widened bar (every bar is unchanged), it is
+/// not a target the engine already meets (on the instrument that ships all three
+/// columns stay red under it), and it does not make the recording's own image
+/// unmeasured — `Column::balance` against the reference is still computed,
+/// still printed on every line of the report, and still what
+/// `the_recordings_own_line_passes_the_balance_column` reads.
+pub const METRIC_IS_NEUTRAL: [bool; METRIC_COUNT] = [
+    false, false, false, false, false, true, true, true, false, false,
+];
+
 /// What `DECISIONS.md` 340's refit moved `[noise.strike]` by, kept here so that
 /// the instrument the `strike` column fails on can be built from the shipped
 /// preset without a hand-edited file — `melody --before-noise` and
@@ -553,11 +595,25 @@ pub const METRIC_IS_SWING: [bool; METRIC_COUNT] = [
 /// a head is about 0.18 m across, so no source anywhere in a room produces more
 /// than about [`HEAD_ITD_US`] microseconds of it, and a pair that hands the ear
 /// more than that is not placing a source at the edge of the image — it is
-/// handing the ear an interval it has no place for. The bar is the larger of
-/// that bound and the recording's own worst note, times [`ALLOWANCE`]: the
-/// recording is a pair of real capsules and if *it* exceeds the head bound the
-/// engine may too, which keeps the verdict a statement about this piano rather
-/// than about a listening theory.
+/// handing the ear an interval it has no place for.
+///
+/// **The bar is that bound, per note, and `DECISIONS.md` 469 is where it stopped
+/// being anything else.** Item 460 wrote it as `max(660, the recording's own
+/// worst note) × 1.25`, on the argument that the recording is a pair of real
+/// capsules and if *it* exceeds the head bound the engine may too. On this
+/// library that argument imports one number: the recording's C4 carries −949 µs,
+/// it is the same note whose fundamental sits 16.86 dB into the right capsule,
+/// and item 417 already decided that note's image is a microphone stand rather
+/// than a piano. Carrying it made the bar **1186 µs** and let 950 µs at two more
+/// notes pass a gate whose entire content is *no source in a room hands the ears
+/// this much*. Item 460 carried that as its own caveat — "a successor tightening
+/// the bound should bar each note against the recording's own note rather than
+/// the line's worst" — and under a neutral target the answer is simpler than
+/// what it asked for: **every note, against 660 µs, with nothing else in it.**
+/// No [`ALLOWANCE`] either: 660 is not measured off this library and has no
+/// measurement noise to allow for. Because the bar is now a constant per note
+/// rather than a statistic of the line, the largest `|value|` over the scored
+/// notes *is* the per-note test.
 pub const METRIC_IS_BOUND: [bool; METRIC_COUNT] = [
     false, false, false, false, false, false, false, false, true, false,
 ];
@@ -576,12 +632,29 @@ pub const METRIC_IS_BOUND: [bool; METRIC_COUNT] = [
 /// minus the engine's — one-sided, because an engine whose two cues agree
 /// *better* than the recording's is not the defect.
 ///
-/// The bar is the larger of two things, times [`ALLOWANCE`]: how far that
-/// correlation moves between two takes of the recording, and the sampling
-/// standard error of a correlation read off as few points as a tune has
-/// pitches, `(1 − r²)/√(n − 1)`. The second term is not decoration — five points
-/// pin a correlation loosely, and a gate on the take floor alone would be a
-/// gate on which five notes the tune happens to hold.
+/// **The verdict is `corr > 0`, and `DECISIONS.md` 469 is why it is not "as
+/// well as the recording's".** Item 460's statistic was `reference_corr −
+/// engine_corr` against the larger of that correlation's take-to-take movement
+/// and its own sampling standard error over five points, `(1 − r²)/√(n − 1)`,
+/// times [`ALLOWANCE`] — 0.193 on this library. Both terms are still computed
+/// and printed ([`Column::agreement`], [`Column::agreement_bar`]) and neither is
+/// the gate any more, because under a neutral target the statistic degenerates:
+/// a neutral image has **no level cue to correlate with**. Over five notes
+/// inside 0.7 dB of ILD and 173 µs of ITD the correlation is a correlation of
+/// two noise vectors, its sampling error is about 0.5 against a bar of 0.193,
+/// and — worse — it is monotone in the very gradient `comb` asks to have
+/// removed (+0.635 at the shipped pan law, +0.414 with a line source, +0.066
+/// with the pair moved out to 0.50 m). Scoring it would be scoring the engine's
+/// rounding and charging `comb` for the privilege.
+///
+/// What survives is the half a listener can be handed wrongly at all: the louder
+/// side and the earlier side must not be **opposite** sides. That is one-sided,
+/// it has no bar on how positive, and it is asserted only where there is a level
+/// cue to disagree with — [`Column::ild_swing`] over
+/// [`Column::ild_floor`], the swing of the line's own `balance` against how far
+/// the recording's own swing moves between two takes. Below that floor the half
+/// is printed and not gated, which is the honest reading of a line whose notes
+/// are all in the middle.
 pub const METRIC_IS_AGREEMENT: [bool; METRIC_COUNT] = [
     false, false, false, false, false, false, false, false, true, false,
 ];
@@ -1724,9 +1797,32 @@ pub struct Column {
     pub agreement: f64,
     /// What that has to come in under: the larger of the take-to-take movement
     /// of the same correlation and its own sampling standard error over as few
-    /// points as the line has pitches, times [`ALLOWANCE`].
+    /// points as the line has pitches, times [`ALLOWANCE`]. **Printed, not
+    /// asserted, since `DECISIONS.md` 469** — see [`Column::agreement_pass`].
     pub agreement_bar: f64,
+    /// Whether the two cues agree at all: `engine_corr > 0`, asserted only when
+    /// [`Column::cue_is_readable`]. `DECISIONS.md` 469.
     pub agreement_pass: bool,
+    /// The engine's own level cue over the line: the swing of `balance` across
+    /// the tune's pitches, in dB. The size of the thing the time cue has to
+    /// agree with.
+    pub ild_swing: f64,
+    /// What that has to clear for the agreement half to be a measurement at
+    /// all: how far the recording's own ILD swing moves between two takes,
+    /// times [`ALLOWANCE`].
+    pub ild_floor: f64,
+    /// `ild_swing > ild_floor`: there is a level cue on this line, so a time
+    /// cue can disagree with it. False is not a pass — it is "this line has no
+    /// level cue", which is what a neutral image *is*, and the verdict then
+    /// comes from the bound alone.
+    pub cue_is_readable: bool,
+    /// The engine's median image against the **recording's**, kept beside
+    /// [`Column::balance`] whenever that one has moved to a neutral target
+    /// (`METRIC_IS_NEUTRAL`). Equal to it on every other column.
+    pub balance_vs_reference: f64,
+    /// Whether [`Column::balance`] is the engine's own image against a neutral
+    /// target rather than its distance from the recording's.
+    pub neutral_target: bool,
 }
 
 impl Column {
@@ -1933,7 +2029,42 @@ pub fn compare(
                     .filter(|e| e.is_finite())
                     .collect()
             };
-            let balance = median(&mut errors);
+            let balance_vs_reference = median(&mut errors);
+            // **And for three columns the target is a neutral image rather than
+            // the recording's own** (`METRIC_IS_NEUTRAL`, `DECISIONS.md` 466):
+            // the same median, taken over the engine's own values instead of
+            // over its distances from a recording whose image is a microphone
+            // stand's. Both are computed and both are printed; which one the
+            // gate asserts is what the flag decides.
+            // **The median of the |values|, and the absolute is load-bearing.**
+            // A signed median asks "does the line lean" and a neutral image is
+            // not only unleaning, it is *uncentred nowhere*: on the instrument
+            // that ships the five notes of the line split by −7.1, −2.0, −0.4,
+            // +22.1 and +17.0 dB, whose signed median is **−0.4** and whose
+            // median magnitude is **7.1**. That is `CONTEXT.md`'s own standing
+            // rule applied to this re-bar — ask it of the order statistic as
+            // well as of the quantity — and it is the difference between a
+            // policy that closes a red column and one that loses a defect.
+            let mut own: Vec<f64> = if on_line {
+                notes
+                    .iter()
+                    .filter(|n| n.scored)
+                    .map(|n| n.engine.abs())
+                    .filter(|e| e.is_finite())
+                    .collect()
+            } else {
+                population_rows
+                    .iter()
+                    .map(|p| p.engine.abs())
+                    .filter(|e| e.is_finite())
+                    .collect()
+            };
+            let balance_own = median(&mut own);
+            let balance = if METRIC_IS_NEUTRAL[m] {
+                balance_own
+            } else {
+                balance_vs_reference
+            };
             let mut takes: Vec<f64> = if on_line {
                 notes
                     .iter()
@@ -2035,10 +2166,21 @@ pub fn compare(
                 slope_of(&line.reference),
                 slope_of(&line.layer),
             );
-            let slope_error = (slope - reference_slope).abs();
+            // **The target is zero where the column is neutral** — a still
+            // image does not tilt with pitch — and the recording's own slope
+            // everywhere else (`METRIC_IS_NEUTRAL`, `DECISIONS.md` 466).
+            let slope_target = if METRIC_IS_NEUTRAL[m] {
+                0.0
+            } else {
+                reference_slope
+            };
+            let slope_error = (slope - slope_target).abs();
             // The recording's own tilt, plus how far that tilt moves between
             // two takes of it. See `METRIC_IS_SLOPE` for why it is both terms
-            // and not either alone.
+            // and not either alone. **Unchanged by the re-bar**: the recording's
+            // own tilt is how still a real take of this piano is, and a bar of
+            // the take floor alone (0.010 dB per semitone) would ask the engine
+            // to be flatter than the instrument the target was read off.
             let slope_bar =
                 (reference_slope.abs() + (reference_slope - layer_slope).abs()) * ALLOWANCE;
             let slope_pass = within(slope_error, slope_bar);
@@ -2057,16 +2199,31 @@ pub fn compare(
                 .into_iter()
                 .filter(|v| v.is_finite())
                 .fold(0.0f64, |a, v| a.max(v.abs()));
-            // The head bound is a statement about **microseconds** and enters
-            // only where the column is one; everywhere else this half is the
-            // recording's own worst note and is printed rather than asserted,
-            // because a bar of 825 dB on `roughness` would be a number nobody
-            // could read.
+            // **The bound is the head's, per note, and the recording no longer
+            // inflates it** (`DECISIONS.md` 469, closing item 460's own carried
+            // caveat). It used to be `max(660, the recording's own worst note)
+            // × 1.25`, which on this library is **1186 µs** — because the
+            // recording's C4 carries −949 of its own, and that note is item
+            // 417's capsule-placement asymmetry read in microseconds instead of
+            // decibels. Holding the engine to it let a 950 µs error at D4 and
+            // E4 pass a gate whose whole content is *no source in a room hands
+            // the ears this much*.
+            //
+            // Two consequences, both deliberate. The bar is
+            // [`HEAD_ITD_US`] **exactly**, with no [`ALLOWANCE`] on it: 660 µs
+            // is not a measurement of this library and carries no measurement
+            // noise to allow for — it is the one number on this board that comes
+            // from outside, and a quarter more of it is a quarter more of
+            // nothing. And because the bar is now a *constant per note* rather
+            // than a statistic of the line, the largest `|value|` over the
+            // scored notes **is** the per-note test: every note is inside it iff
+            // the worst one is. Everywhere else this half stays what it was —
+            // the recording's own worst note, printed and not asserted.
             let bound_bar = if METRIC_IS_BOUND[m] {
-                HEAD_ITD_US.max(reference_bound)
+                HEAD_ITD_US
             } else {
-                reference_bound
-            } * ALLOWANCE;
+                reference_bound * ALLOWANCE
+            };
             let bound_pass = within(bound, bound_bar);
             let (engine_corr, reference_corr, layer_corr) = (
                 corr_of(&line.engine),
@@ -2077,7 +2234,8 @@ pub fn compare(
             // Two terms, the larger governing, exactly as `balance_bar` has
             // two: how far this correlation moves between two takes of the
             // recording, and how loosely as few points as a tune has pitches
-            // pin a correlation at all.
+            // pin a correlation at all. Still computed, still printed; under
+            // item 469 it is no longer the verdict.
             let scored_notes = notes.iter().filter(|n| n.scored).count().max(2) as f64;
             let corr_sigma = if reference_corr.is_finite() {
                 (1.0 - reference_corr * reference_corr) / (scored_notes - 1.0).sqrt()
@@ -2088,7 +2246,45 @@ pub fn compare(
                 .abs()
                 .max(corr_sigma)
                 * ALLOWANCE;
-            let agreement_pass = within(agreement, agreement_bar);
+            // **The verdict is `corr > 0`, and it is conditional on there being
+            // a level cue to correlate with at all** (`DECISIONS.md` 469).
+            //
+            // Under a neutral target the old statistic degenerates, and that is
+            // arithmetic rather than a worry: the whole point of a neutral image
+            // is that the line's own ILD is *flat*, and the correlation of a
+            // flat vector with anything is a correlation of two noise vectors
+            // (measured: over five notes inside 0.7 dB of ILD and 173 µs of
+            // ITD, `corr` moves ±0.5 between neighbouring geometries, against a
+            // bar of 0.193). Scoring "agrees as well as the recording" would
+            // then be scoring the engine's rounding, and — worse — it is
+            // monotone in the very gradient `comb` is asking to have removed.
+            //
+            // What survives is the half a listener can actually be handed
+            // wrongly: the louder side and the earlier side must not be
+            // *opposite* sides. That is `corr(ILD, ITD) > 0`, one-sided, with no
+            // bar on how positive. And it is asserted only where the line's own
+            // level cue clears the floor of what two takes of the recording
+            // resolve — below that there is no level cue, so there is nothing
+            // for a time cue to disagree with, and the half is printed rather
+            // than gated.
+            let swing_at = |rows: &[(u8, [f64; METRIC_COUNT])], index: usize| -> f64 {
+                let mut v: Vec<f64> = scored_values(rows, index)
+                    .into_iter()
+                    .filter(|x| x.is_finite())
+                    .collect();
+                if v.len() < 2 {
+                    return f64::NAN;
+                }
+                v.sort_by(f64::total_cmp);
+                v[v.len() - 1] - v[0]
+            };
+            let ild_swing = swing_at(&line.engine, BALANCE_METRIC);
+            let ild_floor = (swing_at(&line.reference, BALANCE_METRIC)
+                - swing_at(&line.layer, BALANCE_METRIC))
+            .abs()
+                * ALLOWANCE;
+            let cue_is_readable = ild_swing.is_finite() && ild_swing > ild_floor;
+            let agreement_pass = !cue_is_readable || engine_corr > 0.0;
 
             let gated_on_seam = METRIC_IS_SEAM[m];
             let gated_on_slope = METRIC_IS_SLOPE[m];
@@ -2197,6 +2393,11 @@ pub fn compare(
                 agreement,
                 agreement_bar,
                 agreement_pass,
+                ild_swing,
+                ild_floor,
+                cue_is_readable,
+                balance_vs_reference,
+                neutral_target: METRIC_IS_NEUTRAL[m],
             }
         })
         .collect()
@@ -2321,11 +2522,15 @@ pub fn report(columns: &[Column]) -> String {
     for c in columns {
         let _ = writeln!(
             out,
-            "{:<10} {:<4} balance {:+6.2} bar {:5.2} (two takes {:4.2}, x{:.2}){}\
+            "{:<10} {:<4} {} {:+6.2} bar {:5.2} (two takes {:4.2}, x{:.2}){}\
 |  stands out {:5.2} at {:<3} bar {:5.2} (register {:4.2}, worst {:4.2} at {}, take {:4.2} at {}){}\
 |  seam {:5.2} at {:<3} floor {:4.2}",
             c.metric,
             c.window.name(),
+            // `own` where the target is a neutral image and the number is the
+            // engine's own median; `balance` where it is a distance from the
+            // recording's. `DECISIONS.md` 466.
+            if c.neutral_target { "own    " } else { "balance" },
             c.balance,
             c.balance_bar,
             c.balance_bar / ALLOWANCE,
@@ -2353,7 +2558,7 @@ pub fn report(columns: &[Column]) -> String {
             "{:<15}   slope {:+7.3}/sm (rec {:+.3}, layer {:+.3}) err {:6.3} bar {:5.3}{}\
 |  swing {:7.2} (rec {:5.2}) bar {:6.2}{}\
 |  worst {:8.2} at {:<3} bar {:7.2}{}\
-|  corr {:+.3} (rec {:+.3}) short by {:+.3} bar {:.3}{}",
+|  corr {:+.3} (rec {:+.3}) short by {:+.3} bar {:.3} [ild swing {:5.2} floor {:4.2}]{}",
             "",
             c.slope,
             c.reference_slope,
@@ -2373,7 +2578,9 @@ pub fn report(columns: &[Column]) -> String {
             c.reference_corr,
             c.agreement,
             c.agreement_bar,
-            verdict(c.gated_on_agreement, c.agreement_pass),
+            c.ild_swing,
+            c.ild_floor,
+            verdict(c.gated_on_agreement && c.cue_is_readable, c.agreement_pass),
         );
         let _ = writeln!(
             out,
@@ -2781,6 +2988,15 @@ mod tests {
     /// half of them and the other way at the rest. A column carrying only one
     /// of the two verdicts passes an instrument the other convicts, so this
     /// test builds both instruments and asserts that this column fails on each.
+    ///
+    /// **Since `DECISIONS.md` 466 the balance half is a median magnitude
+    /// against a neutral target, and the second instrument is where that shows:
+    /// the jumps still cancel in `Column::balance_vs_reference` — the statistic
+    /// item 446 wrote, still computed and still asserted here — and they no
+    /// longer cancel in the verdict.** The two halves remain two questions
+    /// ("how far from centre is a typical note" against "how far does one note
+    /// stand from this line's own trend"); what changed is that the first one
+    /// stopped being blind to a sign.
     #[test]
     fn the_balance_column_fails_on_a_uniform_lean_and_on_jumps_that_cancel() {
         let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
@@ -2840,12 +3056,25 @@ mod tests {
             "balance",
         );
         assert!(
-            jumps.balance.abs() < 1e-9,
-            "the jumps did not cancel in the median ({:.3}), so the balance \
-             half can see them and this test proves nothing",
+            jumps.balance_vs_reference.abs() < 1e-9,
+            "the jumps did not cancel in the median against the recording \
+             ({:.3}), so the half item 446 wrote can see them and this test \
+             proves nothing",
+            jumps.balance_vs_reference
+        );
+        // **What item 466 changed, in one assertion.** The verdict is now the
+        // median *magnitude* of the engine's own image, and ±6 dB of jumps do
+        // not cancel in it: 6.00 against a bar the fixture puts at 1.25. The
+        // spread half below still convicts them too — the two are not one
+        // verdict written twice, they are "how far from centre is a typical
+        // note" and "how far does one note stand from this line's own trend" —
+        // but the median no longer *passes* an instrument the ear would not.
+        assert!(
+            (jumps.balance - 6.0).abs() < 1e-9,
+            "the jumps cancel in the neutral median too ({:.3})",
             jumps.balance
         );
-        assert!(jumps.balance_pass);
+        assert!(!jumps.balance_pass);
         assert!(jumps.standout > 5.0, "{:.3}", jumps.standout);
         assert!(!jumps.spread_pass, "±6 dB of jumps passed {:.2}", jumps.bar);
         assert!(!jumps.pass);
@@ -3078,8 +3307,19 @@ mod tests {
         let columns = compare(Window::Head, &line, &pop, &salamander_keys());
         let comb = named(&columns, "comb");
         assert!(
-            comb.balance.abs() < 1e-9,
+            comb.balance_vs_reference.abs() < 1e-9,
             "the median error reads {:+.3} on a centred ramp",
+            comb.balance_vs_reference
+        );
+        // **And the median *magnitude* does not cancel it, which is why item
+        // 466's neutral columns take one**: the same five notes read 4.00 by
+        // magnitude where they read 0.00 signed. It is still not this column's
+        // verdict — `comb` takes the slope and the swing — but it is the
+        // difference between a target of zero that can be gamed by alternating
+        // signs and one that cannot.
+        assert!(
+            (comb.balance - 4.0).abs() < 1e-9,
+            "the median magnitude reads {:+.3} on a ±4 dB centred ramp",
             comb.balance
         );
         assert!(

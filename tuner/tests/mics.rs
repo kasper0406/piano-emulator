@@ -48,7 +48,7 @@ use piano_emulator::preset::{MicVoicing, Preset};
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_emulator::types::Event;
 use piano_tuner::estimate::mics::{
-    fit_geometry, interchannel_lag, GeometryConfig, KeyLag, LagConfig, MicGeometry,
+    fit_geometry, interchannel_lag, GeometryConfig, KeyLag, KnownBand, LagConfig, MicGeometry,
     ENGINE_LAG_PER_ITD, SPEED_OF_SOUND,
 };
 use piano_tuner::{Audio, SAMPLE_RATE};
@@ -111,10 +111,23 @@ fn render(preset: &Preset, key: u8) -> Audio {
     .expect("the engine renders stereo")
 }
 
-/// Every key's interchannel delay, measured off the engine's own render the
-/// same way the tool measures it off the recording.
+/// Every key's interchannel delay, measured off the engine's own render.
+///
+/// **Not quite the way the tool measures it off the recording, and the
+/// difference is `DECISIONS.md` 465.** The engine's own mode-controlled band
+/// puts an interchannel phase between the two channels that no path difference
+/// put there, and it is computable from the preset — so a reading of an
+/// *engine* render is handed the band it is known to carry and subtracts it,
+/// where a reading of the recording is handed `None` and never anything else.
 fn delays(preset: &Preset) -> Vec<KeyLag> {
-    let config = LagConfig::default();
+    let config = LagConfig {
+        band: preset.voicing.mics.and_then(|m| m.modal).map(|b| KnownBand {
+            lo_hz: f64::from(b.lo_hz),
+            hi_hz: f64::from(b.hi_hz),
+            lift: f64::from(b.lift),
+        }),
+        ..LagConfig::default()
+    };
     KEYS.par_iter()
         .map(|&key| {
             let audio = render(preset, key);
@@ -277,6 +290,266 @@ fn where_the_bands_lower_edge_starts_biasing_the_reading() {
                 100.0 * errors[1],
                 100.0 * errors[2],
                 100.0 * worst
+            );
+        }
+    }
+}
+
+/// **The phase the estimator subtracts is the phase the engine adds.**
+///
+/// [`KnownBand`] mirrors `soundboard::MIC_MODAL_HIGH_Q`, `MIC_MODAL_LOW_Q` and
+/// the cookbook forms `soundboard::Biquad::butterworth` builds — the same
+/// device `SPEED_OF_SOUND` is, and the same risk: a mirrored constant is a
+/// second copy of a decision, and two copies drift. So it is checked against
+/// the engine rather than argued.
+///
+/// The instrument is a preset with **no geometric side at all** (`width = 0`)
+/// and **no board field** (`board_mix = 0`), where the mic stage reduces to
+/// `L = m(1 + B)`, `R = m(1 − B)` exactly, so the pair's own interchannel phase
+/// *is* the band's. Read off the two rendered channels bin by bin over the
+/// band's own span, it must be what `KnownBand::interchannel_phase` returns.
+#[test]
+fn the_known_bands_response_is_the_engines_own() {
+    use rustfft::{num_complex::Complex32, FftPlanner};
+
+    let mut preset = shipped_preset();
+    let shipped = preset
+        .voicing
+        .mics
+        .expect("the shipped preset carries a microphone pair");
+    let band = shipped.modal.expect("and a band");
+    preset.soundboard.board_mix = 0.0;
+    preset.voicing.mics = Some(MicVoicing {
+        width: 0.0,
+        ..shipped
+    });
+    preset.validate().expect("a legal instrument");
+    // Softly struck, and that is not a detail: the master chain ends in a
+    // `soft_clip`, which is a *nonlinearity*, and two channels that differ by
+    // 8 dB inside the band come out of it with two different curvatures. A
+    // pianissimo note keeps the whole comparison linear.
+    let audio = {
+        let events = [RenderEvent::new(
+            PREROLL_S as f32,
+            Event::NoteOn { key: 40, vel: 20 },
+        )];
+        let (left, right) = render_to_buffer(&preset, &events, (PREROLL_S + RENDER_S) as f32);
+        Audio::new(
+            SAMPLE_RATE,
+            vec![left[PREROLL..].to_vec(), right[PREROLL..].to_vec()],
+        )
+        .expect("the engine renders stereo")
+    };
+    let known = KnownBand {
+        lo_hz: f64::from(band.lo_hz),
+        hi_hz: f64::from(band.hi_hz),
+        lift: f64::from(band.lift),
+    };
+
+    let n = 1 << 16;
+    let mut planner = FftPlanner::<f64>::new();
+    let forward = planner.plan_fft_forward(n);
+    let spectrum = |channel: &[f32]| -> Vec<Complex32> {
+        let mut buffer: Vec<rustfft::num_complex::Complex<f64>> = (0..n)
+            .map(|i| {
+                rustfft::num_complex::Complex::new(
+                    channel.get(i).copied().unwrap_or(0.0) as f64,
+                    0.0,
+                )
+            })
+            .collect();
+        forward.process(&mut buffer);
+        buffer
+            .into_iter()
+            .map(|c| Complex32::new(c.re as f32, c.im as f32))
+            .collect()
+    };
+    let (l, r) = (
+        spectrum(&audio.channels[0]),
+        spectrum(&audio.channels[1]),
+    );
+    // **At the note's own partials, and only there.** A struck string radiates
+    // at a comb of decaying sinusoids; on the skirts between them what the
+    // transform holds is one partial's *leakage* in both channels at once, so
+    // the ratio there is the filter's response at the **partial's** frequency
+    // and not at the bin's, and comparing it against the model at the bin is
+    // comparing two different frequencies. At a local maximum of the mid the
+    // partial is the signal, and the ratio is the response.
+    let mid: Vec<f64> = (0..n / 2)
+        .map(|j| f64::from(((l[j] + r[j]) * 0.5).norm()))
+        .collect();
+    let ceiling = mid.iter().cloned().fold(0.0f64, f64::max);
+    let mut ranked: Vec<(f64, f64, f64)> = (1..n / 2 - 1)
+        .filter_map(|j| {
+            let hz = j as f64 * f64::from(SAMPLE_RATE) / n as f64;
+            if !(60.0..=1_200.0).contains(&hz) {
+                return None;
+            }
+            // A partial: a local maximum of the mid, well over the floor.
+            if !(mid[j] > mid[j - 1] && mid[j] >= mid[j + 1] && mid[j] > 0.02 * ceiling) {
+                return None;
+            }
+            // **Not inside a hair of the notch.** `R = m(1 − B)` and the lift
+            // is 0.99, so where `|1 − B|` is a hundredth the channel's phase is
+            // the argument of a difference of two nearly equal numbers: the
+            // engine computes it in `f32` through a running biquad and the
+            // model in `f64` in closed form, and a coefficient difference of
+            // one part in a million turns into a radian. That is a property of
+            // the construction (item 423 measured the same thing as a −33 dB
+            // one-channel loss) and not of the mirror, so the comparison is
+            // made where the model is not singular.
+            let b = known.response(hz, f64::from(SAMPLE_RATE));
+            let depth = |s: f64| ((1.0 + s * b.0).powi(2) + b.1 * b.1).sqrt();
+            if depth(1.0).min(depth(-1.0)) < 0.15 {
+                return None;
+            }
+            let weight = f64::from(l[j].norm()) * f64::from(r[j].norm());
+            let measured = f64::from((l[j] * r[j].conj()).arg());
+            let modelled = known.interchannel_phase(hz, f64::from(SAMPLE_RATE));
+            let mut error = measured - modelled;
+            while error > std::f64::consts::PI {
+                error -= std::f64::consts::TAU;
+            }
+            while error < -std::f64::consts::PI {
+                error += std::f64::consts::TAU;
+            }
+            Some((weight, hz, error))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked.truncate(24);
+    let (worst, at_hz) = ranked
+        .iter()
+        .fold((0.0f64, 0.0f64), |acc, &(_, hz, e)| {
+            if e.abs() > acc.0 {
+                (e.abs(), hz)
+            } else {
+                acc
+            }
+        });
+    println!(
+        "the band's interchannel phase, engine against model: worst {worst:.4} rad at {at_hz:.1} Hz \
+over the {} loudest partials",
+        ranked.len()
+    );
+    assert!(ranked.len() >= 8, "the probe sounded at {} partials", ranked.len());
+    assert!(
+        worst < 0.05,
+        "the estimator's copy of the band is not the engine's: {worst:.4} rad out at {at_hz:.1} Hz"
+    );
+}
+
+/// **What the band's own group delay was doing to the readback, band by band
+/// and with and without the subtraction of `DECISIONS.md` 465.**
+///
+/// The instrument behind item 465, and the table its doc comment quotes. Five
+/// bands — the one that ships, the one item 462 refused, two of the sweep's own
+/// neighbours and no band at all — times three spacings an octave apart, read
+/// twice each: once on the raw cross-spectrum, once with `arg[(1+B)/(1−B)]`
+/// removed from every bin. What it shows is the whole claim: the raw readings
+/// scatter with the band's *width* and the corrected ones do not move at all.
+///
+/// `#[ignore]`d because it is an instrument and not a gate — thirty conditions
+/// of eleven renders each — and run by name:
+///
+/// ```sh
+/// cargo test --release -p piano-tuner --test mics -- --ignored --nocapture \
+///     what_the_bands_group_delay_was_doing_to_the_readback
+/// ```
+#[test]
+#[ignore]
+fn what_the_bands_group_delay_was_doing_to_the_readback() {
+    let base = shipped_preset();
+    let shipped = base
+        .voicing
+        .mics
+        .expect("the shipped preset carries a microphone pair");
+    let bands: [(&str, Option<piano_emulator::preset::ModalBand>); 6] = [
+        ("170-456 shipped", shipped.modal),
+        (
+            "170-234 refused",
+            Some(piano_emulator::preset::ModalBand {
+                lo_hz: 170.0,
+                hi_hz: 234.0,
+                lift: 0.99,
+            }),
+        ),
+        (
+            "170-280",
+            Some(piano_emulator::preset::ModalBand {
+                lo_hz: 170.0,
+                hi_hz: 280.0,
+                lift: 0.99,
+            }),
+        ),
+        (
+            "170-200 narrowest",
+            Some(piano_emulator::preset::ModalBand {
+                lo_hz: 170.0,
+                hi_hz: 200.0,
+                lift: 0.99,
+            }),
+        ),
+        (
+            "400-800",
+            Some(piano_emulator::preset::ModalBand {
+                lo_hz: 400.0,
+                hi_hz: 800.0,
+                lift: 0.99,
+            }),
+        ),
+        ("none", None),
+    ];
+    println!("| band | corrected | 0.12 m | 0.24 m | 0.48 m |");
+    println!("|---|---|--:|--:|--:|");
+    for (name, modal) in bands {
+        for corrected in [false, true] {
+            let mut cells = Vec::new();
+            for &spacing in &[0.12f32, 0.24, 0.48] {
+                let preset = with_mics(
+                    &base,
+                    MicVoicing {
+                        spacing_m: spacing,
+                        modal,
+                        ..shipped
+                    },
+                );
+                let config = LagConfig {
+                    band: corrected.then(|| modal).flatten().map(|b| KnownBand {
+                        lo_hz: f64::from(b.lo_hz),
+                        hi_hz: f64::from(b.hi_hz),
+                        lift: f64::from(b.lift),
+                    }),
+                    ..LagConfig::default()
+                };
+                let mut lags: Vec<f64> = KEYS
+                    .par_iter()
+                    .map(|&key| {
+                        let audio = render(&preset, key);
+                        interchannel_lag(
+                            &audio.channels[0],
+                            &audio.channels[1],
+                            f64::from(SAMPLE_RATE),
+                            &config,
+                        )
+                        .expect("two channels")
+                        .lag_s
+                    })
+                    .collect();
+                lags.sort_by(f64::total_cmp);
+                let median = lags[lags.len() / 2];
+                cells.push(format!(
+                    "{:+.3} ms ({:+.0} %)",
+                    1e3 * median,
+                    100.0 * (median.abs() * SPEED_OF_SOUND / ENGINE_LAG_PER_ITD
+                        / f64::from(spacing)
+                        - 1.0)
+                ));
+            }
+            println!(
+                "| {name} | {} | {} |",
+                if corrected { "yes" } else { "raw" },
+                cells.join(" | ")
             );
         }
     }

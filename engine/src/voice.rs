@@ -142,6 +142,11 @@ pub struct Voice {
     /// that has no `notes.duplex` table, and then never touched.
     duplex: DuplexBank,
     duplex_out: [f32; BLOCK],
+    /// The hammer's force pulse, as the segments receive it. Held here rather
+    /// than on the stack so that a preset with no segments pays nothing for it:
+    /// it is only ever cleared and written on a block where a struck key
+    /// actually has segments.
+    duplex_burst: [f32; BLOCK],
     hammer: Hammer,
     held: bool,
     damper_current: f32,
@@ -219,8 +224,15 @@ impl Voice {
                 &preset.voicing,
                 preset.partial_shaping(key),
             ),
-            duplex: DuplexBank::new(preset.duplex_modes(key)),
+            duplex: DuplexBank::new(
+                preset.duplex_modes(key),
+                crate::string::bridge_excitation_scale_per_hz(
+                    &preset.string_params(key),
+                    &preset.voicing,
+                ),
+            ),
             duplex_out: [0.0; BLOCK],
+            duplex_burst: [0.0; BLOCK],
             hammer,
             held: false,
             damper_current: 0.0,
@@ -451,6 +463,16 @@ impl Voice {
         }
         out.fill(0.0);
 
+        // Whether the hammer's own force pulse was handed to the segments this
+        // block. It is the broadband knock that crosses the bridge and launches
+        // them (`DECISIONS.md` 481) — the *same* pulse the strings get, read a
+        // second time rather than regenerated, since `Hammer::add_pulse` does
+        // not move the cursor for exactly this reason — so what the segments
+        // hear is the knock the note was made of, contact taper and all. A key
+        // with no segments never fills the buffer, and a preset with no
+        // `notes.duplex` table never touches any of this.
+        let mut struck = false;
+
         if strings_live {
             if self.damper_current != self.damper_target {
                 let delta = self.damper_target - self.damper_current;
@@ -459,6 +481,11 @@ impl Voice {
             }
 
             if self.hammer.is_active() {
+                if duplex_live {
+                    self.duplex_burst.fill(0.0);
+                    self.hammer.add_pulse(&mut self.duplex_burst, 0, 1.0);
+                    struck = true;
+                }
                 // One common, unskewed, unit-share pulse. The per-string shares
                 // and the small timing skew — the hammer is not perfectly square
                 // to the strings — are inside the modes' complex gains, which is
@@ -529,6 +556,7 @@ impl Voice {
             self.duplex.add(
                 out,
                 duplex_driven.then_some(&drive[..]),
+                struck.then_some(&self.duplex_burst[..]),
                 &mut self.duplex_out,
             );
             // They radiate from the key's own end of the bridge, and they are
@@ -767,6 +795,7 @@ impl Voice {
         // gesture: no key and no pedal reaches this.
         self.duplex.reset();
         self.duplex_out.fill(0.0);
+        self.duplex_burst.fill(0.0);
         self.noise.reset();
         self.strike_noise.reset();
         self.noise_out.fill(0.0);

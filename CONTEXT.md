@@ -22,14 +22,17 @@ instrument. MIT, free, open source; App Store via AUv3 planned
   request length renders identically. Strings are coupled eigenmodes solved at
   preset load (2N×2N per partial: unisons × two polarizations, bridge-coupled).
   Mechanism noises, silent press, continuous half-pedal, sympathetic bus with a
-  validated stability contract, virtual-mic stereo pair in mid/side form.
+  validated stability contract, undamped duplex/aliquot segments launched by the
+  hammer's own broadband knock across the bridge (D481-484), virtual-mic stereo
+  pair in mid/side form.
   Live MIDI in (`--midi-in`, CoreMIDI/UMP, u16 velocity, two value-preserving
   lanes: 0–255 = MIDI-1 numbers, 256+ = fine 1/512 steps).
 - `ffi/` — C ABI (`pe_*`, header committed) + boundary resampler, bypassed
   bit-exactly at 48 kHz. The C harness renders sample-exactly what the CLI does.
 - `tuner/` — offline analysis + the preset factory + the boards, all
   subcommands of `piano-tuner`: `track/estimate`, `survey`, `fit --stage`,
-  `sympathetic`, `tail`, `noise`, `mics`, `radiation`, and the boards
+  `sympathetic` (`--only duplex` runs its first stage alone), `tail`, `noise`,
+  `mics`, `radiation`, and the boards
   `bench/compass/melody/chain` (each writes its own document into `renders/`),
   audits `score/brilliance/residuals/ab`. Fit loops are batched (rayon);
   reference renders and the calibration corpus are content-cached under
@@ -90,7 +93,16 @@ instrument. MIT, free, open source; App Store via AUv3 planned
   would move if it were wrong; if the answer is "none", that is the column to
   write first — and ask it of the *order statistic* as well as of the quantity,
   of each **term** of a difference as well as of the difference, and of the
-  *phase* as well as of the level. The shape recurs one level up: D457's level
+  *phase* as well as of the level. **And of the target** (D466): a column can be
+  a perfectly good statistic pointed at the wrong answer. Four image columns
+  were scored against the recording's own image for three milestones while
+  D417's own entry in this list said that image is a microphone stand — so the
+  only ways to pass were a lean the schema cannot build and a band edge parked
+  between two notes of the tune, and both were measured and refused before
+  anyone re-read the target. The order-statistic rule arrives with it and in a
+  new shape: under the neutral target a *signed* median passes a line that
+  alternates ±20 dB (the shipped line's splits read −0.4 signed and +7.1 by
+  magnitude), so a target of zero has to be paired with a magnitude. The shape recurs one level up: D457's level
   fit also moved the whole melodic register 3-6 dB against the compass line,
   which a seam taken against the register's own median cannot see (D457's caveat
   ii); and D459's verdicts are a **slope** and a **swing** because a ramp across
@@ -109,7 +121,16 @@ instrument. MIT, free, open source; App Store via AUv3 planned
 coherence + per-channel columns), `compass` (88 keys vs strung-alike
 neighbors + recordings), `melody` (the Ode line: roughness/wobble/hf/strike
 /channel/**balance**/`splitting`/**`comb`**/**`cue`**/**`loudness`**, head+tail windows,
-recorded-key bars; **every window is
+recorded-key bars; **four of those columns are scored against a NEUTRAL image
+since D466 — flat with pitch, cues in agreement, neither loudspeaker favoured —
+and not against the recording's own image, which is a mic-placement accident
+D417 measured and accepted as unscored (its C4: 16.86 dB into one capsule and
+−949 µs with it). The targets moved; no bar did, every bar is still the
+recording's own take-to-take floor, and all four columns stayed red. `balance`
+and `splitting` are the **median magnitude** of the engine's own image over the
+notes they score — a signed median passes a line that alternates ±20 dB —
+`comb`'s slope is against flat, and `cue`'s bound is the head's own 660 µs at
+**every** note (D469)**; **every window is
 counted from an onset found in the 3 kHz-and-up band** — D452, because below
 that a 1 ms envelope of a bass note is its carrier and the old detector landed
 +73 ms past C4's own hammer on the engine and +42 on the recording;
@@ -122,9 +143,29 @@ core; currently ~30%).
 
 **Known gaps (D463: `#[ignore]`d tests, run with `cargo test -- --ignored`;
 formerly "documented reds" — same inventory, but the default suite now runs
-green and a failing test always means something is actually wrong):**
-1. `a_known_duplex_comes_back_from_the_engines_own_render_of_it` — duplex
-   segments need broadband drive; field semantics to be re-decided (D260).
+green and a failing test always means something is actually wrong). Six remain
+and the numbering below keeps the closed ones' places:**
+1. *(closed, D481-484)* the duplex gap — **the oldest gap this repo had, and
+   it is closed.** `a_known_duplex_comes_back_from_the_engines_own_render_of_it`
+   is green and its `#[ignore]` is off, with
+   `the_round_trip_reader_finds_nothing_when_the_duplex_is_silenced` beside it
+   as the falsification it never had. What D260 got right was that a segment was
+   normalised for a steady drive it never received; what it did not say is which
+   drive it *should* receive, and the answer is the **hammer's own force pulse**
+   — a rear duplex is the same wire, continuous over the bridge, so what
+   launches it is the travelling knock and not the line spectrum the speaking
+   length settles into. Measured (`forensics/duplex_drive`): at a segment 52
+   cents off C5's fifth partial the pulse carries **+48.1 dB** more than the
+   note's own bridge force, and across those 52 cents the pulse falls 0.7 dB
+   where the bridge force falls 29.6. `gain_db` follows, as the same impulse
+   normalisation `string.rs` uses for the note's own partials — *how hard this
+   segment answers the knock, relative to the key's own speaking length* — so
+   level and length are separate measurements at last (under the old convention
+   a segment asked to ring twice as long came out 6 dB quieter).
+   `DUPLEX_LEVEL_OFFSET_DB` **93.7 → 56.68** and the 57 that remain are a
+   stated convention. On one held-and-released C5 the segment comes back at
+   **+0.00 cents** and rings **1.40 s of the 1.4 s** it was given, against
+   −1.84 cents and 0.18 s before.
 2. `each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts` and
    3. `the_engines_stereo_image_is_the_recordings_in_every_band` — **one
    shortfall, read in two units, and it is the price of D418's rail.**
@@ -174,10 +215,12 @@ green and a failing test always means something is actually wrong):**
    metronome; `forensics/beat_census` remains the instrument if a listener ever
    reports a coherent pulse.
 6. `the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do` — the
-   melody board's `balance` column, **new and red on the instrument that
-   shipped** (D446-448). `10 log10(E_L / E_R)` at each note's own
-   fundamental, median over the recorded ladder: **+8.84 dB against a bar of
-   1.94**, where `channel` on the same renders is −0.49 against 0.91 and
+   melody board's `balance` column (D446-448), **re-barred to the neutral
+   target at D466 and still red**: the median *magnitude* of the engine's own
+   image over the recorded ladder is **3.98 dB against a bar of 1.73** (it read
+   +8.61 against the recording's own image before the re-bar, of 1.94). The
+   statistic is `10 log10(E_L / E_R)` at each note's own
+   fundamental, and `channel` on the same renders is −0.54 against 0.94 and
    **green**. The two do not disagree — `channel` is `E_L + E_R`, symmetric
    under swapping the loudspeakers, so it cannot see a lean at all.
    `[voicing.mics.modal]` is `L = m(1 + B)`, `R = m(1 − B)`, so wherever
@@ -192,7 +235,14 @@ green and a failing test always means something is actually wrong):**
    feasible set reaches −2.0 — which is exactly the capsule placement D417
    accepted as unscored.
 7. `the_tunes_overtones_stay_where_the_recordings_do` — the melody board's
-   `comb` column, **new at D459 and red on the instrument that ships**, and the
+   `comb` column, **D459, red on the instrument that ships, its slope re-barred
+   against flat at D466 (2.725 of 0.643, swing 18.52 of 5.15), and now with a
+   named dominant term and a mechanism that reaches both bars** — D467's
+   alternating polarization spread (zeroing it alone: slope 2.725 → 1.107,
+   swing 18.52 → 9.09) and D468's line source (`source_extent_m`, built, fitted
+   by `mics --stage extent`, **not installed**: with the spread zeroed it reads
+   slope 0.191 and swing 2.15, both green, and costs 20 bars of the recorded
+   keys' coherence board). It is the
    fourth unscored dimension of the image. It is the energy-weighted mean of
    `10 log10(E_L/E_R)` over each note's own partials **2-4** — where the note's
    *colour* sits, as against `balance`'s *pitch* — and the reason nothing read
@@ -211,7 +261,13 @@ green and a failing test always means something is actually wrong):**
    recorded keys' gate from 2 red bands to 6 and the phrases' from 4 to 6. The
    one direction left is D448(d)'s per-channel gain.
 8. `the_lines_two_localisation_cues_agree_as_the_recordings_do` — the melody
-   board's `cue` column, **new at D460 and red on the instrument that ships**,
+   board's `cue` column, **D460, red on the instrument that ships and red on
+   both halves since D469's re-bar** (the bound is the head's own 660 µs at
+   every note, with the recording's anomalous C4 no longer inflating it to
+   1186: the engine reads **1102 µs at C4**, where it used to pass by 7 %; and
+   the agreement half is now `corr(ILD, ITD) > 0`, gated on the line's own ILD
+   swing clearing the take floor, and the engine reads **−0.539**, cues on
+   opposite sides). It is
    the fifth unscored dimension of the image, and the **first column on any
    board here that is a function of an interchannel phase**. It is the
    interchannel time at each note's own fundamental, read off the phase of the
@@ -237,12 +293,20 @@ green and a failing test always means something is actually wrong):**
 - Iterate with plain `cargo test` (dev profile is opt-level 3; release-only
   gates self-skip). Full `cargo test --release --workspace` at most twice per
   agent, at phase ends. Since D463 the suite is **green / 0 failed** — the
-  eight known gaps (D260's duplex, D418's two, D446's `balance`, D451's
-  `splitting`, D458's census — a histogram edge rather than a defect — and
+  remaining known gaps (D418's two, D446's `balance`, D451's `splitting` and
   D459/D460's `comb` and `cue`, two new columns rather than two new defects:
   the instrument did not move, the board learned to read two more things about
-  it) are `#[ignore]`d with their decision number in the reason string, and
-  `cargo test -- --ignored` runs the gap inventory on demand. A red test now
+  it — and since D466 the last four carry their **re-barred** distance in the
+  reason string, against the neutral target rather than against the recording's
+  own image; none of them turned green under the re-bar, so none of them lost
+  its attribute) are `#[ignore]`d with their decision number in the reason
+  string, and
+  `cargo test -- --ignored` runs the gap inventory on demand. **Six, not
+  eight**: D458's census was closed by deletion (D464) and D260's duplex by its
+  mechanism landing (D481-484), so
+  `a_known_duplex_comes_back_from_the_engines_own_render_of_it` and its
+  falsification `the_round_trip_reader_finds_nothing_when_the_duplex_is_silenced`
+  now run in the default release suite. A red test now
   always means something is actually wrong. Historical red-suite baselines:
   727/8 at D462, 722/6 at D458, 712/4 at D446.
 - Any command trending past ~5 minutes: parallelize or split the tool; never
@@ -265,52 +329,66 @@ green and a failing test always means something is actually wrong):**
 
 ## Current open items (beyond the reds)
 
-**The stereo image is re-opened by four columns and closed against a wall**
-(D446-448, D451, D459-462). `melody`'s `balance`, `splitting`, `comb` and `cue`
-are all red on the instrument that ships, they are four readings of one pair of
-channels, and **`splitting = balance − comb` exactly**, so the board now carries
-the fundamental's place, the overtones' place, their difference and the
-interchannel *time* — the last of which is the only column on any board here
-that is a function of a phase. **Nothing in `presets/` moved and that is a
-measured refusal, not an omission** (D462). The `mics` fit was run with D451's
-band-or-none corner stage — its first run in a shipped fit — and it **kept the
-band** (absence costs 33.4 bars, and it is the coherence surfaces that pay, not
-the melody board) while walking it to **170.0-234.0 Hz**, below the whole
-melodic register. That point takes `balance` **+8.61 → +0.45** and `cue`'s cue
-agreement **+1.369 → +0.193** (bar 0.193), both green, and it is refused because
-it reads a 0.12 m pair back as **0.090 m, −25 %** against D419's own 20 %
-tolerance. Swept, **the estimator needs the band's upper edge at ≥ 280 Hz and
-the melodic register starts at 261.5**: no band that keeps the tuner honest
-clears the tune from below, one that clears it from above fails by more, and the
-remaining shape — an edge parked between two notes of the tune — is what D448
-already forbids. **Eighteen hertz is the whole wall**, and the right attack on
-it is `estimate::mics`'s delay reading (subtract the lobe's known group delay)
-rather than a wider bound. `Knob::ModalHi`'s floor moves 200 → 280 so no future
-fit can propose it. What is in the tree beside the refusal: the four columns,
-their falsifications (the M17 band must fail `cue`, a pair standing twice as
-wide must fail `comb` — and on that instrument `splitting` goes **green**, which
-is the arithmetic of `balance − comb` and the proof the two are not one column
-written twice), the reference-against-itself control extended to all of them,
-the melody term inside `piano-tuner mics`' closed loop widened from three
-columns to five (D416's lesson: close on what the gates read), the `place`
-stage that lets the geometry move after the band is settled — it moves the
-spacing 0.46 % and the width 0.55 % and nothing else — D448's forty-one-point
-frontier and D462's two geometry frontier tables. Three more things a successor
-should not have to re-derive. **(i) The register and the tune want
-opposite bands.** The column's median is taken over the recorded ladder, D#3 to
-D#5, and the tune is C4 to G4; a *wide* band (170-1000 Hz x0.99) gives the best
-line anyone has measured — swing 8.8 dB against the shipped 13.1, median line
-error +0.78 against +7.8, and the coherence board's 125-250 improves from 0.224
-to 0.175 — while its ladder median is +7.78 and red. **(ii) The reference's own
-per-note image is not a piano's.** Its C4 puts the fundamental **16.86 dB into
-the right capsule** (verified outside the tuner, stable from 4 to 32 heterodyne
-cycles and by plain FFT), against −1.0 at the neighbours, and its median lean
-over the ladder is −5.73 dB where nothing the schema can build passes −2.0.
-**(iii) That same C4 also carries −949 µs of interchannel time** (D460), so
-D417's unscored capsule asymmetry is now visible in two units at once and it is
-the recording's own worst note on both — which is why `cue`'s physics bound is
-1186 µs and not 825, and why the one mechanism the whole image frontier does not
-rule out is still D448(d)'s per-channel gain.
+**The stereo image is scored against a neutral target, the estimator's wall is
+gone, and the one mechanism that reaches the bars is built and not installed**
+(D446-448, D451, D459-472). `melody`'s `balance`, `splitting`, `comb` and `cue`
+are four readings of one pair of channels — the fundamental's place, that place
+against the note's own overtones', the overtones' own ramp across the tune, and
+the interchannel **time**, the only column on any board here that is a function
+of a phase — and `splitting = balance − comb` exactly. All four are red on the
+instrument that ships and **all four are now scored against a NEUTRAL image**
+(D466): flat with pitch, cues in agreement, neither loudspeaker favoured. That
+is a re-bar of three targets plus `cue`'s bound and of **no bar** — every bar is
+still the recording's own take-to-take floor — and it closed nothing: 3.98 of
+1.73, 7.06 of 3.26, slope 2.725 of 0.643 with swing 18.52 of 5.15, corr −0.539
+where the policy asks only for positive and 1102 µs at C4 against the head's own
+660. What it removed is a target that was itself a defect: the recording's image
+is D417's microphone stand (its C4 16.86 dB into one capsule and −949 µs with
+it, its ladder median −5.73 dB), and the control test now asserts **both** halves
+— zero against the recording's own image, and *failing* against neutral by 5.69
+dB and 949 µs, which is the size of the exclusion written down.
+
+**Three things a successor should not have to re-derive.** **(i) The eighteen
+hertz are gone** (D465). The lobe's own interchannel phase is computable from
+the preset, `estimate::mics` subtracts it before the delay vote, and
+`ENGINE_LAG_PER_ITD` — which carried the shipped band's group delay inside it —
+is re-measured at **1.36**: the implied constant moves ±11 % with a band's
+*width* raw and ±4 % corrected, the band D462 refused reads +3/+4/+2 % where it
+read −24/−8/−11, and `Knob::ModalHi`'s floor is back at 200 Hz. **(ii) The
+dominant term of `comb` is `polarization_pan_spread`** (D467): it buys a
+*directivity* with a *position* (C4's two polarizations at pan −0.42 and +0.30,
+the sign alternating with key parity — which is exactly why the tune's colour
+crosses the image between E4 and F4), and zeroing it alone takes the slope
+2.725 → 1.107 and the swing 18.52 → 9.09. The replacement to build is a
+per-polarization interchannel **gain** trim at the mic stage: same drift, ~3 dB
+of image instead of 11. **(iii) The source is not a point** (D468).
+`[voicing.mics].source_extent_m` averages the two capsule pressures over a line
+metres long, absent-means-old, `Mics::taps` only, tabulated at preset load
+(25.4 % of one core against the point source's 25.2, where the naive quadrature
+costs 33.6), mono-exact by construction, no added latency, with its own fit
+stage (`mics --stage extent`). With the spread zeroed it takes **all four image
+columns inside their bars at once** — slope 0.224, swing 1.66, worst 146 µs,
+corr +0.437, balance 1.71, splitting 0.43 — and **it is not installed**, because
+the price is 20 bars on the thirty recorded keys' coherence board, 31 on the six
+phrases, and `channel` −0.54 → −2.49 against 0.94.
+
+**Why that price is not a bad trade but the same budget twice** (D470):
+`L = M(1+T)`, `R = M(1−T)`, mono discipline *is* `L + R = 2M`, so `T` is the
+whole design freedom and `E_L + E_R = 2(1 + |T|²)|M|²` — `channel` and `r@0`
+**are** measurements of the side energy, and every image fix is paid out of
+D418's two known gaps. Three refusals bound it, and the first is a theorem: a
+mono-exact, zero-latency pair with no interchannel phase is a **pan-pot**
+(causality forces it), the linear-phase version costs **21-43 ms** of latency,
+and for a purely imaginary `T` a 660 µs per-note bound caps the reachable
+coherence at `cos(2π f τ)` — **+0.47 at C4** against a target of −0.226. The
+recording's 125-500 Hz coherence and a head-sized ITD bound are arithmetically
+incompatible for any mono-exact **coherent** pair, so the named missing
+mechanism is an **incoherent early board field in 125-500 Hz present from the
+first sample**, and it does not exist. The lift is the one knob `cue` is
+monotone in (D471: 590 µs and corr +0.68 at 0.20 against 1102 and −0.54 at
+0.99) and its rail stays at the inversion boundary because moving it to the
+image bar's 0.25 would make the shipped preset illegal and commit the next fit
+to 15.7 bars nobody has agreed to.
 
 **The rest of the stereo line is closed** (D417-425). The stopgap shipped: the lift is
 railed at the null, `presets/salamander-c5.toml`'s `[voicing.mics]` is refitted
@@ -442,7 +520,10 @@ approached from one side stops early; and the fact that `fit --stage
 partial_gains` re-pins every row it re-fits, so **`level` must be re-run after
 any `fit`**.
 
-Treble sympathetic halo ~21 dB short (board late field); per-key brightness
+Treble sympathetic halo still short and **it is not the duplex** (D484: on the
+between-partial census the segments narrow C6's 29.5 dB shortfall by 0.08 dB and
+C7's by nothing — a census is a floor across a band and six segments are six
+lines, so whatever fills that floor is broadband and per-note); per-key brightness
 tilt not drawn for unsampled keys (needs more recorded keys by policy);
 phantom partials deferred (-60 dB); SL88 MK2 hardware smoke test pending
 hardware.

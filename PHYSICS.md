@@ -18,8 +18,8 @@ totals ~4–6 %. The budget is not the constraint; model risk is.
 > first; this is the index.
 >
 > **Built and in the instrument:** §3 duplex and aliquot segments (`DECISIONS.md`
-> 157–163 — the mechanism ships, its *drive* is wrong and that is the standing
-> red gate of item 260); §4 the bridge admittance on the sympathetic bus
+> 157–163, 481–484 — the mechanism ships, its drive is the hammer's own knock
+> and item 260's gate is closed); §4 the bridge admittance on the sympathetic bus
 > (148, 164, 182–184); §5 the action's noises (108–110, 145); §6 the silent key
 > press, release velocity and the nonlinear damper contact (111); §7 the
 > hammer's contact width in the excitation comb (107). Milestone **A** and
@@ -105,26 +105,29 @@ delete the entry.
 
 ## 3. Duplex scaling and aliquot segments
 
-> **Built (sympathetic milestone), and it does not yet sound.** `engine/src/duplex.rs` is the bank, held by
-> `Voice` rather than by `PianoString` because everything in `string.rs` is damped and these are the one part of the
-> instrument that never is (`DECISIONS.md` 153). Both drives are there — the key's own bridge force and the
-> sympathetic bus — the schema takes measured frequencies as this entry demands, and the estimator recovers 100
-> segments over 23 keys of Salamander at a median +27 cents off the nearest partial, which is the scatter Öberg &
-> Askenfelt describe (161). Three findings qualify it. (a) `gain_db` is normalised to the segment's *steady*
-> response so that level and length are independent measurements, and `ModalBank`'s cull then zeroes the state
-> before that steady response can build: a segment asked to ring 1.4 s rings 0.21 s, and the gap between what the
-> file says and what the render does is 93.7 dB (162). (b) 88 permanently undamped banks close a loop that never
-> dies, so the level the measured table ships at was set by the loop budget rather than by the measurement (163).
-> (c) End to end, the segments of `presets/salamander-c5.toml` contribute **−148.6 dB** relative to the note that
-> drives them (170). The prediction of this entry — treble shimmer surviving a staccato release — is reachable at
-> the schema's ceiling and unreachable at the measured setting, and the fix is the cull or the normalisation, not
-> the estimator. Re-measured in the review pass and unchanged (−84.6 dB during the note, −244 dB at the segment
-> frequencies 0.4 s after the release, −57.7 dB during at the largest boost the validator accepts). The reason is
-> item 157 read the other way round: `gain_db` is normalised to the segment's response *at its own frequency*, and
-> a struck string's bridge force is a sum of decaying sinusoids at its own partials, so a resonator a hertz wide
-> sitting between them is handed almost nothing to answer. Raising the table cannot fix that and the loop bound
-> would refuse it anyway; what the segments need is a drive with energy where they are — the hammer's own broadband
-> knock through the bridge — which is a build, not a number.
+> **Built, and it sounds** (`DECISIONS.md` 481-484, closing 260 — the oldest gap the repo had).
+> `engine/src/duplex.rs` is the bank, held by `Voice` rather than by `PianoString` because everything in `string.rs` is
+> damped and these are the one part of the instrument that never is (153). The three findings that qualified this entry
+> for four milestones are gone and the arithmetic that removed them is worth keeping. (a) The drive was wrong, not the
+> level: a segment was handed the note's *settled bridge force*, a sum of decaying sinusoids at the partials, and a real
+> duplex is deliberately tuned tens of cents off them. Measured on C5 at velocity 90, at the fifth partial +52 cents
+> (Öberg & Askenfelt's own median placement), the hammer's own force pulse carries **+48.1 dB** more drive at the
+> segment's frequency than that bridge force does, and across those 52 cents the pulse falls 0.7 dB where the bridge
+> force falls 29.6 — broadband against a comb (`forensics/duplex_drive`). The segments are now launched by the pulse,
+> which is physically the same wire: a rear duplex is continuous over the bridge and what reaches it is the travelling
+> knock, not the modal steady state. (b) `gain_db` follows from that and is now the **impulse** normalisation
+> `string.rs` already uses for the note's own partials, with the segment's own frequency setting its modal mass — "how
+> hard this segment answers the hammer's knock, relative to the key's own speaking length". Level and length are
+> genuinely separate now: under the old steady-state normalisation a segment asked to ring twice as long came out 6 dB
+> *quieter*. The 93.7 dB gap between what the file said and what the render did is **56.68 dB**, and what is left is a
+> stated convention (a one-sinusoid reference, a release recording's own hold, a window correction) rather than a mode
+> that never builds. (c) The loop bound is unchanged in form and stronger in effect, because the realised resonant
+> response is now a Q. End to end, the segments of `presets/salamander-c5.toml` contribute **−24.99 dB** to the
+> recorded-key ladder against **−85.17** before, and a twelve-note staccato treble phrase is **−34.90 dB** against
+> **−82.33**, with its tail after three seconds at −29.03 against −93.57. The prediction of this entry — treble shimmer
+> surviving a staccato release — is what `renders/duplex/` is. What the segments do **not** buy is the treble
+> sympathetic halo: on the between-partial census they narrow C6's 29.5 dB shortfall by 0.08 dB and C7's by nothing,
+> because a census is a floor across a band and six segments are six lines (484).
 
 **Physics.** The string does not end at the bridge or the agraffe. The front segment (capo bar/agraffe to tuning pin)
 and the rear segment (bridge to hitch pin) are short, undamped, high-pitched strings sharing the bridge with the
@@ -138,9 +141,10 @@ bridge motion and radiated sound, and ran an ABX test ([JASA 131(1) 856,
 perceptible to musicians **and** to naive listeners; the rear duplex perceptible but less pronounced.
 
 **Build.** The cheapest structural addition here. A per-key `ModalBank` of 2–6 modes at 1.5–8 kHz, **never damped**,
-in `PianoString` beside the polarizations. Input: the key's own bridge force (already computed as `group_previous`)
-*plus* the sympathetic bus — that second path is what makes the duplex answer other notes, which is most of what it is
-for. Being permanently undamped it must respect `ModalBank`'s culling or it will keep 88 voices awake, so give it a
+in `PianoString` beside the polarizations. Input: **the hammer's own force pulse**, which is the broadband knock that
+crosses the bridge and the only drive that reaches a segment tuned off the partials (481), *plus* the key's own bridge
+force (already computed as `group_previous`) for the aliquot case, *plus* the sympathetic bus — that last path is what
+makes the duplex answer other notes. Being permanently undamped it must respect `ModalBank`'s culling or it will keep 88 voices awake, so give it a
 shorter T60 (0.5–2 s) than intuition suggests. ≈ 350 resonators ≈ 0.7 %; a day. **Do not tune the segments to nominal
 harmonic ratios** — the same paper found real rear-duplex tuning generally sharp, average and median deviations
 approaching **+50 cents** (single keys at +190 and −100), with spread *within* one trichord averaging ~25 cents and
@@ -150,7 +154,9 @@ occasionally 60. That scatter is the sound: store measured frequencies, not rati
 tracked partials — most clearly in Salamander's release samples (`harmL*`, `harmS*`, `harmV3*`: three velocity tiers
 of "release string resonances", 2–3 s each), which are literally a recording of what still rings when the dampers
 land. Estimation is the existing tracker with the inharmonic seed removed: peak-pick the residual, keep peaks with
-T60 > 0.3 s, write the strongest 2–6 per key.
+T60 > 0.3 s, write the strongest 2–6 per key — and only where the note's own partials are far enough apart for the
+±25 cent guard to be a cut rather than the whole band, which is what keeps the sympathetic halo of the bass keys out of
+a field that is not it (482).
 
 ## 4. Bridge admittance: two-way string ↔ soundboard coupling
 

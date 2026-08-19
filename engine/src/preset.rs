@@ -73,7 +73,7 @@ use crate::hammer::HammerParams;
 use crate::resonance::{BridgeFilter, MAX_BRIDGE_LOOP_GAIN, MAX_COUPLING};
 use crate::soundboard::{
     MAX_MIC_SPACING_M, MAX_PAN_SPREAD, MIC_DIFFUSE_COHERENCE, MIC_HEIGHT_M, MIC_MODAL_HZ,
-    MIC_MODAL_LIFT, MIC_SPAN_M, MIC_WIDTH,
+    MIC_MODAL_LIFT, MIC_SOURCE_EXTENT_M, MIC_SPAN_M, MIC_WIDTH,
 };
 use crate::string::{
     PartialShaping, StringParams, MAX_COMB_FLOOR, MAX_CONTACT_WIDTH, MAX_PARTIAL_GAIN,
@@ -304,6 +304,39 @@ pub struct MicVoicing {
     /// is the only number in the section not fixed by a length.
     #[serde(serialize_with = "short::scalar")]
     pub diffuse_coherence: f32,
+    /// How long the key's own radiating region is along the keyboard axis,
+    /// metres — the line the two capsule pressures are averaged over before the
+    /// pair reads a level and a time off them.
+    ///
+    /// Zero — the default — is the **point source** every preset before
+    /// `DECISIONS.md` 468 describes, bit for bit, and it is the one thing the
+    /// source certainly is not: a key radiates from a string band metres long
+    /// on a board wider still, and the capsules sit centimetres apart a few
+    /// centimetres above it. The difference is not a detail of the near field.
+    /// A point twelve centimetres under a pair has an interchannel *level*
+    /// gradient across the middle of the compass all by itself — `−1.632 dB per
+    /// semitone` over the Ode line with no comb and no band anywhere in the
+    /// signal, against a neutral image's flat — because `1/d_L` and `1/d_R`
+    /// diverge fastest exactly where the source passes under one capsule.
+    /// Averaged over 0.6 m of line the same geometry reads `−0.205`, and the
+    /// compass edges keep their delay (a raised `height` flattens the middle
+    /// only by deleting the edges' image altogether: `h_eff = 5 m` there).
+    ///
+    /// It is `soundboard::Mics::taps` and nothing else — one gain and one delay
+    /// per capsule, precomputed per key at preset load — so it costs the
+    /// real-time path nothing, adds no latency, and cannot touch the mono sum
+    /// at any value, because the whole of it lives in the side.
+    ///
+    /// **Not in either checked-in preset.** The mechanism lands with its
+    /// frontier and the fit stage that moves it; installing it spends the
+    /// coherence budget `DECISIONS.md` 470 measures, and that budget has no
+    /// owner yet.
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        serialize_with = "short::scalar"
+    )]
+    pub source_extent_m: f32,
     /// The band over which the board is **mode-controlled** and the pair sees
     /// its two capsules in opposition.
     ///
@@ -656,10 +689,20 @@ pub struct DuplexMode {
     /// Frequency of the segment, Hz.
     #[serde(serialize_with = "short::scalar")]
     pub hz: f32,
-    /// Level of the segment at its own frequency, in dB relative to the bridge
-    /// force driving it — i.e. the *resonant* gain, normalised so that
-    /// lengthening `t60_s` makes the segment ring longer without making it
-    /// louder. See [`crate::duplex`].
+    /// How hard the segment answers the hammer's knock, in dB **relative to
+    /// this key's own speaking length** — the same per-newton-second impulse
+    /// normalisation `string.rs` builds a partial's gain from, so 0 dB is a
+    /// segment excited exactly as strongly as one of the note's own partials
+    /// would be with a flat strike comb. Lengthening `t60_s` makes the segment
+    /// ring longer without making it louder. See [`crate::duplex`].
+    ///
+    /// **Changed at `DECISIONS.md` 481** from the segment's *steady* response
+    /// at its own frequency, which was the right convention for a resonator
+    /// driven at resonance and the wrong one for a resonator that is struck:
+    /// under it a struck segment's level fell as `1/t60_s` and the whole bank
+    /// sat 94 dB under where a measurement put it. Presets written before 481
+    /// need their rows re-estimated, not rescaled — the two conventions differ
+    /// by a factor that depends on `t60_s`.
     #[serde(serialize_with = "short::scalar")]
     pub gain_db: f32,
     /// How long the segment rings, seconds to −60 dB. Deliberately short:
@@ -1653,6 +1696,12 @@ impl Preset {
                 MIC_DIFFUSE_COHERENCE.0,
                 MIC_DIFFUSE_COHERENCE.1,
             )?;
+            within(
+                "voicing.mics.source_extent_m",
+                m.source_extent_m,
+                MIC_SOURCE_EXTENT_M.0,
+                MIC_SOURCE_EXTENT_M.1,
+            )?;
             if let Some(b) = &m.modal {
                 within(
                     "voicing.mics.modal.lo_hz",
@@ -2269,11 +2318,26 @@ impl Preset {
     /// [`Preset::validate_duplex`]'s bound. Zero when there is no table.
     fn duplex_response(&self) -> f32 {
         let table = &self.notes.duplex;
+        if table.is_empty() {
+            return 0.0;
+        }
+        // Each row's realised response is stated against its own key's bridge
+        // scale (D481), so the scales are gathered once rather than rebuilt
+        // inside the O(rows^2) probe loop below.
+        let scales: Vec<f32> = (0..table.len())
+            .map(|i| {
+                let key = index_to_note(i);
+                crate::string::bridge_excitation_scale_per_hz(
+                    &self.string_params(key),
+                    &self.voicing,
+                )
+            })
+            .collect();
         let mut worst = 0.0f32;
         for probe in table.iter().flatten() {
             let (mut total, mut largest) = (0.0f32, 0.0f32);
-            for row in table {
-                let d = crate::duplex::magnitude(row, probe.hz);
+            for (row, &scale) in table.iter().zip(&scales) {
+                let d = crate::duplex::magnitude(row, scale, probe.hz);
                 total += d;
                 largest = largest.max(d);
             }
@@ -3370,6 +3434,7 @@ mod tests {
             span_m: 1.0,
             width: 1.5,
             diffuse_coherence: 5.0,
+            source_extent_m: 0.0,
             modal: Some(ModalBand {
                 lo_hz: 190.0,
                 hi_hz: 330.0,
@@ -3404,7 +3469,7 @@ mod tests {
 
         // Every one of these would reach the DSP as a divide by zero, a NaN,
         // or a resonator pole outside the unit circle.
-        let breakages: [fn(&mut Preset); 167] = [
+        let breakages: [fn(&mut Preset); 170] = [
             |p: &mut Preset| p.notes.f0_hz[3] = 0.0,
             |p: &mut Preset| p.notes.sigma0[3] = -1.0,
             |p: &mut Preset| p.notes.inharmonicity_b[3] = -1e-4,
@@ -3823,6 +3888,18 @@ mod tests {
                 p.voicing.mics =
                     Some(mics_with(|m| m.diffuse_coherence = MIC_DIFFUSE_COHERENCE.1 + 0.01))
             },
+            // The source's own length (`DECISIONS.md` 468): zero is legal and
+            // is the point source, so only the two ends are refusals.
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| m.source_extent_m = -0.01))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics =
+                    Some(mics_with(|m| m.source_extent_m = MIC_SOURCE_EXTENT_M.1 + 0.01))
+            },
+            |p: &mut Preset| {
+                p.voicing.mics = Some(mics_with(|m| m.source_extent_m = f32::NAN))
+            },
             // The mode-controlled band: two edges that have to be inside the
             // range a plate is mode-controlled over, a lift that has to be a
             // gain, and — the one that matters — a pair that has to be
@@ -4126,6 +4203,7 @@ mod tests {
             span_m: 1.0,
             width: 1.5,
             diffuse_coherence: 5.0,
+            source_extent_m: 0.0,
             modal: Some(ModalBand {
                 lo_hz: 190.0,
                 hi_hz: 330.0,
@@ -4151,6 +4229,7 @@ mod tests {
                 span_m: MIC_SPAN_M.1,
                 width: MIC_WIDTH.1,
                 diffuse_coherence: MIC_DIFFUSE_COHERENCE.1,
+                source_extent_m: MIC_SOURCE_EXTENT_M.1,
                 modal: Some(ModalBand {
                     lo_hz: MIC_MODAL_HZ.0,
                     hi_hz: MIC_MODAL_HZ.1,
@@ -4163,6 +4242,7 @@ mod tests {
                 span_m: MIC_SPAN_M.0,
                 width: MIC_WIDTH.0,
                 diffuse_coherence: MIC_DIFFUSE_COHERENCE.0,
+                source_extent_m: MIC_SOURCE_EXTENT_M.0,
                 modal: None,
             },
         ] {
@@ -4459,7 +4539,14 @@ mod tests {
                     .notes
                     .duplex
                     .iter()
-                    .map(|row| crate::duplex::magnitude(row, probe.hz))
+                    .enumerate()
+                    .map(|(i, row)| {
+                        let scale = crate::string::bridge_excitation_scale_per_hz(
+                            &preset.string_params(index_to_note(i)),
+                            &preset.voicing,
+                        );
+                        crate::duplex::magnitude(row, scale, probe.hz)
+                    })
                     .sum();
                 d
             })
@@ -4485,10 +4572,24 @@ mod tests {
             NUM_KEYS
         ];
         assert!(preset.validate().is_err(), "88 co-tuned segments validated");
-        // The same segments scattered by a quarter of a semitone per key — far
-        // less than the paper's own spread — are perfectly legal.
+        // Scattering them by a quarter of a semitone per key — far less than
+        // the paper's own spread — removes the *crowding*, and since
+        // `DECISIONS.md` 481 that is no longer the whole of the bound: the
+        // realised response is now a **Q**, so 88 segments each ringing the
+        // schema's full three seconds in the top two octaves are 88 permanently
+        // undamped high-Q resonators whether or not they share a frequency, and
+        // the bound says so.
         for (i, row) in preset.notes.duplex.iter_mut().enumerate() {
             row[0].hz = 4_000.0 * 2.0f32.powf(i as f32 * 25.0 / 1200.0);
+        }
+        assert!(
+            preset.validate().is_err(),
+            "the corner of the rails — every key at +6 dB with a 3 s decay — passed"
+        );
+        // At a decay a real segment has (`PHYSICS.md` §3 asks for 0.5-2 s) the
+        // same scattered layout at the schema's loudest is perfectly legal.
+        for row in preset.notes.duplex.iter_mut() {
+            row[0].t60_s = 1.0;
         }
         assert!(
             preset.validate().is_ok(),

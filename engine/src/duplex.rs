@@ -11,32 +11,74 @@
 //! *clearly* perceptible to musicians and to naive listeners alike
 //! (`PHYSICS.md` §3).
 //!
-//! # What drives them
+//! # What drives them (`DECISIONS.md` 481)
 //!
-//! Two things, and the second is most of what the feature is for:
+//! Three things, and the **first** is what makes the feature audible at all:
 //!
+//! * the **strike burst** — the hammer's own force pulse, the broadband knock
+//!   that crosses the bridge into the segment. A rear duplex is the *same wire*
+//!   as the speaking length, continuous over the bridge, so what launches it is
+//!   the travelling pulse the hammer put on the string, not the line spectrum
+//!   the speaking length settles into afterwards. This is the drive the segments
+//!   never had, and its absence is the whole of `DECISIONS.md` 260: a segment
+//!   tuned tens of cents off a partial (which is what a real one *is*) sits
+//!   between the only frequencies the old drive carried and was handed nothing
+//!   to answer;
 //! * the key's **own** bridge force — the mono sum the voice has just rendered,
-//!   after the damper felt has had its say, because that is what the bridge
-//!   actually sees; and
+//!   after the damper felt has had its say. This is the *aliquot* path: a
+//!   segment nominally tuned to a partial of its own note sings along with it,
+//!   which is what aliquot stringing is for;
 //! * the **resonance bus**, through the bridge admittance, which is how a
 //!   segment answers a note played on another key. It is the very same drive
 //!   buffer the voice's strings are given (`resonance::ResonanceBus::drive`,
 //!   `coupling · (B(bus) − own_gain · own_previous)`): there is one bus path in
 //!   the engine and the segments read it rather than building a second one.
 //!
+//! The three are summed at the segment's *force* input, exactly as a string's
+//! excitation buffer sums the hammer's pulse (newtons) and the bus drive (the
+//! engine's signal unit); `resonance.rs` states that conflation and this module
+//! inherits it rather than inventing a second convention.
+//!
 //! Their output joins the voice's mono sum, so it reaches the board at the
 //! key's own pan and — being part of the sum — feeds the bus in its turn.
 //!
-//! # What `gain_db` means, and why it is normalised
+//! # What `gain_db` means (`DECISIONS.md` 481)
 //!
-//! [`DuplexMode::gain_db`] is the segment's response *at its own frequency*, per
-//! unit of the bridge force driving it. The raw input gain of a modal resonator
-//! is not: a mode with a 3 s decay answers a steady drive sixty times harder
-//! than one with a 0.05 s decay at the same input gain, so an un-normalised
-//! `gain_db` would mean "louder" and "longer" at once and a preset could not
-//! move one without the other. Here the two are independent, which is what
-//! makes the field estimable — the tracker's peak levels and its T60s are
-//! separate measurements — and what makes the loop bound below computable.
+//! **A segment is built exactly as a partial of the speaking length is built.**
+//! `string.rs`'s per-partial input gain is
+//! `bridge_excitation_scale · comb · taper · shaping / SAMPLE_RATE` — an
+//! *impulse* normalisation: the `1 / SAMPLE_RATE` turns the per-sample
+//! accumulation of the excitation buffer into an integral over the hammer's
+//! force pulse, so what the gain states is the mode's answer per newton-second
+//! of impulse. [`DuplexMode::gain_db`] is the same thing for a segment, against
+//! the same per-key scale and with the `k`-dependent factors gone, because the
+//! strike comb and the contact taper are properties of where the hammer meets
+//! the *speaking length* and the segment is beyond the bridge (the contact
+//! taper reaches it anyway — it is in the pulse itself, which is what drives
+//! the bank).
+//!
+//! So `gain_db` reads: **how hard this segment answers the hammer's knock,
+//! relative to the key's own speaking length.** 0 dB is a segment excited
+//! exactly as strongly as one of the note's partials would be with a flat comb;
+//! −20 dB is one a tenth as strongly excited. Any constant transmission loss
+//! across the bridge is inside that number, which is why there is no second
+//! coupling constant to fit.
+//!
+//! Level and length stay independent, which is what makes the field estimable —
+//! the tracker's peak levels and its T60s are separate measurements. Under an
+//! impulse normalisation that is immediate: the peak of `g r^n cos(w n)` is `g`
+//! whatever `r` is.
+//!
+//! **What this replaces, and why.** Until `DECISIONS.md` 481 `gain_db` was
+//! normalised to the segment's *steady* response at its own frequency,
+//! `g = 2 G (1 − r)` — a part in ten thousand at a 1.4 s decay. That is the
+//! right convention for a resonator that is driven at resonance and the wrong
+//! one for a resonator that is *struck*: it makes a pulse-driven segment's level
+//! fall as `1/t60`, so a segment asked to ring twice as long came out 6 dB
+//! quieter, and it put the whole bank 94 dB under where a measurement had put
+//! it (`DUPLEX_LEVEL_OFFSET_DB`). The realised *resonant* response is now
+//! `G · scale / (2 sigma)` instead — a derived quantity rather than the field —
+//! and it is what the loop bound below is still computed from.
 //!
 //! # Being undamped is a cost, and the cost is culling
 //!
@@ -74,20 +116,29 @@ pub const MAX_DUPLEX_LOOP_GAIN: f32 = 0.25;
 const T60_DECADES: f32 = 3.0 * std::f32::consts::LN_10;
 
 /// The three coefficients one segment becomes: pole radius, pole angle in
-/// radians per sample, and the input gain that puts the mode's response at its
-/// own frequency on `gain_db`.
+/// radians per sample, and the input gain.
 ///
-/// Driven by `x[n] = sin(w_k n)`, the mode `s[n] = a s[n-1] + g x[n]` settles at
-/// `|s| = g / (2 (1 - r))` — the factor of two is the negative-frequency image,
-/// which contributes nothing at resonance — so the gain that realises a peak
-/// response of `G` is `2 G (1 - r)`. Written with `1 - r` rather than
-/// `sigma / SAMPLE_RATE` so that it is exact at the long decays, where the two
-/// differ by a part in `10^4`.
-fn resonator(mode: &DuplexMode) -> (f32, f32, f32) {
+/// `scale` is the key's [`bridge_excitation_scale_per_hz`], the same factor
+/// `string.rs` builds its own partials' gains from; the segment's own frequency
+/// supplies the modal mass, because a segment is a *short* piece of the same
+/// wire and a shorter string answers one newton-second harder in exact
+/// proportion to its fundamental. See the module header for what that makes
+/// `gain_db` mean.
+///
+/// [`bridge_excitation_scale_per_hz`]: crate::string::bridge_excitation_scale_per_hz
+fn resonator(mode: &DuplexMode, scale: f32) -> (f32, f32, f32) {
     let sigma = T60_DECADES / mode.t60_s;
     let r = (-sigma / SAMPLE_RATE).exp();
     let w = std::f32::consts::TAU * mode.hz / SAMPLE_RATE;
-    (r, w, 2.0 * db_to_amp(mode.gain_db) * (1.0 - r))
+    (r, w, db_to_amp(mode.gain_db) * scale * mode.hz / SAMPLE_RATE)
+}
+
+/// Peak amplitude a segment reaches for one newton-second of impulse crossing
+/// the bridge into it — i.e. `gain_db` in linear units, against the key's own
+/// bridge scale. This is the quantity the round-trip gate reads back.
+pub fn impulse_response(mode: &DuplexMode, scale: f32) -> f32 {
+    let (_, _, g) = resonator(mode, scale);
+    g * SAMPLE_RATE
 }
 
 /// Decay rate of a segment, 1/s, for the callers that build the bank.
@@ -96,18 +147,25 @@ pub fn sigma(mode: &DuplexMode) -> f32 {
 }
 
 /// `|D(f)|` of a whole row of segments as *realised*: how much signal the row
-/// puts out per unit of drive at `hz`.
+/// puts out per unit of **steady** drive at `hz`.
+///
+/// This is the quantity the loop bound is computed from, and since
+/// `DECISIONS.md` 481 it is a *derived* number rather than the schema field: at
+/// a segment's own centre it is `G · scale / (2 sigma)`, so it rises with
+/// `t60_s` exactly as a resonator's Q does. That is what makes the bound below
+/// mean something — a preset that asks for a very long segment is asking for a
+/// sharper resonance, and the validator sees it.
 ///
 /// The modes' magnitudes are summed rather than their complex responses. That
 /// is the conservative reading and it is the right one here, because this is
 /// what the stability bound is computed from and the phases of two segments
 /// that happen to land on one frequency are not something a preset controls.
-pub fn magnitude(modes: &[DuplexMode], hz: f32) -> f32 {
+pub fn magnitude(modes: &[DuplexMode], scale: f32, hz: f32) -> f32 {
     let w = std::f32::consts::TAU * hz / SAMPLE_RATE;
     modes
         .iter()
         .map(|mode| {
-            let (r, wk, g) = resonator(mode);
+            let (r, wk, g) = resonator(mode, scale);
             // |g / (1 - a e^{-jw})| with a = r e^{j w_k}, halved for the image.
             let delta = wk - w;
             let (re, im) = (1.0 - r * delta.cos(), -r * delta.sin());
@@ -131,10 +189,15 @@ pub struct DuplexBank {
 }
 
 impl DuplexBank {
-    pub fn new(modes: &[DuplexMode]) -> DuplexBank {
+    /// `scale` is the key's [`bridge_excitation_scale_per_hz`]: the segments
+    /// share the bridge and the wire with the speaking length, and `gain_db` is
+    /// stated against exactly that.
+    ///
+    /// [`bridge_excitation_scale_per_hz`]: crate::string::bridge_excitation_scale_per_hz
+    pub fn new(modes: &[DuplexMode], scale: f32) -> DuplexBank {
         let mut bank = ModalBank::with_capacity(modes.len());
         for mode in modes {
-            let (_, _, g) = resonator(mode);
+            let (_, _, g) = resonator(mode, scale);
             bank.push_mode(mode.hz, sigma(mode), g);
         }
         DuplexBank {
@@ -172,28 +235,40 @@ impl DuplexBank {
         self.bank.mode_freq(k)
     }
 
-    /// Drives the segments with the key's own bridge force `own` and, when the
-    /// bus has something to give, the resonance drive it has already computed;
-    /// **adds** what they radiate into `out`.
+    /// Drives the segments with the hammer's broadband strike `burst`, the
+    /// key's own bridge force `own`, and — when the bus has something to give —
+    /// the resonance drive the voice has already computed; **adds** what they
+    /// radiate into `out`.
     ///
     /// `own` is read before anything is added to `out`, so a segment is never
     /// driven by its own output within a block. Across blocks the only path
     /// back is through the bus, where the voice's own contribution is
-    /// subtracted — see the loop bound in `Preset::validate_duplex`.
-    pub fn add(&mut self, own: &[f32], drive: Option<&[f32]>, out: &mut [f32]) {
+    /// subtracted — see the loop bound in `Preset::validate_duplex`. The burst
+    /// is feed-forward from the hammer and closes no loop at all.
+    pub fn add(
+        &mut self,
+        own: &[f32],
+        drive: Option<&[f32]>,
+        burst: Option<&[f32]>,
+        out: &mut [f32],
+    ) {
         debug_assert_eq!(own.len(), BLOCK);
         debug_assert_eq!(out.len(), BLOCK);
         if self.bank.is_empty() {
             return;
         }
-        match drive {
-            Some(drive) => {
-                debug_assert_eq!(drive.len(), BLOCK);
-                for ((i, &o), &d) in self.input.iter_mut().zip(own).zip(drive) {
-                    *i = o + d;
-                }
+        self.input.copy_from_slice(own);
+        if let Some(drive) = drive {
+            debug_assert_eq!(drive.len(), BLOCK);
+            for (i, &d) in self.input.iter_mut().zip(drive) {
+                *i += d;
             }
-            None => self.input.copy_from_slice(own),
+        }
+        if let Some(burst) = burst {
+            debug_assert_eq!(burst.len(), BLOCK);
+            for (i, &b) in self.input.iter_mut().zip(burst) {
+                *i += b;
+            }
         }
         self.bank.process_add(&self.input, out);
     }
@@ -220,11 +295,31 @@ mod tests {
         v.iter().fold(0.0f32, |m, &x| m.max(x.abs()))
     }
 
+    /// Strikes a bank with one newton-second of impulse — a single sample of
+    /// `SAMPLE_RATE`, which integrates to one — and returns the peak of the
+    /// response over `seconds`. This is the drive `gain_db` is stated against.
+    fn struck(modes: &[DuplexMode], scale: f32, seconds: f32) -> f32 {
+        let mut bank = DuplexBank::new(modes, scale);
+        let mut out = [0.0f32; BLOCK];
+        let mut burst = [0.0f32; BLOCK];
+        burst[0] = SAMPLE_RATE;
+        bank.add(&[0.0; BLOCK], None, Some(&burst), &mut out);
+        let mut best = peak(&out);
+        let silence = [0.0f32; BLOCK];
+        for _ in 0..(seconds * SAMPLE_RATE / BLOCK as f32) as usize {
+            out.fill(0.0);
+            bank.add(&silence, None, None, &mut out);
+            best = best.max(peak(&out));
+        }
+        best
+    }
+
     /// Drives a bank with a unit sinusoid at `hz` for `seconds` and returns the
     /// peak of the last block — the steady-state response, once the resonators
-    /// have filled.
-    fn steady_state(modes: &[DuplexMode], hz: f32, seconds: f32) -> f32 {
-        let mut bank = DuplexBank::new(modes);
+    /// have filled. Since `DECISIONS.md` 481 this is a *derived* quantity (the
+    /// segment's Q), not the field, and it is what the loop bound reads.
+    fn steady_state(modes: &[DuplexMode], scale: f32, hz: f32, seconds: f32) -> f32 {
+        let mut bank = DuplexBank::new(modes, scale);
         let mut n = 0usize;
         let mut out = [0.0f32; BLOCK];
         let blocks = (seconds * SAMPLE_RATE / BLOCK as f32) as usize;
@@ -235,35 +330,41 @@ mod tests {
                 n += 1;
             }
             out.fill(0.0);
-            bank.add(&own, None, &mut out);
+            bank.add(&own, None, None, &mut out);
         }
         peak(&out)
     }
 
-    /// The contract `gain_db` states: the response at the segment's own
-    /// frequency, per unit of bridge force, and nothing else.
+    /// The contract `gain_db` states since `DECISIONS.md` 481: the segment's
+    /// answer to the hammer's knock, per newton-second across the bridge,
+    /// against the key's own bridge scale and the segment's own modal mass —
+    /// and nothing else.
     #[test]
-    fn a_segment_answers_its_own_frequency_at_the_gain_the_preset_asked_for() {
+    fn a_segment_answers_the_hammers_knock_at_the_gain_the_preset_asked_for() {
         for gain_db in [-40.0f32, -20.0, -6.0, 0.0, 6.0] {
             for hz in [220.0f32, 1_500.0, 4_400.0, 12_000.0] {
-                let got = amp_to_db(steady_state(&[mode(hz, gain_db, 1.0)], hz, 8.0));
-                assert!(
-                    (got - gain_db).abs() < 0.5,
-                    "a {gain_db} dB segment at {hz} Hz answered at {got:.2} dB"
-                );
+                for scale in [0.5f32, 1.0, 2.0] {
+                    let got =
+                        amp_to_db(struck(&[mode(hz, gain_db, 1.0)], scale, 0.05) / (scale * hz));
+                    assert!(
+                        (got - gain_db).abs() < 0.5,
+                        "a {gain_db} dB segment at {hz} Hz on a {scale} bridge answered at \
+                         {got:.2} dB"
+                    );
+                }
             }
         }
     }
 
-    /// ... and it is that gain whatever the decay, which is the whole reason
-    /// the input gain is normalised: level and length are separate parameters
-    /// because they are separate measurements.
+    /// ... and it is that gain whatever the decay. This is the property the old
+    /// normalisation did not have and the reason the field was re-decided: under
+    /// `g = 2 G (1 - r)` a struck segment's level fell as `1 / t60`, so a
+    /// segment asked to ring twice as long came out 6 dB quieter.
     #[test]
-    fn the_level_of_a_segment_does_not_depend_on_how_long_it_rings() {
+    fn the_level_of_a_struck_segment_does_not_depend_on_how_long_it_rings() {
         let hz = 3_000.0;
         for t60 in [0.05f32, 0.2, 1.0, 3.0] {
-            // Long enough to fill even the slowest resonator.
-            let got = amp_to_db(steady_state(&[mode(hz, -12.0, t60)], hz, 8.0 + 4.0 * t60));
+            let got = amp_to_db(struck(&[mode(hz, -12.0, t60)], 1.0, 0.05) / hz);
             assert!(
                 (got + 12.0).abs() < 0.5,
                 "a T60 of {t60} s moved the level to {got:.2} dB"
@@ -271,29 +372,24 @@ mod tests {
         }
     }
 
-    /// The segments ring for as long as the preset says, measured on the bank
-    /// the engine builds rather than on the coefficient it was built from.
+    /// The realised *resonant* response — the derived quantity, which is what
+    /// the loop bound is computed from — is the gain over the mode's own
+    /// bandwidth, so it rises with `t60_s` as a Q does.
     #[test]
-    fn a_segment_rings_for_the_t60_it_was_given() {
-        for t60 in [0.2f32, 1.0] {
-            let mut bank = DuplexBank::new(&[mode(2_000.0, 0.0, t60)]);
-            let mut own = [0.0f32; BLOCK];
-            own[0] = 1.0;
-            let mut out = [0.0f32; BLOCK];
-            bank.add(&own, None, &mut out);
-            let first = peak(&out);
-            // Half the T60 is 30 dB of decay, comfortably clear of the floor.
-            let blocks = (0.5 * t60 * SAMPLE_RATE / BLOCK as f32) as usize;
-            let silence = [0.0f32; BLOCK];
-            for _ in 0..blocks {
-                out.fill(0.0);
-                bank.add(&silence, None, &mut out);
-            }
-            let after = peak(&out);
-            let measured = amp_to_db(after / first);
+    fn the_resonant_response_is_the_gain_over_the_segments_own_bandwidth() {
+        let hz = 2_500.0;
+        for t60 in [0.2f32, 1.0, 3.0] {
+            let one = [mode(hz, 0.0, t60)];
+            let predicted = hz / (2.0 * sigma(&one[0]));
             assert!(
-                (measured + 30.0).abs() < 2.0,
-                "a T60 of {t60} s lost {measured:.1} dB in half of it, expected -30"
+                (magnitude(&one, 1.0, hz) / predicted - 1.0).abs() < 0.01,
+                "t60 {t60}: magnitude {} against the predicted {predicted}",
+                magnitude(&one, 1.0, hz)
+            );
+            let rendered = steady_state(&one, 1.0, hz, 6.0 + 4.0 * t60);
+            assert!(
+                (rendered / predicted - 1.0).abs() < 0.05,
+                "t60 {t60}: the bank realises {rendered} where the bound reads {predicted}"
             );
         }
     }
@@ -306,14 +402,14 @@ mod tests {
     fn the_measured_response_agrees_with_the_bank_and_sees_stacked_segments() {
         let hz = 2_500.0;
         let one = [mode(hz, 0.0, 1.0)];
-        assert!((magnitude(&one, hz) - 1.0).abs() < 1.0e-3);
-        assert!((steady_state(&one, hz, 8.0) - magnitude(&one, hz)).abs() < 0.05);
+        let single = magnitude(&one, 1.0, hz);
+        assert!((steady_state(&one, 1.0, hz, 8.0) / single - 1.0).abs() < 0.05);
 
         // Six segments on one frequency answer six times as hard, which is the
         // shape of the loop the validator refuses.
         let stacked: Vec<DuplexMode> = (0..6).map(|_| mode(hz, 0.0, 1.0)).collect();
-        assert!((magnitude(&stacked, hz) - 6.0).abs() < 0.01);
-        assert!((steady_state(&stacked, hz, 8.0) - 6.0).abs() < 0.3);
+        assert!((magnitude(&stacked, 1.0, hz) / (6.0 * single) - 1.0).abs() < 0.01);
+        assert!((steady_state(&stacked, 1.0, hz, 8.0) / (6.0 * single) - 1.0).abs() < 0.05);
 
         // Segments a real trichord's worth of scatter apart — 25 cents at
         // 2.5 kHz is 36 Hz, against a resonator whose bandwidth is under a
@@ -322,23 +418,122 @@ mod tests {
             .map(|i| mode(hz * 2.0f32.powf(i as f32 * 25.0 / 1200.0), 0.0, 1.0))
             .collect();
         assert!(
-            magnitude(&scattered, hz) < 1.1,
+            magnitude(&scattered, 1.0, hz) < 1.1 * single,
             "scattered segments crowded: {}",
-            magnitude(&scattered, hz)
+            magnitude(&scattered, 1.0, hz)
         );
+    }
+
+    /// The finding `DECISIONS.md` 260 named, as a unit test on the mechanism.
+    ///
+    /// What separates the two drives is **bandwidth**, not level, so that is
+    /// what this reads: the same segment is tuned onto a partial and then walked
+    /// off it, and each drive is scored by how much it loses on the way. A knock
+    /// loses almost nothing — it has energy everywhere — while the note's own
+    /// bridge force falls off a cliff, which is why a real duplex, deliberately
+    /// tuned tens of cents sharp, was handed nothing by the old path.
+    ///
+    /// The absolute gap between the two at the levels the engine actually runs
+    /// them at is +48 dB at 52 cents on C5, and it is measured outside the unit
+    /// tests, by `forensics/duplex_drive`, because it needs a hammer and a
+    /// string.
+    #[test]
+    fn only_the_strike_burst_reaches_a_segment_tuned_off_the_notes_partials() {
+        const PARTIAL_HZ: f32 = 2_616.0;
+        let at = |cents: f32| PARTIAL_HZ * (cents / 1200.0).exp2();
+
+        // The knock: a millisecond of contact, the hammer's own.
+        let contact = (0.001 * SAMPLE_RATE) as usize;
+        let mut burst = [0.0f32; BLOCK];
+        for (i, b) in burst.iter_mut().take(contact).enumerate() {
+            *b = (std::f32::consts::PI * i as f32 / contact as f32).sin();
+        }
+        let knock = |hz: f32| -> f32 {
+            let mut bank = DuplexBank::new(&[mode(hz, 0.0, 1.4)], 1.0);
+            let mut out = [0.0f32; BLOCK];
+            bank.add(&[0.0; BLOCK], None, Some(&burst), &mut out);
+            let mut best = peak(&out);
+            let silence = [0.0f32; BLOCK];
+            for _ in 0..(0.05 * SAMPLE_RATE / BLOCK as f32) as usize {
+                out.fill(0.0);
+                bank.add(&silence, None, None, &mut out);
+                best = best.max(peak(&out));
+            }
+            best
+        };
+
+        // The old drive: the note's own bridge force, one decaying partial.
+        let line = |hz: f32| -> f32 {
+            let mut bank = DuplexBank::new(&[mode(hz, 0.0, 1.4)], 1.0);
+            let mut out = [0.0f32; BLOCK];
+            let mut best = 0.0f32;
+            let mut n = 0usize;
+            for _ in 0..(2.0 * SAMPLE_RATE / BLOCK as f32) as usize {
+                let mut own = [0.0f32; BLOCK];
+                for x in own.iter_mut() {
+                    let t = n as f32 / SAMPLE_RATE;
+                    *x = (-3.0 * t).exp()
+                        * (std::f32::consts::TAU * PARTIAL_HZ * t).sin();
+                    n += 1;
+                }
+                out.fill(0.0);
+                bank.add(&own, None, None, &mut out);
+                best = best.max(peak(&out));
+            }
+            best
+        };
+
+        let knock_loss = amp_to_db(knock(at(52.0)) / knock(at(0.0)));
+        let line_loss = amp_to_db(line(at(52.0)) / line(at(0.0)));
+        assert!(
+            knock_loss > -1.0,
+            "the knock lost {knock_loss:.1} dB over 52 cents — it is not broadband"
+        );
+        assert!(
+            line_loss < -20.0,
+            "the note\'s own partial reached 52 cents off itself down only \
+             {line_loss:.1} dB, which is not the drive DECISIONS.md 157 measured"
+        );
+    }
+
+    /// The segments ring for as long as the preset says, measured on the bank
+    /// the engine builds rather than on the coefficient it was built from.
+    #[test]
+    fn a_segment_rings_for_the_t60_it_was_given() {
+        for t60 in [0.2f32, 1.0] {
+            let mut bank = DuplexBank::new(&[mode(2_000.0, 0.0, t60)], 1.0);
+            let mut burst = [0.0f32; BLOCK];
+            burst[0] = SAMPLE_RATE;
+            let mut out = [0.0f32; BLOCK];
+            bank.add(&[0.0; BLOCK], None, Some(&burst), &mut out);
+            let first = peak(&out);
+            // Half the T60 is 30 dB of decay, comfortably clear of the floor.
+            let blocks = (0.5 * t60 * SAMPLE_RATE / BLOCK as f32) as usize;
+            let silence = [0.0f32; BLOCK];
+            for _ in 0..blocks {
+                out.fill(0.0);
+                bank.add(&silence, None, None, &mut out);
+            }
+            let after = peak(&out);
+            let measured = amp_to_db(after / first);
+            assert!(
+                (measured + 30.0).abs() < 2.0,
+                "a T60 of {t60} s lost {measured:.1} dB in half of it, expected -30"
+            );
+        }
     }
 
     /// A key with no segments is the case every preset shipped today is in: the
     /// bank must be empty, idle, and add exactly nothing.
     #[test]
     fn a_key_without_segments_costs_nothing_and_stays_idle() {
-        let mut bank = DuplexBank::new(&[]);
+        let mut bank = DuplexBank::new(&[], 1.0);
         assert!(bank.is_empty());
         assert!(bank.is_idle());
         let mut out = [7.0f32; BLOCK];
-        bank.add(&[1.0; BLOCK], Some(&[1.0; BLOCK]), &mut out);
+        bank.add(&[1.0; BLOCK], Some(&[1.0; BLOCK]), Some(&[1.0; BLOCK]), &mut out);
         assert!(out.iter().all(|&x| x == 7.0), "an empty bank wrote samples");
-        assert_eq!(magnitude(&[], 1_000.0), 0.0);
+        assert_eq!(magnitude(&[], 1.0, 1_000.0), 0.0);
     }
 
     /// The bus path is a second input, not a second bank: driving with the bus
@@ -347,12 +542,12 @@ mod tests {
     #[test]
     fn the_bus_drive_reaches_the_segments_on_its_own() {
         let hz = 3_300.0;
-        let mut bank = DuplexBank::new(&[mode(hz, 0.0, 1.0)]);
+        let mut bank = DuplexBank::new(&[mode(hz, 0.0, 1.0)], 1.0);
         let mut out = [0.0f32; BLOCK];
         let mut drive = [0.0f32; BLOCK];
         drive[0] = 1.0;
         // Nothing from this key at all: the string is silent and damped.
-        bank.add(&[0.0; BLOCK], Some(&drive), &mut out);
+        bank.add(&[0.0; BLOCK], Some(&drive), None, &mut out);
         assert!(peak(&out) > 0.0, "the bus drive did not reach the segments");
         assert!(!bank.is_idle());
         bank.reset();
@@ -363,21 +558,21 @@ mod tests {
     /// what lets its voice go back to sleep. Nothing else can stop it.
     #[test]
     fn a_segment_left_alone_decays_to_exact_silence() {
-        let mut bank = DuplexBank::new(&[mode(4_000.0, 0.0, MIN_DUPLEX_T60_S)]);
-        let mut own = [0.0f32; BLOCK];
-        own[0] = 1.0;
+        let mut bank = DuplexBank::new(&[mode(4_000.0, 0.0, MIN_DUPLEX_T60_S)], 1.0);
+        let mut burst = [0.0f32; BLOCK];
+        burst[0] = SAMPLE_RATE;
         let mut out = [0.0f32; BLOCK];
-        bank.add(&own, None, &mut out);
+        bank.add(&[0.0; BLOCK], None, Some(&burst), &mut out);
         assert!(!bank.is_idle());
         let silence = [0.0f32; BLOCK];
         // Ten T60s: past the culling floor for any level this bank can reach.
         for _ in 0..(10.0 * MIN_DUPLEX_T60_S * SAMPLE_RATE / BLOCK as f32) as usize {
             out.fill(0.0);
-            bank.add(&silence, None, &mut out);
+            bank.add(&silence, None, None, &mut out);
         }
         assert!(bank.is_idle(), "an undamped segment never went quiet");
         out.fill(0.0);
-        bank.add(&silence, None, &mut out);
+        bank.add(&silence, None, None, &mut out);
         assert!(
             out.iter().all(|&x| x == 0.0),
             "a culled segment still wrote"

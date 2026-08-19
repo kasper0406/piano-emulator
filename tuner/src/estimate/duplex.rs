@@ -38,16 +38,26 @@
 //!
 //! # What the numbers mean
 //!
-//! `hz` and `t60_s` are measured directly. `gain_db` is not: the schema defines
-//! it as the segment's response at its own frequency *per unit of the bridge
-//! force driving it*, and a recording does not carry the bridge force. What it
-//! carries is a level relative to a strike of the same key, which is the same
-//! quantity the whole `harm*` table in `docs/history/TUNING_REPORT.md` §5 is quoted in. The
-//! path from a segment's `gain_db` to that ratio is linear — one gain in a
-//! chain of gains — so it is one constant, [`DUPLEX_LEVEL_OFFSET_DB`], measured
-//! on the engine and pinned by `tuner/tests/calibration.rs` rather than
-//! asserted here. This is the same discipline
-//! [`directivity`](crate::estimate::directivity) uses for the pan spread.
+//! `hz` and `t60_s` are measured directly. `gain_db` is not: since
+//! `DECISIONS.md` 481 the schema defines it as how hard the segment answers the
+//! hammer's knock relative to the key's own speaking length, and a recording
+//! does not carry either. What it carries is a level relative to a strike of the
+//! same key, which is the same quantity the whole `harm*` table in
+//! `docs/history/TUNING_REPORT.md` §5 is quoted in. The path from a segment's
+//! `gain_db` to that ratio is linear — one gain in a chain of gains — so it is
+//! one constant, [`DUPLEX_LEVEL_OFFSET_DB`], measured on the engine and pinned
+//! by `tuner/tests/calibration.rs` rather than asserted here. This is the same
+//! discipline [`directivity`](crate::estimate::directivity) uses for the pan
+//! spread.
+//!
+//! # Where a segment can be read at all
+//!
+//! Two cuts, and the second is `DECISIONS.md` 482's. `min_hz` keeps the *other*
+//! speaking lengths out — a release recording holds the whole instrument
+//! ringing sympathetically, and the resonance bus already models that.
+//! [`DuplexConfig::min_spacing_guards`] keeps the *note's own* comb out, which
+//! `guard_cents` cannot do on its own wherever the note's partials are closer
+//! together than the guard is wide.
 
 use crate::error::{Error, Result};
 use crate::preset::{
@@ -61,26 +71,37 @@ use crate::tracker::hann_decay_gain;
 /// measured against the loudest sinusoid of a velocity-90 strike of the same
 /// key ([`strongest_peak`]).
 ///
-/// **Measured on the engine, not derived**: over 18 dB of `gain_db` the level a
-/// render shows moves one dB for one dB to within 0.05, so the whole inversion
+/// **Measured on the engine, not derived**: over 12 dB of `gain_db` the level a
+/// render shows moves one dB for one dB to within 0.07, so the whole inversion
 /// is this one subtraction. `tuner/tests/calibration.rs` re-measures it; if the
 /// engine's gain staging moves, that test fails rather than this constant
 /// quietly becoming wrong.
 ///
-/// # Why it is 94 dB and not 30
+/// # What the 57 dB is, and what it is not
 ///
-/// The number is a finding, not a unit conversion. `gain_db` is normalised to
-/// the segment's *steady* response at its own frequency, so the per-sample
-/// input gain the engine builds is `2 G (1 − r)` — about one part in ten
-/// thousand at a 1.4 s decay — and the mode has to be *driven up* over its own
-/// time constant to reach `G`. `ModalBank`'s culling zeroes a state below
-/// `CULL_AMPLITUDE` on every block, which is above where a segment starts, so
-/// the mode is zeroed before the drive can raise it and what a render shows is
-/// its impulse response rather than its resonant one. That is the 64 dB
-/// between the two, and it is why a segment written from a measurement is
-/// inaudible in the engine as it stands: see `DECISIONS.md`, and the
-/// `(c)` block of the gate test, which fails the day the drive path changes.
-pub const DUPLEX_LEVEL_OFFSET_DB: f64 = 93.7;
+/// It used to be **93.7 dB**, and 37 of those were a defect rather than a
+/// convention: `gain_db` was normalised to a segment's *steady* response at its
+/// own frequency, so the per-sample input gain was `2 G (1 − r)` — about one
+/// part in ten thousand at a 1.4 s decay — and the mode had to be driven up
+/// over its own time constant to reach `G` by a drive that had no energy where
+/// it sat. `DECISIONS.md` 481 re-decided the field: the segments are launched by
+/// the hammer's own broadband knock and `gain_db` is an impulse normalisation,
+/// so what is left here is a genuine convention gap and nothing else. It is
+/// three things, all of them stated rather than fitted:
+///
+/// * the **reference** is one sinusoid (`strongest_peak`, an STFT peak) while a
+///   segment's `gain_db` is stated against the key's own bridge scale, and a
+///   note's loudest partial is well under the scale the whole series shares;
+/// * the segment is read out of a **release** recording, so it has already
+///   decayed for as long as the key was held — the gate holds one second, which
+///   costs a 1.4 s segment 43 dB before the first analysis window opens, and
+///   `harm*` is the same kind of material;
+/// * the Hann window's own reading of a decaying sinusoid, which the tracker
+///   corrects and which does not quite cancel between the two measurements.
+///
+/// None of the three is a property of the mechanism, which is why this is one
+/// subtraction and why the gate can hold its spread to a tenth of a dB.
+pub const DUPLEX_LEVEL_OFFSET_DB: f64 = 56.68;
 
 /// The `gain_db` a measured level asks for, before the schema's own range is
 /// applied: `level + `[`DUPLEX_LEVEL_OFFSET_DB`].
@@ -154,6 +175,29 @@ pub struct DuplexConfig {
     /// 8192 samples the window resolves 5.9 Hz, which is 10 cents at 1 kHz and
     /// 5 at 2 kHz — below that two peaks are one peak whatever one calls them.
     pub guard_cents: f64,
+    /// How many guard widths of the note's own partial spacing must survive
+    /// the guard before a candidate at that frequency can be read at all.
+    ///
+    /// **The guard alone is not a separator, and the fit's own output is what
+    /// says so** (`DECISIONS.md` 482). `guard_cents` removes `2 x guard_cents`
+    /// from every gap between two partials, and a gap is `1200 log2(1 + f0/f)`
+    /// wide — 76 cents at 1212 Hz on A1 and 57 at 1409 Hz on F#1, against a
+    /// guard that takes 50 of them. At that point "outside the guard" and
+    /// "between two partials of the note" are the same place, so what the free
+    /// tracker returns from a bass key's release recording is the note's own
+    /// comb and the rest of the instrument ringing sympathetically — which the
+    /// resonance bus already models, and which `min_hz` was put here to keep
+    /// out. It showed as a signature: over keys 21-42 the fitted segments sat
+    /// at -27, -28, -30, -29, -26, +28, +32 cents, all of them a hair outside
+    /// a +-25 cent guard, where the treble keys the survey actually measured
+    /// scatter across +-180.
+    ///
+    /// Four is the arithmetic and not a taste: at four guard widths, half of
+    /// each gap survives the cut, so the guard is a cut rather than the whole
+    /// band. It costs the bass nothing that was ever a measurement and it does
+    /// not touch a key whose spacing is wide, which is every key the survey
+    /// behind this field covers (D4-C8).
+    pub min_spacing_guards: f64,
     /// Candidates more than this below the strongest surviving one are
     /// dropped, however many slots are left.
     pub range_db: f64,
@@ -166,12 +210,12 @@ pub struct DuplexConfig {
     /// A uniform shift applied to every `gain_db` a row is written with, dB.
     ///
     /// Zero for a measurement that fits inside the schema. It exists because
-    /// on real recordings the levels do not: `DUPLEX_LEVEL_OFFSET_DB` is 94 dB
-    /// and the measured levels are −26 to −88 dB relative to a strike, so every
-    /// segment asks for more than the +6 dB ceiling. Clamping each row on its
-    /// own would flatten the instrument to one level and throw away the
-    /// relative structure the gate proves is recoverable; one shift for the
-    /// whole instrument keeps it.
+    /// on real recordings the levels do not: `DUPLEX_LEVEL_OFFSET_DB` is 57 dB
+    /// and the measured levels are −26 to −88 dB relative to a strike, so the
+    /// loud end of the instrument still asks for more than the +6 dB ceiling.
+    /// Clamping each row on its own would flatten the instrument to one level
+    /// and throw away the relative structure the gate proves is recoverable;
+    /// one shift for the whole instrument keeps it.
     pub shift_db: f64,
     /// Longest decay a row may be written with. Shorter than the schema's own
     /// 3 s ceiling on purpose: `PHYSICS.md` §3 asks for 0.5–2 s because
@@ -198,6 +242,7 @@ impl Default for DuplexConfig {
             max_hz: 12_000.0,
             min_ratio_to_f0: 3.0,
             guard_cents: 25.0,
+            min_spacing_guards: 4.0,
             range_db: 24.0,
             max_fit_db: 6.0,
             shift_db: 0.0,
@@ -312,6 +357,14 @@ pub fn residual_modes_above(
         .filter(|mode| mode.onset_s <= config.max_onset_s)
         .filter(|mode| (config.min_hz..=config.max_hz).contains(&mode.hz))
         .filter(|mode| mode.hz >= config.min_ratio_to_f0 * f0_hz)
+        // Where the note's own partials crowd closer than the guard can
+        // separate, there is no readable segment band at all — see
+        // `DuplexConfig::min_spacing_guards`.
+        .filter(|mode| {
+            f0_hz <= 0.0
+                || 1200.0 * (1.0 + f0_hz / mode.hz).log2()
+                    >= config.min_spacing_guards * config.guard_cents
+        })
         .filter(|mode| mode.fit_db <= config.max_fit_db)
         .filter(|mode| {
             exclude_hz

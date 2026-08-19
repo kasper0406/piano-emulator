@@ -71,6 +71,42 @@ pub const MIC_SPAN_M: (f32, f32) = (0.05, 3.0);
 pub const MIC_WIDTH: (f32, f32) = (0.0, 2.0);
 pub const MIC_DIFFUSE_COHERENCE: (f32, f32) = (0.25, 8.0);
 
+/// Bound on [`MicVoicing::source_extent_m`], metres: how long a line the key's
+/// own radiation is averaged over before the capsules read it
+/// (`DECISIONS.md` 468).
+///
+/// Zero is the point source every preset before that item describes, bit for
+/// bit. The ceiling is three metres because that is about the length of a
+/// concert grand's string band, and a source longer than the instrument is not
+/// a source this model has a meaning for.
+pub const MIC_SOURCE_EXTENT_M: (f32, f32) = (0.0, 3.0);
+
+/// Pan positions the line source's quadrature is evaluated at, once, at preset
+/// load. Odd, so that `pan = 0` — where the two capsules must be exactly
+/// equidistant — is a node of the table rather than an interpolation between
+/// two.
+const MIC_EXTENT_NODES: usize = 2_049;
+
+/// Quadrature points the line source is averaged over, per side of its centre.
+///
+/// The integrand is `1/d` and `d_L − d_R` over a segment metres long under
+/// capsules centimetres apart: smooth, with one broad extremum, and a midpoint
+/// rule converges on it geometrically. Sixteen pairs plus the centre is
+/// thirty-three points, where doubling to sixty-five moves the tune's own comb
+/// slope by 0.001 dB per semitone and its per-note ITDs by under a
+/// microsecond — measured, not assumed, by
+/// `the_line_sources_quadrature_has_converged`.
+///
+/// **The points are taken in symmetric pairs and summed pairwise, and that is
+/// arithmetic rather than tidiness.** A running midpoint sweep from one end to
+/// the other leaves `2.5e-7` samples of left/right asymmetry at dead centre —
+/// floating-point addition is not associative — and dead centre is exactly
+/// where [`Mics::taps`] must return two equal gains and two zero delays, which
+/// `the_capsule_taps_are_equal_power_and_bounded_by_the_spacing` asserts. Added
+/// as `d(u) + d(−u)` the cancellation is exact for every pair, because IEEE
+/// negation and addition are sign-symmetric.
+const MIC_EXTENT_PAIRS: usize = 16;
+
 /// Bounds on the mode-controlled band's two edges, Hz, and on its lift.
 ///
 /// The edges are ordered — `lo < hi` is validated separately — and both are
@@ -145,6 +181,31 @@ pub const MIC_MODAL_HZ: (f32, f32) = (40.0, 2_000.0);
 /// piano. So the rail is where the physics of a symmetric pair stops, and what
 /// is above it is excluded from the target rather than bought with an
 /// inversion.
+///
+/// # One is also where the *image* diverges, and that is a second derivation
+///
+/// `DECISIONS.md` 471. The lift is railed here at the **inversion boundary**;
+/// the number an image bar would put it at is about **0.25**, and the two are
+/// not the same question. The band's worst-case contribution to a partial's
+/// interchannel level is `20 log10 (1 + g)/(1 − g)`, which diverges as
+/// `g → 1` — 46 dB at the shipped 0.99, 19 at 0.8, 12 at 0.6, 7.4 at 0.4 and
+/// **3.5 at 0.2** — so item 423's "−33.1 dB in the LEFT channel at 221.4 Hz",
+/// the whole of the melody board's `cue` column and a third of its `comb`
+/// column are one singularity read in three units. Measured on the shipped
+/// preset with nothing else moved, the tune's worst interchannel time and the
+/// agreement of its two localisation cues are **monotone in this number and in
+/// nothing else**: 1102 µs and r = −0.54 at 0.99, 885 µs and +0.05 at 0.60,
+/// **590 µs and +0.68 at 0.20** — the only setting in the tree that takes item
+/// 460's column green on both of its halves.
+///
+/// **The rail is not moved, and the reason is arithmetic rather than taste.**
+/// `presets/salamander-c5.toml` carries 0.99, so a rail at 0.30 makes the
+/// shipped preset one the schema refuses — a refit, not a rail change. And the
+/// refit is not free: at a lift of 0.20 the thirty recorded keys' coherence
+/// surface goes from 5.16 to 20.84 bars out and the six phrases from 15.84 to
+/// 25.34, which is item 470's budget and has no owner. What is recorded here is
+/// the derivation, so that whoever re-opens it argues with the image bar rather
+/// than with the inversion boundary.
 pub const MIC_MODAL_LIFT: (f32, f32) = (0.0, 1.0);
 
 /// Section `Q`s of the mode-controlled lobe's lower edge: an **eighth-order
@@ -304,19 +365,41 @@ pub fn pan_for_key(key: u8) -> f32 {
 /// interchannel delay and level both **move while it rings**. That is the
 /// measured drift `estimate::directivity` fits, now expressed in the image
 /// rather than only in the balance.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Mics {
     /// Half the capsule separation, metres.
     half_spacing: f32,
     height: f32,
     /// Metres from the centre of the string band to `|pan| = 1`.
     span: f32,
+    /// Length of the line the source is averaged over, metres; 0 is a point.
+    extent: f32,
     /// Gain on the geometric difference signal; 1.0 is the geometry itself.
     width: f32,
     /// One-pole coefficient of the board field's side highpass.
     diffuse_b: f32,
     /// The board's mode-controlled band, when the preset declares one.
     lobe: Option<ModalLobe>,
+    /// The line source's quadrature, evaluated once at construction over
+    /// [`MIC_EXTENT_NODES`] pan positions and empty for a point source.
+    ///
+    /// **Why there is a table at all.** [`Soundboard::add_voice`] asks for the
+    /// taps of *every voice on every block* — a hundred strings and the
+    /// sympathetic bus behind them, tens of thousands of calls a second — and a
+    /// point source answers that with two square roots. A line source answers it
+    /// with sixty-six, and measured on the demo phrase that is **25.2 % of one
+    /// core against 33.6 %**: a third of the instrument's whole budget, spent
+    /// re-integrating the same key's position for every block it sounds in.
+    /// Evaluated once per pan position at preset load and read back by linear
+    /// interpolation it is three loads and a lerp, and the render costs what it
+    /// did before (25.4 %).
+    ///
+    /// Each entry is `(u_L, u_R, Δ)`, the two normalised capsule gains and the
+    /// **signed** path difference in samples. The delay pair is derived from Δ
+    /// on the way out rather than stored, because interpolating two clamped
+    /// delays across the node where the sign turns would produce two non-zero
+    /// delays where the geometry has one.
+    extent_table: Vec<(f32, f32, f32)>,
 }
 
 impl Mics {
@@ -328,14 +411,60 @@ impl Mics {
         // Above Nyquist the one-pole is a wire; clamping keeps the coefficient
         // in (0, 1) for any legal spacing at any sample rate.
         let w = (std::f32::consts::TAU * hz / SAMPLE_RATE).min(std::f32::consts::PI);
-        Mics {
+        let mut mics = Mics {
             half_spacing: 0.5 * v.spacing_m,
             height: v.height_m,
             span: v.span_m,
+            extent: v.source_extent_m,
             width: v.width,
             diffuse_b: 1.0 - (-w).exp(),
             lobe: v.modal.as_ref().map(ModalLobe::new),
+            extent_table: Vec::new(),
+        };
+        if mics.extent > 0.0 {
+            // The one allocation, at construction, on the thread that builds
+            // the instrument. Odd node count, so `pan = 0` is a node and dead
+            // centre is read rather than interpolated.
+            mics.extent_table = (0..MIC_EXTENT_NODES)
+                .map(|i| {
+                    let pan = 2.0 * i as f32 / (MIC_EXTENT_NODES - 1) as f32 - 1.0;
+                    mics.line_taps(pan)
+                })
+                .collect();
         }
+        mics
+    }
+
+    /// The quadrature itself: the two capsule pressures averaged over the line,
+    /// and the mean of the local path differences, at one pan position.
+    fn line_taps(&self, pan: f32) -> (f32, f32, f32) {
+        let x = pan.clamp(-1.0, 1.0) * self.span;
+        let h2 = self.height * self.height;
+        let path = |u: f32| -> (f32, f32) {
+            (
+                ((u + self.half_spacing).powi(2) + h2).sqrt(),
+                ((u - self.half_spacing).powi(2) + h2).sqrt(),
+            )
+        };
+        // Midpoint rule in symmetric pairs; see `MIC_EXTENT_PAIRS` for why the
+        // pairing is what keeps dead centre exact.
+        let (dl0, dr0) = path(x);
+        let (mut al, mut ar, mut dd) = (1.0 / dl0, 1.0 / dr0, dl0 - dr0);
+        let step = self.extent / (2 * MIC_EXTENT_PAIRS + 1) as f32;
+        for i in 1..=MIC_EXTENT_PAIRS {
+            let u = step * i as f32;
+            let (lp, rp) = path(x + u);
+            let (lm, rm) = path(x - u);
+            al += 1.0 / lp + 1.0 / lm;
+            ar += 1.0 / rp + 1.0 / rm;
+            dd += (lp - rp) + (lm - rm);
+        }
+        let n = 1.0 / (2 * MIC_EXTENT_PAIRS + 1) as f32;
+        (
+            al * n,
+            ar * n,
+            dd * n * (SAMPLE_RATE / SPEED_OF_SOUND),
+        )
     }
 
     /// The two capsule gains and the two capsule delays, in samples, of a
@@ -344,17 +473,49 @@ impl Mics {
     /// Both delays are non-negative and at most one is non-zero: what the pair
     /// hears is the *difference*, so the nearer capsule is taken as the time
     /// origin and only the farther one is delayed.
+    ///
+    /// With `extent` above zero the source is a **line** rather than a point
+    /// (`DECISIONS.md` 468): the two capsule pressures are averaged over a
+    /// segment of that length along the keyboard axis, centred on the key's own
+    /// position, and the interchannel path difference is the mean of the local
+    /// ones. Nothing else changes — one gain and one delay per capsule, the
+    /// same equal-power normalisation, the same clamp — so the stage stays two
+    /// taps on the side and the mono fold-down is untouched by construction.
     fn taps(&self, pan: f32) -> (f32, f32, f32, f32) {
-        let x = pan.clamp(-1.0, 1.0) * self.span;
-        let h2 = self.height * self.height;
-        let dl = ((x + self.half_spacing).powi(2) + h2).sqrt();
-        let dr = ((x - self.half_spacing).powi(2) + h2).sqrt();
         // Spherical spreading, normalised to unit power so the pair adds no
         // level of its own: the equal-power pan it replaces has `gl^2 + gr^2 = 1`
         // and so does this.
-        let (al, ar) = (1.0 / dl, 1.0 / dr);
+        let (al, ar, delta) = if self.extent_table.is_empty() {
+            let x = pan.clamp(-1.0, 1.0) * self.span;
+            let h2 = self.height * self.height;
+            let dl = ((x + self.half_spacing).powi(2) + h2).sqrt();
+            let dr = ((x - self.half_spacing).powi(2) + h2).sqrt();
+            (
+                1.0 / dl,
+                1.0 / dr,
+                (dl - dr) * (SAMPLE_RATE / SPEED_OF_SOUND),
+            )
+        } else {
+            // The line source, read off the table built at construction. The
+            // grid is fine enough that the interpolation is under a thousandth
+            // of a decibel and a hundredth of a microsecond from the integral
+            // (`the_line_sources_quadrature_has_converged`).
+            let last = MIC_EXTENT_NODES - 1;
+            let position = (pan.clamp(-1.0, 1.0) + 1.0) * 0.5 * last as f32;
+            let index = (position as usize).min(last - 1);
+            let frac = position - index as f32;
+            let (a, b) = (self.extent_table[index], self.extent_table[index + 1]);
+            (
+                a.0 + frac * (b.0 - a.0),
+                a.1 + frac * (b.1 - a.1),
+                a.2 + frac * (b.2 - a.2),
+            )
+        };
+        // Re-normalised after the interpolation as well as after the
+        // quadrature: two unit-power pairs do not interpolate to a unit-power
+        // one, and `the_capsule_taps_are_equal_power_and_bounded_by_the_spacing`
+        // is an equality about every pan and not about the nodes.
         let n = 1.0 / (al * al + ar * ar).sqrt();
-        let delta = (dl - dr) * (SAMPLE_RATE / SPEED_OF_SOUND);
         // `|dl - dr| <= 2 * half_spacing <= MAX_MIC_SPACING_M`, so this clamp
         // never binds on a validated preset; it is what makes the buffer bound
         // a property of the code rather than of the caller.
@@ -965,16 +1126,16 @@ impl Soundboard {
             direct_l: [0.0; BLOCK],
             direct_r: [0.0; BLOCK],
             mono: [0.0; BLOCK],
-            mics,
             mid: [0.0; BLOCK],
             side: [0.0; BLOCK + MIC_TAIL],
-            direct_lobe: mics.and_then(|m| m.lobe),
+            direct_lobe: mics.as_ref().and_then(|m| m.lobe),
             radiation: voicing.radiation.as_ref().map(Radiation::new),
             board_l: [0.0; BLOCK],
             board_r: [0.0; BLOCK],
             drive: [0.0; BLOCK],
             body,
             fdn: Fdn::new(voicing, mics.as_ref()),
+            mics,
             board_mix: voicing.board_mix,
             shelf_gain: db_to_amp(voicing.shelf_gain_db),
             dc_r_coeff: (-std::f32::consts::TAU * DC_BLOCK_HZ / SAMPLE_RATE).exp(),
@@ -1019,7 +1180,7 @@ impl Soundboard {
         // Equal-power pan keeps the summed level constant across the compass.
         let angle = (pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
         let (gl, gr) = (angle.cos(), angle.sin());
-        let Some(mics) = self.mics else {
+        let Some(mics) = &self.mics else {
             for (i, &x) in mono.iter().enumerate() {
                 self.direct_l[i] += gl * x;
                 self.direct_r[i] += gr * x;
@@ -1676,7 +1837,17 @@ mod tests {
             span_m: 0.70,
             width: 1.0,
             diffuse_coherence: 1.0,
+            source_extent_m: 0.0,
             modal: None,
+        }
+    }
+
+    /// The same pair reading a **line source** rather than a point
+    /// (`DECISIONS.md` 468). 0.6 m is the length the frontier was measured at.
+    fn mic_voicing_with_extent() -> MicVoicing {
+        MicVoicing {
+            source_extent_m: 0.6,
+            ..mic_voicing()
         }
     }
 
@@ -1760,22 +1931,30 @@ mod tests {
         // move. It is the *hardest* row for this invariant and not the easiest:
         // at the null one channel is zero and the whole signal is in the other,
         // so `(L + R)/2` is carried by one summand alone.
-        for (spacing, height, span, width, coherence, modal) in [
-            (0.12f32, 0.30f32, 0.70f32, 1.0f32, 1.0f32, None),
-            (0.60, 0.05, 1.50, 2.0, 4.0, lobe),
-            (0.01, 2.00, 0.10, 0.0, 0.25, lobe),
+        // The last two rows carry a **line source** (`DECISIONS.md` 468),
+        // because a mechanism that changes what the two capsules hear is
+        // exactly the kind of change this invariant exists to catch: the extent
+        // moves both capsule gains and the interchannel delay, and the sum of
+        // the two channels still may not move by a bit more than rounding.
+        for (spacing, height, span, width, coherence, extent, modal) in [
+            (0.12f32, 0.30f32, 0.70f32, 1.0f32, 1.0f32, 0.0f32, None),
+            (0.60, 0.05, 1.50, 2.0, 4.0, 0.0, lobe),
+            (0.01, 2.00, 0.10, 0.0, 0.25, 0.0, lobe),
             (
                 0.12,
                 0.12,
                 1.50,
                 1.7,
                 7.86,
+                0.0,
                 Some(ModalBand {
                     lo_hz: MIC_MODAL_HZ.0,
                     hi_hz: MIC_MODAL_HZ.1,
                     lift: MIC_MODAL_LIFT.1,
                 }),
             ),
+            (0.12, 0.30, 0.70, 1.0, 1.0, 0.6, None),
+            (0.60, 0.05, 1.50, 2.0, 4.0, MIC_SOURCE_EXTENT_M.1, lobe),
         ] {
             let mv = MicVoicing {
                 spacing_m: spacing,
@@ -1783,6 +1962,7 @@ mod tests {
                 span_m: span,
                 width,
                 diffuse_coherence: coherence,
+                source_extent_m: extent,
                 modal,
             };
             for pan in [-1.0f32, -0.6, -0.13, 0.0, 0.37, 0.6, 1.0] {
@@ -1822,8 +2002,8 @@ mod tests {
                 // tens of dB, not a hundred and thirteen.
                 assert!(
                     peak_db < -100.0 && rms_db < -110.0,
-                    "spacing {spacing}, pan {pan}: the mono sum moved by {peak_db:.1} dB peak, \
-                     {rms_db:.1} dB RMS"
+                    "spacing {spacing}, extent {extent}, pan {pan}: the mono sum moved by \
+                     {peak_db:.1} dB peak, {rms_db:.1} dB RMS"
                 );
             }
         }
@@ -1833,46 +2013,163 @@ mod tests {
     /// spacing, the nearer capsule at time zero, and dead centre equidistant.
     #[test]
     fn the_capsule_taps_are_equal_power_and_bounded_by_the_spacing() {
-        let mv = mic_voicing();
-        let mics = Mics::new(&mv);
-        let bound = mv.spacing_m * SAMPLE_RATE / SPEED_OF_SOUND;
-        let mut previous = f32::NEG_INFINITY;
-        for i in 0..=40 {
-            let pan = -1.0 + 2.0 * i as f32 / 40.0;
-            let (ul, ur, dl, dr) = mics.taps(pan);
-            assert!(
-                (ul * ul + ur * ur - 1.0).abs() < 1e-6,
-                "pan {pan}: {ul}^2 + {ur}^2 is not one"
-            );
-            assert!(dl >= 0.0 && dr >= 0.0, "pan {pan}: negative delay");
-            assert!(dl == 0.0 || dr == 0.0, "pan {pan}: both capsules delayed");
-            assert!(
-                dl <= bound && dr <= bound,
-                "pan {pan}: {dl}/{dr} over {bound}"
-            );
-            // The interchannel delay grows monotonically from bass to treble,
-            // which is what makes the image a map of the keyboard.
-            let delta = dl - dr;
-            assert!(delta > previous, "pan {pan}: delay went backwards");
-            previous = delta;
-            // Treble keys are nearer the right capsule and louder in it.
-            if pan > 0.05 {
+        // Both source models: a point, and the line of `DECISIONS.md` 468.
+        // Every property here is a property of the *pair*, so averaging the two
+        // pressures over a segment may not cost any of them — including the
+        // exactness at dead centre, which is what forces the quadrature to be
+        // summed in symmetric pairs (`MIC_EXTENT_PAIRS`).
+        for mv in [mic_voicing(), mic_voicing_with_extent()] {
+            let mics = Mics::new(&mv);
+            let bound = mv.spacing_m * SAMPLE_RATE / SPEED_OF_SOUND;
+            let mut previous = f32::NEG_INFINITY;
+            for i in 0..=40 {
+                let pan = -1.0 + 2.0 * i as f32 / 40.0;
+                let (ul, ur, dl, dr) = mics.taps(pan);
                 assert!(
-                    ur > ul && dl > 0.0,
-                    "pan {pan}: the treble is not to the right"
+                    (ul * ul + ur * ur - 1.0).abs() < 1e-6,
+                    "pan {pan}: {ul}^2 + {ur}^2 is not one"
                 );
+                assert!(dl >= 0.0 && dr >= 0.0, "pan {pan}: negative delay");
+                assert!(dl == 0.0 || dr == 0.0, "pan {pan}: both capsules delayed");
+                assert!(
+                    dl <= bound && dr <= bound,
+                    "pan {pan}: {dl}/{dr} over {bound}"
+                );
+                // The interchannel delay grows monotonically from bass to
+                // treble, which is what makes the image a map of the keyboard.
+                let delta = dl - dr;
+                assert!(delta > previous, "pan {pan}: delay went backwards");
+                previous = delta;
+                // Treble keys are nearer the right capsule and louder in it.
+                if pan > 0.05 {
+                    assert!(
+                        ur > ul && dl > 0.0,
+                        "pan {pan}: the treble is not to the right"
+                    );
+                }
             }
+            let (ul, ur, dl, dr) = mics.taps(0.0);
+            assert!(
+                (ul - ur).abs() < 1e-7,
+                "dead centre is not equidistant in level"
+            );
+            assert_eq!(
+                (dl, dr),
+                (0.0, 0.0),
+                "dead centre is not equidistant in time"
+            );
         }
-        let (ul, ur, dl, dr) = mics.taps(0.0);
+    }
+
+    /// **The line source flattens the pan law's own level gradient, and its
+    /// quadrature has converged** (`DECISIONS.md` 468).
+    ///
+    /// Two claims, both arithmetic on [`Mics::taps`] alone and neither about a
+    /// preset. The first is the mechanism: a point source under a pair has an
+    /// interchannel level gradient across the middle of the compass — `1/d_L`
+    /// and `1/d_R` diverge fastest where the source passes under a capsule —
+    /// and averaging the two pressures over a line metres long is what removes
+    /// it, while the compass *edges* keep their delay, which is the one thing a
+    /// raised `height` cannot leave alone. The second is that the answer is the
+    /// integral rather than the rule: sixteen pairs and thirty-two agree to a
+    /// thousandth of a decibel.
+    #[test]
+    fn the_line_source_flattens_the_middle_and_leaves_the_edges_their_delay() {
+        // The shipped preset's own geometry, because the gradient this is about
+        // is a function of `spacing / height` and the fixture pair hangs two and
+        // a half times higher than the measured one.
+        let shipped = MicVoicing {
+            spacing_m: 0.126_317_01,
+            height_m: 0.12,
+            span_m: 1.5,
+            ..mic_voicing()
+        };
+        let point = Mics::new(&shipped);
+        let line = Mics::new(&MicVoicing {
+            source_extent_m: 0.6,
+            ..shipped
+        });
+        let image_db = |m: &Mics, pan: f32| -> f32 {
+            let (ul, ur, _, _) = m.taps(pan);
+            20.0 * (ul / ur).log10()
+        };
+        let itd_us = |m: &Mics, pan: f32| -> f32 {
+            let (_, _, dl, dr) = m.taps(pan);
+            1.0e6 * (dl - dr) / SAMPLE_RATE
+        };
+        // The middle of the compass, over the seven semitones of the Ode line's
+        // own pan range: the gradient per unit of pan.
+        let gradient = |m: &Mics| -> f32 {
+            (image_db(m, 0.06) - image_db(m, -0.06)) / 0.12
+        };
         assert!(
-            (ul - ur).abs() < 1e-7,
-            "dead centre is not equidistant in level"
+            gradient(&line).abs() * 4.0 < gradient(&point).abs(),
+            "the line source did not flatten the middle: {} against {}",
+            gradient(&line),
+            gradient(&point)
         );
-        assert_eq!(
-            (dl, dr),
-            (0.0, 0.0),
-            "dead centre is not equidistant in time"
-        );
+        // ...and the edges keep the time cue the pair's own spacing gives them.
+        for pan in [-0.6f32, 0.6] {
+            assert!(
+                itd_us(&line, pan).abs() > 0.5 * itd_us(&point, pan).abs(),
+                "pan {pan}: the line source deleted the edge's delay ({} against {})",
+                itd_us(&line, pan),
+                itd_us(&point, pan)
+            );
+        }
+    }
+
+    /// The midpoint rule the line source is averaged with has converged: twice
+    /// the points move nothing a board can read (`MIC_EXTENT_PAIRS`).
+    #[test]
+    fn the_line_sources_quadrature_has_converged() {
+        // The same integrand at twice the resolution, computed here rather than
+        // in the engine: `MIC_EXTENT_PAIRS` is a constant, and this is the
+        // measurement that says which constant it may be.
+        let mv = mic_voicing_with_extent();
+        let mics = Mics::new(&mv);
+        let refined = |pan: f32| -> (f32, f32) {
+            let x = pan.clamp(-1.0, 1.0) * mv.span_m;
+            let h2 = mv.height_m * mv.height_m;
+            let half = 0.5 * mv.spacing_m;
+            let pairs = 4 * MIC_EXTENT_PAIRS;
+            let step = mv.source_extent_m / (2 * pairs + 1) as f32;
+            let path = |u: f32| -> (f32, f32) {
+                (
+                    ((u + half).powi(2) + h2).sqrt(),
+                    ((u - half).powi(2) + h2).sqrt(),
+                )
+            };
+            let (l0, r0) = path(x);
+            let (mut al, mut ar, mut dd) = (1.0 / l0, 1.0 / r0, l0 - r0);
+            for i in 1..=pairs {
+                let u = step * i as f32;
+                let (lp, rp) = path(x + u);
+                let (lm, rm) = path(x - u);
+                al += 1.0 / lp + 1.0 / lm;
+                ar += 1.0 / rp + 1.0 / rm;
+                dd += (lp - rp) + (lm - rm);
+            }
+            let n = 1.0 / (2 * pairs + 1) as f32;
+            let (al, ar) = (al * n, ar * n);
+            (
+                20.0 * (al / ar).log10(),
+                1.0e6 * dd * n / SPEED_OF_SOUND,
+            )
+        };
+        for i in 0..=24 {
+            let pan = -0.6 + 1.2 * i as f32 / 24.0;
+            let (ul, ur, dl, dr) = mics.taps(pan);
+            let (image, itd) = refined(pan);
+            assert!(
+                (20.0 * (ul / ur).log10() - image).abs() < 0.01,
+                "pan {pan}: the quadrature has not converged in level"
+            );
+            assert!(
+                (1.0e6 * (dl - dr) / SAMPLE_RATE - itd).abs() < 1.0,
+                "pan {pan}: the quadrature has not converged in time"
+            );
+        }
     }
 
     /// The interchannel delay a source produces is the delay its *position*

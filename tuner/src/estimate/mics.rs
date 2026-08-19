@@ -87,6 +87,21 @@
 //! delay. That factor is [`ENGINE_LAG_PER_ITD`], it is measured rather than
 //! assumed, and `tuner/tests/mics.rs` is where the recovery it enables is
 //! checked against the engine rather than asserted here.
+//!
+//! **One term of that reading is not the geometry at all, and since
+//! `DECISIONS.md` 465 it is removed rather than absorbed.** The engine's
+//! mode-controlled band ([`KnownBand`]) is added to the side and subtracted from
+//! it, so inside its edges the pair carries an interchannel phase no path
+//! difference put there — and a phase against frequency is exactly what this
+//! estimator measures. It is computable from the preset, so [`LagConfig::band`]
+//! takes it out bin by bin before the vote. What that bought is a constant that
+//! stops depending on the band's *width*: ±11 % of movement across five bands
+//! becomes ±4 %, the narrowest band the search may propose goes from reading
+//! **−36 %** to **−12 %**, and item 462's eighteen-hertz wall — no band that
+//! keeps this estimator honest can clear the melodic register from below — is
+//! gone with it. A reading of the **recording** is never handed a band: the
+//! recording has a piano and two capsules in it and no lobe, and subtracting a
+//! filter that is not there would be a fabrication.
 
 use rustfft::{num_complex::Complex32, FftPlanner};
 
@@ -171,6 +186,111 @@ pub struct KeyLag {
     pub ild_db: f64,
 }
 
+/// The engine's **mode-controlled band**, as the estimator knows it — the one
+/// thing about the signal a delay reading may be told in advance.
+///
+/// `soundboard::ModalLobe` adds `B = lift · H(ω)` to the side and subtracts it
+/// from it, so per frequency `L = m(1 + B)` and `R = m(1 − B)` and the pair
+/// carries an interchannel phase of `arg[(1 + B)/(1 − B)]` that **no geometry
+/// put there**. A phase-transform estimator cannot tell that apart from a path
+/// difference: it is a phase against frequency and so is a delay. That is the
+/// whole of `DECISIONS.md` 462's wall — a twelfth-order cascade's group delay
+/// grows as its passband narrows, so the narrower the band the further the
+/// spacing readback walks — and it is not a defect of the estimator but a term
+/// of the signal that happens to be **exactly computable from the preset**.
+///
+/// [`KnownBand::interchannel_phase`] is that term, and [`interchannel_lag`]
+/// subtracts it from every bin before the vote (`DECISIONS.md` 465). Handed to
+/// a reading of the **recording** it would be a fabrication — the recording has
+/// no lobe, only a piano and two capsules — so it is `None` there and always
+/// will be: the field says *the engine is known to carry this*, and only a
+/// render of the engine can be told so.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnownBand {
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    pub lift: f64,
+}
+
+/// Section `Q`s of the band's lower edge — an eighth-order Butterworth highpass
+/// as four second-order sections, `1/(2 cos((2k+1)π/16))`, k = 0..3.
+///
+/// Mirrors `soundboard::MIC_MODAL_HIGH_Q` for the reason [`SPEED_OF_SOUND`]
+/// mirrors its own: this crate does not link the engine, and a phase the
+/// estimator subtracts has to be the phase the engine added or the correction
+/// is of a different filter. `the_known_bands_response_is_the_engines_own` is
+/// where the two are held together.
+const MODAL_HIGH_Q: [f64; 4] = [0.509_796_2, 0.601_344_9, 0.899_976_2, 2.562_915_4];
+
+/// The upper edge's, a fourth-order Butterworth lowpass:
+/// `soundboard::MIC_MODAL_LOW_Q`.
+const MODAL_LOW_Q: [f64; 2] = [0.541_196_1, 1.306_562_9];
+
+/// One cookbook biquad's response at `w = 2πf/fs` (Robert Bristow-Johnson's
+/// forms, exactly as `soundboard::Biquad::butterworth` builds them, so the
+/// **digital** phase is reproduced rather than an analogue prototype's).
+fn biquad_response(hz: f64, q: f64, high: bool, w_eval: f64, sample_rate: f64) -> (f64, f64) {
+    let w = (std::f64::consts::TAU * hz / sample_rate).clamp(1.0e-6, 3.0);
+    let (sin, cos) = w.sin_cos();
+    let alpha = sin / (2.0 * q);
+    let a0 = 1.0 + alpha;
+    let (b0, b1, b2) = if high {
+        let g = (1.0 + cos) / 2.0;
+        (g, -2.0 * g, g)
+    } else {
+        let g = (1.0 - cos) / 2.0;
+        (g, 2.0 * g, g)
+    };
+    let (b0, b1, b2) = (b0 / a0, b1 / a0, b2 / a0);
+    let (a1, a2) = (-2.0 * cos / a0, (1.0 - alpha) / a0);
+    // z^-1 and z^-2 on the unit circle.
+    let (s1, c1) = (-w_eval).sin_cos();
+    let (s2, c2) = (-2.0 * w_eval).sin_cos();
+    let num = (b0 + b1 * c1 + b2 * c2, b1 * s1 + b2 * s2);
+    let den = (1.0 + a1 * c1 + a2 * c2, a1 * s1 + a2 * s2);
+    let d = den.0 * den.0 + den.1 * den.1;
+    if d <= 0.0 {
+        return (0.0, 0.0);
+    }
+    (
+        (num.0 * den.0 + num.1 * den.1) / d,
+        (num.1 * den.0 - num.0 * den.1) / d,
+    )
+}
+
+impl KnownBand {
+    /// `B(f) = lift · H(f)`, the cascade the engine adds to the side.
+    pub fn response(&self, hz: f64, sample_rate: f64) -> (f64, f64) {
+        let w = std::f64::consts::TAU * hz / sample_rate;
+        let mut acc = (self.lift, 0.0);
+        let mut apply = |section: (f64, f64)| {
+            acc = (
+                acc.0 * section.0 - acc.1 * section.1,
+                acc.0 * section.1 + acc.1 * section.0,
+            );
+        };
+        for q in MODAL_HIGH_Q {
+            apply(biquad_response(self.lo_hz, q, true, w, sample_rate));
+        }
+        for q in MODAL_LOW_Q {
+            apply(biquad_response(self.hi_hz, q, false, w, sample_rate));
+        }
+        acc
+    }
+
+    /// The interchannel phase the band alone puts between the two channels,
+    /// radians: `arg[(1 + B)/(1 − B)]`, positive when the **left** channel
+    /// leads, which is the side the lobe is added to.
+    pub fn interchannel_phase(&self, hz: f64, sample_rate: f64) -> f64 {
+        let b = self.response(hz, sample_rate);
+        let (pl, pr) = ((1.0 + b.0, b.1), (1.0 - b.0, -b.1));
+        if (pl.0 == 0.0 && pl.1 == 0.0) || (pr.0 == 0.0 && pr.1 == 0.0) {
+            return 0.0;
+        }
+        pl.1.atan2(pl.0) - pr.1.atan2(pr.0)
+    }
+}
+
 /// Which part of a note, and which band of it, the delay is read from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LagConfig {
@@ -207,6 +327,16 @@ pub struct LagConfig {
     /// Widest delay searched, seconds. `MAX_MIC_SPACING_M / c` is 2.9 ms, so
     /// three is every geometry the engine can be asked for and nothing else.
     pub max_lag_s: f64,
+    /// The mode-controlled band the **engine** is known to carry, whose own
+    /// interchannel phase is removed from every bin before the vote.
+    ///
+    /// `None` — the default, and what every reading of the *recording* uses —
+    /// is the raw cross-spectrum this estimator has always voted on. See
+    /// [`KnownBand`], and `DECISIONS.md` 465 for what it is worth: with it
+    /// subtracted, every band collapses onto the reading a bandless pair gives,
+    /// which is the operational meaning of "the wall was the band's group
+    /// delay".
+    pub band: Option<KnownBand>,
 }
 
 impl Default for LagConfig {
@@ -215,6 +345,7 @@ impl Default for LagConfig {
             band_hz: (40.0, 160.0),
             window_s: 3.0,
             max_lag_s: 0.003,
+            band: None,
         }
     }
 }
@@ -277,7 +408,19 @@ pub fn interchannel_lag(
         if m <= 0.0 {
             continue;
         }
-        let unit = x / m;
+        let mut unit = x / m;
+        // **The known band comes out before the vote** (`DECISIONS.md` 465).
+        // `L = m(1 + B)` and `R = m(1 − B)` inside it, so this bin's phase
+        // carries `arg[(1 + B)/(1 − B)]` that no path difference put there; the
+        // cross-spectrum is rotated back by exactly that angle and what is left
+        // is the geometry. Nothing about the magnitudes moves — the phase
+        // transform has already thrown them away — so this cannot change which
+        // bins vote, only where each one votes.
+        if let Some(band) = config.band {
+            let hz = j as f64 * sample_rate / n as f64;
+            let (s, c) = (-band.interchannel_phase(hz, sample_rate)).sin_cos();
+            unit *= Complex32::new(c as f32, s as f32);
+        }
         cross[j] = unit;
         if n - j != j {
             cross[n - j] = unit.conj();
@@ -388,20 +531,49 @@ const BIWEIGHT_CUT: f64 = 4.685;
 /// estimator measures — is then twice the geometric one, and the readout is
 /// `2δ`.
 ///
-/// **1.58, measured, not 2.** Over the eleven bass keys, at three spacings an
-/// octave apart (0.12, 0.24, 0.48 m) through the whole instrument, the median
-/// readout is 1.455, 1.760 and 1.530 times the geometry's own saturated delay;
-/// this is their geometric mean. It falls short of the algebra's 2 because the
-/// board's diffuse field arrives with no delay at all and pulls every readout
-/// towards zero, and because about one key in four lands on the *other* lobe of
-/// its own correlation and reads the opposite sign — both visible in
+/// **1.36, measured, not 2 — and it used to be 1.58 because the mode-controlled
+/// band's group delay was hiding inside it** (`DECISIONS.md` 465). Over the
+/// eleven bass keys, at three spacings an octave apart (0.12, 0.24, 0.48 m)
+/// through the whole instrument, with [`KnownBand`] subtracted from every bin,
+/// the median readout is 1.24 to 1.42 times the geometry's own saturated delay;
+/// 1.36 is the geometric mean of all fifteen readings and **every one of them
+/// is inside +4.0 / −9.0 % of it**. It falls short of the algebra's 2 because
+/// the board's diffuse field arrives with no delay at all and pulls every
+/// readout towards zero, and because about one key in four lands on the *other*
+/// lobe of its own correlation and reads the opposite sign — both visible in
 /// `tuner/tests/mics.rs`'s own printout.
+///
+/// **What the old number was, read band by band**
+/// (`what_the_bands_group_delay_was_doing_to_the_readback`, the same eleven
+/// keys and three spacings, each band read twice):
+///
+/// | band | raw | with the band's phase removed |
+/// |---|--:|--:|
+/// | 170-456 (the preset that ships) | 1.540 | 1.298 |
+/// | 170-234 (the band item 462 refused) | 1.344 | 1.396 |
+/// | 170-280 | 1.439 | 1.371 |
+/// | 170-200 (the narrowest the search may propose) | 1.236 | 1.405 |
+/// | none | 1.333 | 1.333 |
+///
+/// — a "constant" that moves by **±11 %** with the *width* of a band that is
+/// supposed to have nothing to do with a path difference, against **±4 %** once
+/// the band is taken out. That spread is the whole of item 462's wall: 1.58 was
+/// measured on renders that carried the shipped band, so every *other* band
+/// read short against it, and the narrower the band the shorter it read
+/// (170-200 raw reads **−36 %** at 0.12 m and **−12 %** corrected). The floor
+/// item 462 put under `Knob::ModalHi` to keep a fit away from that wall is
+/// removed by this constant being honest rather than by widening a tolerance.
 ///
 /// This is `estimate::directivity::DRIFT_PER_SPREAD_DB`'s pattern exactly: what
 /// a parameter does to the engine's output is *measured* on the engine rather
 /// than predicted from a model of it, encoded as one constant, and re-checked
 /// against the engine by a test that fails when the constant stops being true.
-pub const ENGINE_LAG_PER_ITD: f64 = 1.58;
+/// The stronger version item 465 leaves for a successor is to replace the
+/// constant altogether with a forward model of what the estimator *reads* —
+/// predicted median lag as a function of spacing, aspect and the known band,
+/// inverted numerically — which is exact by construction at every band instead
+/// of within 9 %.
+pub const ENGINE_LAG_PER_ITD: f64 = 1.36;
 
 /// The inverted geometry and what the inversion is worth.
 #[derive(Clone, Debug)]

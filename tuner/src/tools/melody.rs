@@ -696,14 +696,26 @@ in a room produces more than about {:.0} µs of interchannel time, a head being 
 0.18 m across — and on **agreement**, `corr(ILD, ITD)` over the line, the \
 recording's minus the engine's, one-sided because agreeing better than the \
 recording is not a defect.\n\n\
-Every bar is measured off the recording the same way the rest of this board's \
-are: the recording's own slope plus how far that slope moves between two takes \
-of it; the recording's own swing plus the same; the larger of the head bound and \
-the recording's own worst note; and for the correlation the larger of its \
-take-to-take movement and its own sampling standard error over as few points as \
-a tune has pitches. All four are times {:.2}.\n\n\
+**Since `DECISIONS.md` 466 the *target* of three of these columns is a neutral \
+image — flat with pitch, cues in agreement, neither loudspeaker favoured — and \
+not the image this recording has.** Item 417 measured why and accepted it as \
+unscored: the take's two capsules sit asymmetrically across the board's nodal \
+lines, which is one session's microphone stand and not a property of a piano, \
+and it is large — its C4 puts the fundamental 16.86 dB into the right capsule \
+and carries −949 µs with it, its ladder median leans −5.7 dB. So `balance` and \
+`splitting` are scored as the **median magnitude of the engine's own image** \
+over the notes they score, `comb`'s slope is scored against flat, and `cue`'s \
+bound is the head's own {:.0} µs **at every note** with the recording's C4 no \
+longer inflating it (item 469). Every **bar** is still measured off the \
+recording exactly as before — the recording's own slope plus how far it moves \
+between two takes of it, its own swing plus the same, one recorded key's two \
+takes or the register's own scatter — because how finely a thing can be resolved \
+is the recording's answer whatever the target is. The distance from the \
+recording's own image is still computed and still printed on every line of the \
+board. All the bars are times {:.2}.\n\n\
 | metric | window | slope /semitone | recording | error | bar | verdict | swing | recording | bar | verdict |\n\
 |---|---|--:|--:|--:|--:|---|--:|--:|--:|---|\n",
+        melody::HEAD_ITD_US,
         melody::HEAD_ITD_US,
         melody::ALLOWANCE,
     );
@@ -828,9 +840,16 @@ velocity layer — kept so the size of the change is visible rather than asserte
         let mark = |ok: bool| if ok { "pass" } else { "**FAIL**" };
         if c.gated_on_balance {
             verdicts.push(format!(
-                "balance **{:+.2}** against a bar of {:.2} — {}",
+                "{} **{:+.2}** against a bar of {:.2} (against the recording's own image \
+it reads {:+.2}) — {}",
+                if c.neutral_target {
+                    "the median note's distance from a neutral image"
+                } else {
+                    "balance"
+                },
                 c.balance,
                 c.balance_bar,
+                c.balance_vs_reference,
                 mark(c.balance_pass)
             ));
         }
@@ -845,8 +864,8 @@ velocity layer — kept so the size of the change is visible rather than asserte
         }
         if c.gated_on_slope {
             verdicts.push(format!(
-                "slope **{:+.3}**/semitone against the recording's {:+.3}, an error of \
-{:.3} against a bar of {:.3} — {}",
+                "slope **{:+.3}**/semitone where a neutral image is flat and the \
+recording tilts {:+.3}, an error of {:.3} against a bar of {:.3} — {}",
                 c.slope,
                 c.reference_slope,
                 c.slope_error,
@@ -865,7 +884,8 @@ velocity layer — kept so the size of the change is visible rather than asserte
         }
         if c.gated_on_bound {
             verdicts.push(format!(
-                "worst **{:.0}** at {} against a bar of {:.0} — {}",
+                "the worst note carries **{:.0}** µs at {}, against a per-note bound of \
+{:.0} — {}",
                 c.bound,
                 melody::note_name(c.bound_key),
                 c.bound_bar,
@@ -874,13 +894,25 @@ velocity layer — kept so the size of the change is visible rather than asserte
         }
         if c.gated_on_agreement {
             verdicts.push(format!(
-                "the two cues agree at **{:+.3}** where the recording's agree at {:+.3}, \
-short by {:+.3} against a bar of {:.3} — {}",
+                "the two cues point **{}**, r = {:+.3} (the recording's read {:+.3}, short \
+by {:+.3} of its own bar {:.3}); the line's level cue swings {:.2} dB against a floor of \
+{:.2} — {}",
+                if c.engine_corr > 0.0 {
+                    "the same way"
+                } else {
+                    "opposite ways"
+                },
                 c.engine_corr,
                 c.reference_corr,
                 c.agreement,
                 c.agreement_bar,
-                mark(c.agreement_pass)
+                c.ild_swing,
+                c.ild_floor,
+                if c.cue_is_readable {
+                    mark(c.agreement_pass)
+                } else {
+                    "*no level cue on this line; printed, not gated*"
+                }
             ));
         }
         let _ = writeln!(table, "\n{}.", verdicts.join("; "));
