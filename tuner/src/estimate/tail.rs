@@ -362,14 +362,52 @@ fn line_through(pts: &[f64], dt_s: f64) -> Option<Line> {
 /// decayed slowest.
 pub const INSTANTS: (f64, f64) = (0.1, 1.0);
 
-/// This partial's level at each of the two [`INSTANTS`], in dB.
+/// Width of the window each of the two [`INSTANTS`] is read over, in seconds —
+/// **the span convention**, and `DECISIONS.md` 454 is the measurement that
+/// picked it.
+///
+/// A three-string unison's partial is not a decay, it is a decay times a beat,
+/// and at the bottom of the compass that beat runs 0.7-4 Hz — so a *level at an
+/// instant* is a sample of a modulation the fit does not want, and which sample
+/// it gets depends on where the instant fell. The reading is therefore the
+/// partial's **mean power** over a window of this width rather than its level at
+/// a point ([`power_reading`]).
+///
+/// **Nothing else about the statistic changes**, and that is deliberate: the two
+/// instants are still [`INSTANTS`], still the pair
+/// `estimate::brilliance::band_decay_gap` is scored on, still the same two on
+/// both signals.
+///
+/// Why 0.45 s and not more or less, measured rather than argued
+/// (`forensics/src/bin/span_convention.rs`, seven conventions x six spans x nine
+/// recorded keys, scored as the `max/min` of the answer across the spans, on the
+/// **ratio** the fit actually writes):
+///
+/// | convention | wide spans, median / p90 | span edges moved, median / p90 |
+/// |---|---|---|
+/// | level at the instant (the old one) | 2.60 / 9.69 | 1.50 / 1.94 |
+/// | least squares over the span | 7.88 / 158.83 | 1.69 / 6.67 |
+/// | least squares over the running maximum | 7.63 / 23.16 | 1.49 / 1.82 |
+/// | mean power, 0.30 s | 2.19 / 4.05 | 1.20 / 1.53 |
+/// | **mean power, 0.45 s** | **2.10 / 4.06** | **1.18 / 1.46** |
+/// | mean power, 0.60 s | 2.69 / 5.55 | 1.17 / 1.37 |
+///
+/// (Sub-2 kHz partials, on the cells every convention resolved.) Smoothing more
+/// is not monotonically better and that is the whole reason a width can be
+/// chosen at all: 0.60 s is *worse* than 0.45 across the wide spans, because a
+/// window that long is a sizeable share of the 0.9 s between the instants and
+/// starts to read the other end of the decay.
+pub const READING_S: f64 = 0.45;
+
+/// This partial's mean power over a [`READING_S`] window at each of the two
+/// [`INSTANTS`], in dB.
 ///
 /// `None` for an instant at which the partial is within [`FLOOR_MARGIN_DB`] of
 /// the signal's own floor — the same refusal as [`fit_tail_to`]'s and for the
 /// same reason, and it is what stops a partial that is already over from
 /// reporting the floor's own flatness as an eternal decay.
 ///
-/// Two levels and not a fitted slope, because a fitted slope has to decide
+/// Two readings and not a fitted slope, because a fitted slope has to decide
 /// *what* to fit — where the decay stops being one exponential, where a beat
 /// null is, how far down the floor lets it look — and every one of those
 /// decisions is made differently on the two signals. Two instants are the same
@@ -394,14 +432,47 @@ pub fn levels_at_instants(env: &[f64], dt_s: f64) -> Levels {
     }
     let resolvable_db = floor + FLOOR_MARGIN_DB;
     let at = |t: f64| -> Option<f64> {
-        let i = (t / dt_s).round() as usize;
-        let v = *env.get(i)?;
+        let v = power_reading(env, t, dt_s)?;
         (v.is_finite() && v >= resolvable_db).then_some(v)
     };
     Levels {
         at: [at(INSTANTS.0), at(INSTANTS.1)],
         resolvable_db,
     }
+}
+
+/// One instant's reading: the mean **power** of the envelope over a
+/// [`READING_S`] window centred on `t`, in dB.
+///
+/// The window is **slid** forward where it would reach past the strike, never
+/// narrowed, and the difference matters. The correction a mean power puts on a
+/// single exponential is a function of the window's *width* alone — for a decay
+/// of `D` dB/s over a window of `w` seconds it is `10 log10(sinh x / x)` with
+/// `x = D w ln(10) / 20`, wherever the window is centred — so two windows of one
+/// width carry the same correction and it cancels exactly out of their
+/// difference, which is the only thing this function is ever used for. Narrowing
+/// one of the two would leave the difference biased by the mismatch. Sliding
+/// costs a little of the nominal separation between the instants instead, the
+/// same amount on both signals, so it cancels out of the ratio the fit writes.
+///
+/// `None` where the record is too short to hold a whole window at that instant:
+/// a reading over a clipped window is a reading at a different width.
+pub fn power_reading(env: &[f64], t: f64, dt_s: f64) -> Option<f64> {
+    if dt_s <= 0.0 || !t.is_finite() {
+        return None;
+    }
+    let width = ((READING_S / dt_s).round() as usize).max(1);
+    let start = (((t - 0.5 * READING_S).max(0.0)) / dt_s).round() as usize;
+    let end = start.checked_add(width)?;
+    if end > env.len() {
+        return None;
+    }
+    let mean = env[start..end]
+        .iter()
+        .map(|&db| 10f64.powf(db / 10.0))
+        .sum::<f64>()
+        / width as f64;
+    Some(10.0 * mean.max(1e-30).log10())
 }
 
 /// What one signal says about one partial at the two [`INSTANTS`].
@@ -1026,6 +1097,117 @@ pub fn low_row(row: &[f32], partial_hz: &[f64], factor: f64) -> Vec<f32> {
     out
 }
 
+/// How far a sub-[`LOW_BAND`]`.1` cell's own measured ratio must stand from one
+/// before this stage moves it.
+///
+/// The convention's own resolution and nothing else: `DECISIONS.md` 454 measures
+/// what moving the span's edges does to the ratio this stage writes, and at
+/// [`READING_S`] the median cell moves by **1.18** and the ninetieth percentile
+/// by 1.46. A cell whose whole correction is inside that is a cell this
+/// measurement cannot show is wrong, and correcting it anyway is the ratchet
+/// [`BandFall::partial_median_ratio_error`] is about, one level down: the loop
+/// is iterated, so a per-cent bias that survives the deadband is multiplied in
+/// at every pass.
+///
+/// It is a **per-cell** stop and not a band one, deliberately. A band's median
+/// says nothing about the cell this milestone was opened on: at C4 the sub-2 kHz
+/// median ratio is 1.49 while `k = 1` alone asks for 1.81, so a stop taken on
+/// the band would freeze the fundamental at half its error the moment the
+/// typical partial arrived.
+pub const LOW_DEADBAND: f64 = 1.18;
+
+/// One key's row with its sub-[`LOW_BAND`]`.1` cells corrected **per partial**
+/// against the recording of the same key, `share` of the way.
+///
+/// # Why this band is corrected at all, and why per partial
+///
+/// [`TailCorrection::at`] returns exactly 1.0 below [`HF1`]'s bottom edge, so
+/// until `DECISIONS.md` 455 nothing on this side of 2 kHz was ever measured on a
+/// render: the band was `estimate::shaping`'s alone, and what shaping writes
+/// there is a row normalised to geometric mean one over **all** of its partials.
+/// The high half of that row is then multiplied by [`extend_row`] until the
+/// render matches — the shipped preset's sampled rows have whole-row geometric
+/// means of 2.17 to 2.91 — while the low half keeps a normaliser the high half
+/// set. That is the seam `DECISIONS.md` 453 attributed C4's collapsed octave to,
+/// and its size is a rule rather than a key: the sampled ladder's sub-2 kHz
+/// halves read 1.00 / 0.90 / 0.75 / 0.39 going up the compass, which is exactly
+/// the shape "the share of a row's partials that lie above 2 kHz grows with the
+/// key" predicts.
+///
+/// **Per partial and not per band**, which is the opposite of the rule
+/// [`TailCorrection`] follows above 2 kHz, and the reason is that the two bands
+/// hold different objects. Above the tracker's reach a row has no cells at all
+/// and what is written is a *law*, so it has to be smooth in `ln f` and a
+/// per-partial scatter of a factor of two would be written straight into it.
+/// Below 2 kHz the row is already per-partial — 41 measured cells at C4 — and a
+/// single factor over the band cannot address the defect, which is one cell:
+/// C4's fundamental asks for 1.81 where its own band's median asks for 1.49.
+///
+/// It cannot double-count against `shaping`, and that is arithmetic rather than
+/// care: [`PartialTail::correction`] is measured on **this render**, which
+/// already contains whatever shaping wrote, so what it returns is the part
+/// shaping did not get — the fixed-point iteration of items 137, 199, 211, 264,
+/// 273 and 300 rather than a second opinion added to a first.
+///
+/// A cell is moved only where the partial is evidence ([`PartialTail::trusted`])
+/// and its correction stands outside [`LOW_DEADBAND`]; everything else is left
+/// exactly as it was.
+pub fn low_correct_row(
+    row: &[f32],
+    partial_hz: &[f64],
+    tails: &[PartialTail],
+    share: f64,
+) -> Vec<f32> {
+    let low = partial_hz.iter().take_while(|&&hz| hz < LOW_BAND.1).count();
+    if low == 0 || !(share.is_finite() && share > 0.0) {
+        return row.to_vec();
+    }
+    let factor = |k: usize| -> f64 {
+        let Some(tail) = tails.get(k - 1).filter(|t| t.k == k && t.trusted()) else {
+            return 1.0;
+        };
+        let Some(c) = tail.correction() else {
+            return 1.0;
+        };
+        if !(c.is_finite() && c > 0.0) || (LOW_DEADBAND.recip()..=LOW_DEADBAND).contains(&c) {
+            return 1.0;
+        }
+        c.clamp(MAX_PASS_FACTOR.recip(), MAX_PASS_FACTOR).powf(share)
+    };
+    // **A cell that would land on the schema's rail is refused, not clamped**,
+    // which is `estimate::shaping::rail_cells`' argument one table over:
+    // `MIN_PARTIAL_SIGMA_SCALE` and `MAX_PARTIAL_SIGMA_SCALE` are a statement
+    // about what a preset file may contain, and correcting *onto* them makes
+    // the file format the estimator's prior. It is also load-bearing on the
+    // construction: a cell railed at the minimum is a partial whose two
+    // polarizations are nearly undamped and therefore nearly degenerate, and
+    // `engine/tests/partials.rs`'s census counts a near-zero mode split as a
+    // *shared* beat rate. Refusing keeps the number of railed cells where the
+    // measurement put it.
+    let rails = (
+        f64::from(crate::preset::MIN_PARTIAL_SIGMA_SCALE),
+        f64::from(crate::preset::MAX_PARTIAL_SIGMA_SCALE),
+    );
+    let mut out: Vec<f32> = (1..=low.max(row.len()))
+        .map(|k| {
+            let was = f64::from(row.get(k - 1).copied().unwrap_or(1.0));
+            if k > low {
+                return was as f32;
+            }
+            let scaled = was * factor(k);
+            if scaled < rails.0 || scaled > rails.1 {
+                was as f32
+            } else {
+                scaled as f32
+            }
+        })
+        .collect();
+    while out.last() == Some(&1.0) {
+        out.pop();
+    }
+    out
+}
+
 /// A band's geometric centre, where [`TailCorrection::at`]'s line is pinned.
 pub fn band_centre((lo, hi): (f64, f64)) -> f64 {
     (lo * hi).sqrt()
@@ -1361,6 +1543,22 @@ pub fn low_mean(row: &[f32], partial_hz: &[f64]) -> Option<(f64, usize)> {
 /// next one and interpolating it is all that may be done with it; drawing its
 /// ×1.24 scatter instead would land a *random* factor from what the sampled key
 /// next door measured, which is the seam and not the cure.
+///
+/// # What `DECISIONS.md` 455 changed, and what it did not
+///
+/// It did not change this. It changed **when it is read and what it therefore
+/// says.** The population above is what the sampled keys' rows read *before* any
+/// stage measured the band on a render, and the step it describes is now known
+/// to be an artefact of the composition rather than a property of the piano:
+/// [`low_correct_row`] closes the sub-2 kHz cells of every recorded key against
+/// that key's own recording, and once it has, those keys' geometric means come
+/// back to about one and this line goes flat. So the fit is now taken **after**
+/// the passes rather than before them — the population a compass quantity is
+/// drawn from has to be the fitted keys, not the unfitted ones — and the
+/// unrecorded keys inherit whatever is left of the trend, which on the refitted
+/// preset is very little. Reading it before the passes, on a preset whose
+/// recorded keys still carry the seam, is what *propagated* the seam to the
+/// other 58 keys.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LowDecay {
     /// `exp(a + b·key)` through the sampled keys' own [`low_mean`].

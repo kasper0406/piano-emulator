@@ -1178,6 +1178,41 @@ pub fn energy_offset(row: &[Option<f64>], engine: &[Option<f64>]) -> (Vec<Option
     )
 }
 
+/// How much level a `notes.partial_gains` row carries on its own: `10 log10` of
+/// the mean of its cells' squares, in dB.
+///
+/// [`energy_offset`] pins this quantity to zero against the engine's **own
+/// rendered spectrum**, which is the right weighting and needs a render. This
+/// is the same statistic with unit weights, which needs only the row — so it is
+/// what a *test* can use to build the instrument item 272's policy describes
+/// (a row that may not move its key's level at all) out of any preset, without
+/// a hand-edited file and without a table of stored numbers.
+pub fn power_level_db(row: &[f32]) -> f64 {
+    let cells: Vec<f64> = row
+        .iter()
+        .map(|&g| f64::from(g))
+        .filter(|g| g.is_finite() && *g > 0.0)
+        .collect();
+    if cells.is_empty() {
+        return 0.0;
+    }
+    let mean = cells.iter().map(|g| g * g).sum::<f64>() / cells.len() as f64;
+    10.0 * mean.max(1e-30).log10()
+}
+
+/// The same row with [`power_level_db`] taken out of it: the row's shape,
+/// carrying no level.
+///
+/// **This is `DECISIONS.md` 272's policy as a function**, and it is here so
+/// that the gate item 456 added can be falsified against the policy item 457
+/// replaced rather than against a copy of a file.
+pub fn unlevel_row(row: &[f32], config: &ShapingConfig) -> Vec<f32> {
+    if row.is_empty() {
+        return Vec::new();
+    }
+    flatten_row(row, 1.0, -power_level_db(row), config)
+}
+
 /// The same row with its **roughness** scaled by `keep` and `level_db` added to
 /// every cell.
 ///

@@ -70,6 +70,7 @@ use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_tuner::audio::Audio;
 use piano_tuner::cache;
 use piano_tuner::estimate::melody::{self, Column, LineNote, NoteTexture, Window};
+use piano_tuner::estimate::shaping::ShapingConfig;
 use piano_tuner::realism::{Phrase, RecordedKeys, VelocityLayers};
 use piano_tuner::sampler::{engine_events, Sampler, SAMPLER_VERSION};
 use piano_tuner::{SampleLibrary, SAMPLE_RATE};
@@ -148,51 +149,41 @@ fn with_the_lobe_before_the_refit(mut preset: Preset) -> Preset {
     preset
 }
 
-/// The same preset with `DECISIONS.md` 335 taken back out of it: every drawn
-/// decay row's cells **under 2 kHz** go back to 1.0, which is what
-/// `TailCorrection::at` wrote there before this milestone and what left the 58
-/// unrecorded keys in a different gauge from the 30 recorded ones.
+// ---------------------------------------------------------------------------
+// Rendering the line
+// ---------------------------------------------------------------------------
+
+/// The composition `DECISIONS.md` 455 removed, put back: every key's sub-2 kHz
+/// `partial_sigma_scale` cells divided by the **whole** row's geometric mean.
 ///
-/// Nothing else moves — the two high bands of the same rows are untouched, and
-/// no recorded key is touched at all — so a column that fails here and passes
-/// on the shipped preset has been attributed to one band of one table.
-fn without_drawn_low_decay(mut preset: Preset) -> Preset {
-    let drawn = preset.notes.synthesized_decay.clone();
-    assert!(
-        !drawn.is_empty(),
-        "the shipped preset names no drawn decay rows; this test has nothing to undo"
-    );
-    let mut touched = 0usize;
-    for key in drawn {
+/// Built from arithmetic on whatever preset ships, so it is never a copy of a
+/// file. See the falsification that uses it for why this is the composition.
+fn with_the_low_band_seam(mut preset: Preset) -> Preset {
+    for key in 21..=108u8 {
+        let i = usize::from(key - 21);
+        let row = preset.notes.partial_sigma_scale[i].clone();
+        if row.is_empty() {
+            continue;
+        }
         let params = preset.string_params(key);
         let hz: Vec<f64> = (1..=params.partial_count())
             .map(|k| f64::from(params.partial_freq(k)))
             .collect();
-        let i = usize::from(key - 21);
-        let Some(row) = preset.notes.partial_sigma_scale.get_mut(i) else {
+        let logs: Vec<f64> = row
+            .iter()
+            .map(|&g| f64::from(g))
+            .filter(|g| *g > 0.0)
+            .map(f64::ln)
+            .collect();
+        if logs.is_empty() {
             continue;
-        };
-        for (cell, &f) in row.iter_mut().zip(&hz) {
-            if f < piano_tuner::estimate::tail::LOW_BAND.1 && *cell != 1.0 {
-                *cell = 1.0;
-                touched += 1;
-            }
         }
-        while row.last() == Some(&1.0) {
-            row.pop();
-        }
+        let geomean = (logs.iter().sum::<f64>() / logs.len() as f64).exp();
+        preset.notes.partial_sigma_scale[i] =
+            piano_tuner::estimate::tail::low_row(&row, &hz, geomean.recip());
     }
-    assert!(
-        touched > 0,
-        "no drawn row carries a cell under 2 kHz; this test has nothing to undo"
-    );
-    preset.validate().expect("undoing a milestone is still legal");
     preset
 }
-
-// ---------------------------------------------------------------------------
-// Rendering the line
-// ---------------------------------------------------------------------------
 
 fn render_engine(preset: &Preset, phrase: &Phrase) -> Audio {
     let events: Vec<RenderEvent> = engine_events::to_render_events(&phrase.events);
@@ -347,6 +338,23 @@ fn gate(metric: &str, window: Window) {
             c.balance_bar,
             c.balance_bar / melody::ALLOWANCE,
             melody::ALLOWANCE,
+            melody::report(std::slice::from_ref(c))
+        );
+    }
+    if c.gated_on_seam {
+        assert!(
+            c.seam_pass,
+            "{} ({}) departs {:.2} dB from the register's median at {} against a bar of \
+             {:.2} (the larger of one key's two takes, {:.2}, and the recorded register's \
+             own spread, x{:.2}); the median itself is {:+.2} and is not gated\n{}",
+            c.metric,
+            c.window.name(),
+            c.seam,
+            melody::note_name(c.seam_key),
+            c.seam_bar,
+            c.seam_floor,
+            melody::ALLOWANCE,
+            c.balance,
             melody::report(std::slice::from_ref(c))
         );
     }
@@ -722,39 +730,70 @@ fn the_recordings_own_line_passes_the_balance_column() {
 }
 
 /// The tail gate is a statement about a preset, and the statement it was
-/// written to make is that the instrument of `DECISIONS.md` 331 fails it, at
-/// C4, on the metric the seam is in.
+/// written to make is that a low band carrying the **whole row's** normaliser
+/// fails it, at C4, on the metric the seam is in.
 ///
-/// A gate nobody has seen fail is not a gate, so the falsification moved with
-/// the fix rather than being retired with it: the material is now the shipped
-/// preset with **one band of one table** put back the way item 331 found it —
-/// every drawn `partial_sigma_scale` row's cells under 2 kHz returned to 1.0,
-/// nothing else touched, no recorded key touched at all. It asserts the *key*,
-/// because the listener named the key.
+/// # Why the material changed with `DECISIONS.md` 455
+///
+/// Item 335's falsification put every *drawn* `partial_sigma_scale` row's
+/// sub-2 kHz cells back to 1.0 and asserted the tail columns failed. It cannot
+/// fail any more, and the reason is this milestone's own result rather than a
+/// weakening: the step that draw existed to carry is **gone at its source**.
+/// `estimate::tail::low_correct_row` closes every recorded key's sub-2 kHz
+/// cells on the render, those keys' geometric means come back to about one, and
+/// the line through them that `LowDecay` draws from is therefore flat at one —
+/// so setting a drawn key's low cells to 1.0 now changes almost nothing.
+/// `the_drawn_low_band_is_within_the_fits_own_resolution_of_one` asserts that
+/// directly, on the preset and with no render in it.
+///
+/// What replaces it is the defect item 455 removed, rebuilt from whatever
+/// preset ships and from arithmetic rather than from a stored table:
+/// `estimate::shaping::partial_sigma_scale` normalises a row to geometric mean
+/// one over **all** of its partials, `tail` then multiplies only the cells above
+/// 2 kHz until the render matches, and what is left under 2 kHz is the row's own
+/// low half divided by a normaliser the *high* half set. Dividing each key's
+/// sub-2 kHz cells by its whole row's geometric mean puts that composition back
+/// exactly, at every key at once, and nothing else is touched. It asserts the
+/// *key*, because the listener named the key.
 #[test]
-fn the_tail_gate_fails_without_the_drawn_low_band_at_c4() {
+fn the_tail_gate_fails_when_the_low_band_carries_the_whole_rows_normaliser() {
     let Some(sfz) = sfz() else {
         eprintln!("no data/salamander in this tree; skipping the tail falsification");
         return;
     };
-    let before = without_drawn_low_decay(shipped_preset());
+    let before = with_the_low_band_seam(shipped_preset());
     let (columns, _, _) = score(&before, &sfz);
     let text = melody::report(&columns);
     println!("{text}");
-    let broken: Vec<&Column> = columns
-        .iter()
-        .filter(|c| c.window == Window::Tail && !c.pass)
-        .collect();
-    assert!(
-        !broken.is_empty(),
-        "the pre-335 instrument passes every tail column, so the tail gate does \
-         not test what it was written for\n{text}"
+    // **What the seam does is move the tail `hf` column onto C4**, which is
+    // item 334's finding stated as a column: that column is a *share* whose
+    // denominator is the fundamental, and the low band is what holds a
+    // fundamental up. It no longer takes the column past its bar, and that is a
+    // measurement rather than a weakening — item 452's onset fix took the
+    // column's own worst note from 3.04 to 1.82 and this milestone's span
+    // convention took the tail's from 3.75 to 3.06, so a defect that was worth
+    // failing it in item 331's tree is worth naming the key in this one. What
+    // is asserted is therefore the key and the size, both against the shipped
+    // instrument measured the same way.
+    let hf = column(&columns, "hf", Window::Tail);
+    let shipped_hf = shipped().map(|cs| column(cs, "hf", Window::Tail));
+    let at_c4 = |c: &Column| -> f64 {
+        c.notes
+            .iter()
+            .find(|n| n.key == 60)
+            .map_or(f64::NAN, |n| n.engine_residual.abs())
+    };
+    assert_eq!(
+        hf.standout_key, 60,
+        "the low band's seam does not put the tail `hf` column's worst note on C4, \
+         which is the key item 334 attributed and the listener named\n{text}"
     );
+    let (now, before) = (at_c4(hf), shipped_hf.map_or(f64::NAN, at_c4));
     assert!(
-        broken.iter().any(|c| c.standout_key == 60),
-        "the tail columns fail but none of them names C4, which is the note the \
-         listener named and the only key of this line whose decay row was \
-         fitted\n{text}"
+        now > before + 2.0,
+        "C4 stands {now:.2} dB off the line's own tail `hf` trend with the seam back \
+         against {before:.2} on the shipped instrument, so the seam is not what \
+         moved it\n{text}"
     );
 }
 
@@ -1042,4 +1081,141 @@ fn a_low_note_struck_into_a_tail(sample_rate: f64, strike_s: f64) -> Vec<f32> {
         *s = v as f32;
     }
     out
+}
+
+/// **Is this note as loud as the piano's own note at the same key** —
+/// `DECISIONS.md` 456, and the column every other one on this board is blind to
+/// by construction.
+///
+/// `roughness`, `wobble` and `hf` are shapes; `strike`, `channel` and
+/// `splitting` are ratios; `balance` is a position. A note eight decibels under
+/// the piano's own moves none of them, which is why the C4 a listener picked
+/// out of this very tune sat under a fully green board — the fourth time this
+/// repository has failed that way (`CONTEXT.md`'s standing warning) and the
+/// first time the missing column is a **level**.
+///
+/// It is gated on its **seam** and not on its median: the median is the
+/// engine's master gain against the library's mastering, about 15 dB, and is
+/// nobody's error, while the departure from it is the piano's own voicing plus
+/// the engine's own mistakes. On the preset item 453 diagnosed it read
+/// **8.87 dB at C4 against a bar of 5.21**; after item 457's per-key level it
+/// reads **1.89 at A3**.
+#[test]
+fn every_note_of_the_line_is_as_loud_as_the_pianos_own() {
+    gate("loudness", Window::Head);
+}
+
+/// The falsification for the column above, built the way this repository builds
+/// them: out of the shipped preset and the **policy** the milestone replaced,
+/// never out of a copy of a file or a stored table of numbers.
+///
+/// `DECISIONS.md` 272's decision was that a key's own level is measured,
+/// reported and *written nowhere* — `estimate::shaping::energy_offset` pins
+/// every `notes.partial_gains` row so that the power it puts through the
+/// engine's own spectrum is the power that was already there.
+/// `shaping::unlevel_row` is that policy as a function of a row, so applying it
+/// to every key of the shipped preset reconstructs an instrument that carries
+/// **no per-key level anywhere**, which is what every preset this repository
+/// has ever shipped was.
+///
+/// It asserts the key as well as the failure, because the listener named the
+/// key.
+#[test]
+fn the_loudness_gate_fails_on_the_policy_that_wrote_no_level_at_all() {
+    let Some(sfz) = sfz() else {
+        eprintln!("no data/salamander in this tree; skipping the loudness falsification");
+        return;
+    };
+    let mut before = shipped_preset();
+    let shaping = ShapingConfig::default();
+    for row in &mut before.notes.partial_gains {
+        *row = piano_tuner::estimate::shaping::unlevel_row(row, &shaping);
+    }
+    let (columns, _, _) = score(&before, &sfz);
+    let text = melody::report(&columns);
+    println!("{text}");
+    let loudness = column(&columns, "loudness", Window::Head);
+    assert!(
+        !loudness.seam_pass,
+        "an instrument carrying no per-key level at all passes the loudness column, \
+         so that column does not test what it was written for: seam {:.2} against a \
+         bar of {:.2}\n{text}",
+        loudness.seam,
+        loudness.seam_bar
+    );
+    // And it names the key, though not by rank: `unlevel_row` takes the level
+    // out of **every** key, so which one ends up worst is a property of the
+    // whole compass, while what item 453 measured is C4's own departure. So the
+    // assertion is on C4's own seam, against the same key on the shipped
+    // instrument.
+    let c4 = |c: &Column| -> f64 {
+        c.population
+            .iter()
+            .find(|p| p.key == 60)
+            .map_or(f64::NAN, |p| p.seam.abs())
+    };
+    let now = c4(loudness);
+    let shipped = shipped().map_or(f64::NAN, |cs| c4(column(cs, "loudness", Window::Head)));
+    assert!(
+        now > shipped + 2.0,
+        "C4 departs {now:.2} dB from the register's median with no level written \
+         anywhere against {shipped:.2} on the shipped instrument, so item 457's \
+         per-key level is not what moved it\n{text}"
+    );
+}
+
+/// **The step `DECISIONS.md` 335 drew is gone at its source**, which is what
+/// makes the falsification above change its material rather than weaken.
+///
+/// Item 335 measured a fitted/unfitted step in one band: the geometric mean of
+/// a row's cells under 2 kHz read 1.00 at A0, 0.94 at F#3, 0.75 at C4, 0.59 at
+/// A4 and 0.39 at C5 over the *recorded* keys and exactly 1.000 at all 37 drawn
+/// ones, because `TailCorrection::at` returns one below 2 kHz and nothing else
+/// had ever written there. Item 455 gave the band to a render-closed per-partial
+/// correction, so the recorded keys' own means came back to one and the line
+/// `LowDecay` draws from went flat.
+#[test]
+fn the_drawn_low_band_is_within_the_fits_own_resolution_of_one() {
+    let preset = shipped_preset();
+    // Item 335's own statistic: the **group difference** between the keys the
+    // library recorded and the keys it did not. Not every key's own mean — the
+    // bass keys carry sixty cells under 2 kHz and their own measured spread,
+    // and flattening that would be a different defect — but the step between
+    // the two populations, which is what a draw can create and what item 335
+    // measured at 1.17 dB of rate.
+    // The provenance list is the population split, and it is the preset's own:
+    // a key named in `notes.synthesized_decay` carries a drawn row.
+    let drawn_keys = preset.notes.synthesized_decay.clone();
+    let mut groups: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+    for key in 21..=108u8 {
+        let i = usize::from(key - 21);
+        let row = &preset.notes.partial_sigma_scale[i];
+        let params = preset.string_params(key);
+        let hz: Vec<f64> = (1..=params.partial_count())
+            .map(|k| f64::from(params.partial_freq(k)))
+            .collect();
+        let Some((mean, _)) = piano_tuner::estimate::tail::low_mean(row, &hz) else {
+            continue;
+        };
+        groups[usize::from(!drawn_keys.contains(&key))].push(mean.ln());
+    }
+    let median = |v: &mut Vec<f64>| -> f64 {
+        v.sort_by(f64::total_cmp);
+        if v.is_empty() {
+            0.0
+        } else {
+            v[v.len() / 2]
+        }
+    };
+    let (drawn, fitted) = (median(&mut groups[0]), median(&mut groups[1]));
+    let step = (fitted - drawn).exp();
+    let bar = piano_tuner::estimate::tail::LOW_DEADBAND;
+    assert!(
+        (bar.recip()..=bar).contains(&step),
+        "the keys the library recorded carry a sub-2 kHz geometric mean of \
+         {:.3} against {:.3} at the keys it did not — a step of x{step:.3}, outside \
+         the fit's own resolution of x{bar:.2}",
+        fitted.exp(),
+        drawn.exp()
+    );
 }

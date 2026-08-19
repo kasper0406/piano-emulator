@@ -318,7 +318,7 @@ pub const LADDER_REACH: u8 = 9;
 pub const ALLOWANCE: f64 = 1.25;
 
 /// Names in the order [`NoteTexture::values`] returns them.
-pub const METRICS: [&str; 7] = [
+pub const METRICS: [&str; 8] = [
     "roughness",
     "wobble",
     "hf",
@@ -326,6 +326,7 @@ pub const METRICS: [&str; 7] = [
     "channel",
     "balance",
     "splitting",
+    "loudness",
 ];
 
 /// Which of [`METRICS`] is a **balance**: scored against the recording's own
@@ -345,7 +346,8 @@ pub const METRICS: [&str; 7] = [
 /// `splitting` is the fourth, and it is scored on the **line** rather than on
 /// the ladder — see [`METRIC_ON_LINE`], which is what `DECISIONS.md` 448(d)
 /// asked a successor for.
-pub const METRIC_IS_BALANCE: [bool; 7] = [false, false, false, true, true, true, true];
+pub const METRIC_IS_BALANCE: [bool; 8] =
+    [false, false, false, true, true, true, true, true];
 
 /// Which of [`METRICS`] takes its **balance** over the line's own five pitches
 /// instead of over the recorded ladder.
@@ -378,7 +380,8 @@ pub const METRIC_IS_BALANCE: [bool; 7] = [false, false, false, true, true, true,
 /// regime: every fundamental inside the band, every overtone above it, which is
 /// the session's own finding and the reason a listener hears the whole tune
 /// come apart rather than one note of it.
-pub const METRIC_ON_LINE: [bool; 7] = [false, false, false, false, false, false, true];
+pub const METRIC_ON_LINE: [bool; 8] =
+    [false, false, false, false, false, false, true, false];
 
 /// Which of [`METRICS`] is additionally gated on the **line's own spread**: how
 /// far the engine's worst note stands from the engine line's own register
@@ -403,7 +406,8 @@ pub const METRIC_ON_LINE: [bool; 7] = [false, false, false, false, false, false,
 /// them) and the spread half convicts a line pulled apart *unevenly*, which is
 /// what a band edge landing between two pitches of the tune does and what item
 /// 448's four green frontier points bought their median with.
-pub const METRIC_IS_SPREAD: [bool; 7] = [true, true, true, false, false, true, true];
+pub const METRIC_IS_SPREAD: [bool; 8] =
+    [true, true, true, false, false, true, true, false];
 
 /// What `DECISIONS.md` 340's refit moved `[noise.strike]` by, kept here so that
 /// the instrument the `strike` column fails on can be built from the shipped
@@ -427,6 +431,35 @@ pub const BALANCE_METRIC: usize = 5;
 
 /// The index of `splitting` in [`METRICS`].
 pub const SPLITTING_METRIC: usize = 6;
+
+/// The index of `loudness` in [`METRICS`].
+pub const LOUDNESS_METRIC: usize = 7;
+
+/// Which of [`METRICS`] takes its verdict on the **seam** — how far the
+/// engine's distance from one recorded key departs from the register's median
+/// distance — rather than on that median itself.
+///
+/// **This is the column the four unscored-dimension failures of `CONTEXT.md`
+/// have in common, written as a rule.** Every column of this board already
+/// carries a [`Column::seam`] and a [`Column::seam_floor`], and until
+/// `DECISIONS.md` 456 not one of them was gated on either: the board's balance
+/// verdict is a **median** over the recorded keys, which is exactly the
+/// statistic a per-key error cancels out of. `loudness` is the column where
+/// that is not a detail but the whole defect. A key's absolute level against the
+/// recording of the same key contains a large common offset — the engine's
+/// master gain against the library's mastering, ~15 dB, which is nobody's error
+/// — plus a per-key part, which is the piano's own voicing plus the engine's
+/// own mistakes. The median is the first; the seam is the second; and
+/// `DECISIONS.md` 272 decided to write neither, so the only surface that could
+/// have flagged C4 was the compass, whose `z` divides the per-key part by the
+/// 3.34 dB rms of key-to-key scatter that same decision accepted.
+///
+/// The bar is [`Column::seam_floor`] — the same statistic with the *neighbouring
+/// velocity layer* standing in for the engine, which is two takes of one piano
+/// and therefore the smallest per-key level difference this library can resolve
+/// — times [`ALLOWANCE`]. It is not a bar anyone chose.
+pub const METRIC_IS_SEAM: [bool; 8] =
+    [false, false, false, false, false, false, false, true];
 
 /// **The `[voicing.mics.modal]` band `DECISIONS.md` 418 shipped and 446
 /// convicted**, as `(lo_hz, hi_hz, lift)` — kept here so that the instrument
@@ -708,10 +741,30 @@ pub struct NoteTexture {
     /// different parts of the plate — so this is a **balance** against the
     /// recording's number and never against nought.
     pub split_db: f64,
+    /// **How loud this note is**: the A-weighted energy of the note's own
+    /// window on the **mono fold-down**, in dB.
+    ///
+    /// `DECISIONS.md` 456, and it is the column `CONTEXT.md`'s standing warning
+    /// predicts: every other column here is a *shape* (`roughness`, `wobble`,
+    /// `hf`), a *ratio* (`strike`, `channel`, `splitting`) or a *position*
+    /// (`balance`), and not one of them is a function of how loud the note is.
+    /// A note eight decibels under the piano's own at the same key moves none of
+    /// them.
+    ///
+    /// A-weighted, because that is what makes a level comparable *across* keys
+    /// at all: 261.6 Hz and 392.0 Hz are 2.3 dB apart on that curve before
+    /// anything about the piano is considered, so an unweighted column would
+    /// read the tune's own melodic shape as a defect. Mono, because
+    /// `DECISIONS.md` 417 and 451 forbid solving a level in the pair — the
+    /// fold-down is where a per-key gain has to be right.
+    ///
+    /// Its verdict is on the **seam** and not on the median: see
+    /// [`METRIC_IS_SEAM`].
+    pub loudness_db: f64,
 }
 
 impl NoteTexture {
-    pub fn values(&self) -> [f64; 7] {
+    pub fn values(&self) -> [f64; 8] {
         [
             self.roughness_db,
             self.wobble_db,
@@ -720,6 +773,7 @@ impl NoteTexture {
             self.channel_db,
             self.balance_db,
             self.split_db,
+            self.loudness_db,
         ]
     }
 }
@@ -814,6 +868,7 @@ pub fn measure_line(
                         sample_rate,
                     ),
                 },
+                loudness_db: a_weighted_db(slice, sample_rate),
                 split_db: match stereo {
                     // A mono signal puts every partial in the same place, which
                     // is the same statement the two columns above make.
@@ -828,6 +883,51 @@ pub fn measure_line(
             }
         })
         .collect()
+}
+
+/// The A-weighted energy of one window, in dB — the column
+/// [`NoteTexture::loudness_db`] carries.
+///
+/// Taken in the frequency domain over the whole window rather than through a
+/// filter, because a filter's settling time is comparable with the window and
+/// the window *is* the measurement. Hann-windowed, and normalised by the
+/// window's own length so that the head and the tail spans are on one scale.
+pub fn a_weighted_db(window: &[f32], sample_rate: f64) -> f64 {
+    if window.len() < 64 || sample_rate <= 0.0 {
+        return f64::NAN;
+    }
+    let n = window.len().next_power_of_two();
+    let mut planner = rustfft::FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(n);
+    let mut buf: Vec<rustfft::num_complex::Complex<f64>> = (0..n)
+        .map(|i| {
+            let v = f64::from(window.get(i).copied().unwrap_or(0.0));
+            let w = if i < window.len() {
+                0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / window.len() as f64).cos()
+            } else {
+                0.0
+            };
+            rustfft::num_complex::Complex::new(v * w, 0.0)
+        })
+        .collect();
+    fft.process(&mut buf);
+    let bin = sample_rate / n as f64;
+    let mut sum = 0.0;
+    for (k, c) in buf.iter().take(n / 2).enumerate().skip(1) {
+        sum += c.norm_sqr() * a_weight(k as f64 * bin);
+    }
+    10.0 * (sum / (n as f64 * window.len() as f64)).max(1e-30).log10()
+}
+
+/// IEC 61672 A-weighting as a power gain, normalised to unity at 1 kHz.
+fn a_weight(f: f64) -> f64 {
+    let f2 = f * f;
+    let num = 12194.0f64.powi(2) * f2 * f2;
+    let den = (f2 + 20.6f64.powi(2))
+        * ((f2 + 107.7f64.powi(2)) * (f2 + 737.9f64.powi(2))).sqrt()
+        * (f2 + 12194.0f64.powi(2));
+    let a = num / den.max(1e-30);
+    a * a * 10.0f64.powf(0.2)
 }
 
 /// `10 log10((E_L + E_R) / 2 E_M)` over one window — the column
@@ -1069,13 +1169,13 @@ fn hf_share_db(stft: &Stft, window: &[f32], sample_rate: f64) -> f64 {
 /// Median rather than mean because the notes are played into the tail of the
 /// one before them and how much tail there is depends on where in the phrase a
 /// note falls; the median over six occurrences is the note, not the phrasing.
-pub fn per_key(textures: &[NoteTexture]) -> Vec<(u8, [f64; 7])> {
+pub fn per_key(textures: &[NoteTexture]) -> Vec<(u8, [f64; 8])> {
     let mut keys: Vec<u8> = textures.iter().map(|t| t.key).collect();
     keys.sort_unstable();
     keys.dedup();
     keys.into_iter()
         .map(|key| {
-            let mut out = [0.0; 7];
+            let mut out = [0.0; 8];
             for (m, slot) in out.iter_mut().enumerate() {
                 let mut values: Vec<f64> = textures
                     .iter()
@@ -1193,10 +1293,21 @@ pub struct Column {
     /// say which of them is a verdict and which is printed. `balance` is the
     /// one metric for which both are (`DECISIONS.md` 446).
     pub gated_on_spread: bool,
+    /// Whether this column is gated on [`Column::seam`] — see
+    /// [`METRIC_IS_SEAM`]. `loudness` is the one metric that is, and it is the
+    /// only column of this board whose verdict is not a median or a spread.
+    pub gated_on_seam: bool,
     /// The balance half's own verdict, whether or not it is gated.
     pub balance_pass: bool,
     /// The spread half's own verdict, whether or not it is gated.
     pub spread_pass: bool,
+    /// The seam half's own verdict, whether or not it is gated.
+    pub seam_pass: bool,
+    /// What [`Column::seam`] has to come in under: the larger of
+    /// [`Column::seam_floor`] and the recorded register's own spread at the
+    /// same order statistic, times [`ALLOWANCE`]. See the two-term argument
+    /// where it is built.
+    pub seam_bar: f64,
     /// The engine's median distance from the piano over the **recorded keys of
     /// the register**, signed. For `strike` that is how much louder or quieter
     /// the engine's mechanism is against its own note than the piano's is
@@ -1288,7 +1399,7 @@ pub fn compare(
         // once and in the window that contains it.
         .filter(|&(m, _)| !(METRIC_IS_BALANCE[m] && window == Window::Tail))
         .map(|(m, &metric)| {
-            let residuals = |rows: &[(u8, [f64; 7])]| -> Vec<f64> {
+            let residuals = |rows: &[(u8, [f64; 8])]| -> Vec<f64> {
                 let points: Vec<(f64, f64)> =
                     rows.iter().map(|&(k, v)| (f64::from(k), v[m])).collect();
                 let (slope, intercept) = theil_sen(&points);
@@ -1476,10 +1587,42 @@ pub fn compare(
             let n = spread.len().max(1) as f64;
             let register_sigma = 1.4826 * median(&mut spread) / n.sqrt();
             let balance_bar = median(&mut takes).max(register_sigma) * ALLOWANCE;
-            let gated_on_balance = METRIC_IS_BALANCE[m];
+            // A **seam** column is scored on the same material a balance
+            // column is — the recorded keys, both sides the same note — and
+            // takes its verdict on a different statistic of it: the worst
+            // per-key departure from the register's median error rather than
+            // that median. See `METRIC_IS_SEAM`. The median is still computed
+            // and printed; for `loudness` it is the engine's master gain
+            // against the library's mastering and is nobody's error.
+            let gated_on_seam = METRIC_IS_SEAM[m];
+            let gated_on_balance = METRIC_IS_BALANCE[m] && !gated_on_seam;
             let gated_on_spread = METRIC_IS_SPREAD[m];
             let balance_pass = balance.abs() <= balance_bar;
             let spread_pass = standout <= bar;
+            // **Two terms, and the second one is why this bar is honest**, for
+            // exactly the reason `balance_bar` has two: the take-to-take floor
+            // is the right bound only where it is the limit of the
+            // measurement, and for a *level* it is not. The library holds one
+            // take of each key, so what stands in for a second take here is the
+            // neighbouring velocity **layer** — the same recording of the same
+            // key struck harder — and its head level tracks its neighbour's to
+            // a third of a decibel. That is a bar on the library's dynamic
+            // consistency, not on how much a piano's own notes differ from each
+            // other, which is the quantity a per-key gain is answerable to. The
+            // second term is that quantity, read off the recordings alone: how
+            // far a recorded key's own level stands from the recorded
+            // register's trend, at the same order statistic the seam is (the
+            // median of the largest of as many draws as there are keys in the
+            // population). The larger governs.
+            let seam_spread = worst_of_n(
+                &population_rows
+                    .iter()
+                    .map(|p| p.reference_residual)
+                    .collect::<Vec<f64>>(),
+                population_rows.len(),
+            );
+            let seam_bar = seam_floor.max(seam_spread) * ALLOWANCE;
+            let seam_pass = seam <= seam_bar;
 
             Column {
                 metric,
@@ -1487,7 +1630,9 @@ pub fn compare(
                 // A column asserts every half it is gated on and prints the
                 // other. `balance` is gated on both, which is the whole point
                 // of it (`METRIC_IS_SPREAD`).
-                pass: (!gated_on_balance || balance_pass) && (!gated_on_spread || spread_pass),
+                pass: (!gated_on_balance || balance_pass)
+                    && (!gated_on_spread || spread_pass)
+                    && (!gated_on_seam || seam_pass),
                 notes,
                 population: population_rows,
                 standout,
@@ -1502,8 +1647,11 @@ pub fn compare(
                 bar,
                 gated_on_balance,
                 gated_on_spread,
+                gated_on_seam,
                 balance_pass,
                 spread_pass,
+                seam_pass,
+                seam_bar,
                 balance,
                 balance_bar,
                 seam,
@@ -1519,16 +1667,16 @@ pub fn compare(
 /// recordings, and the recordings' neighbouring velocity layer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lines {
-    pub engine: Vec<(u8, [f64; 7])>,
-    pub reference: Vec<(u8, [f64; 7])>,
-    pub layer: Vec<(u8, [f64; 7])>,
+    pub engine: Vec<(u8, [f64; 8])>,
+    pub reference: Vec<(u8, [f64; 8])>,
+    pub layer: Vec<(u8, [f64; 8])>,
 }
 
 impl Lines {
     pub fn new(
-        engine: Vec<(u8, [f64; 7])>,
-        reference: Vec<(u8, [f64; 7])>,
-        layer: Vec<(u8, [f64; 7])>,
+        engine: Vec<(u8, [f64; 8])>,
+        reference: Vec<(u8, [f64; 8])>,
+        layer: Vec<(u8, [f64; 8])>,
     ) -> Self {
         Lines {
             engine,
@@ -1837,8 +1985,15 @@ mod tests {
     /// three texture metrics answer "does a note stand out" and the balance
     /// column answers "is the mechanism as loud as the piano's", so a fixture
     /// built to exercise one of them says nothing about the other.
+    /// The columns whose verdict is the line's own evenness: not the balances,
+    /// and not the one column gated on its seam (`METRIC_IS_SEAM`), which is
+    /// scored on the recorded keys like a balance and reads its answer off a
+    /// different statistic of them.
     fn evenness(columns: Vec<Column>) -> Vec<Column> {
-        columns.into_iter().filter(|c| !c.gated_on_balance).collect()
+        columns
+            .into_iter()
+            .filter(|c| !c.gated_on_balance && !c.gated_on_seam)
+            .collect()
     }
 
     /// The column named, whatever the window.
@@ -1854,15 +2009,15 @@ mod tests {
     /// semitone; `bump` is added to the engine's C4 alone.
     fn lines(bump: f64, slope: f64) -> Lines {
         let keys = [60u8, 62, 64, 65, 67];
-        let reference: Vec<(u8, [f64; 7])> = keys
+        let reference: Vec<(u8, [f64; 8])> = keys
             .iter()
-            .map(|&k| (k, [slope * f64::from(k - 60); 7]))
+            .map(|&k| (k, [slope * f64::from(k - 60); 8]))
             .collect();
         // The neighbouring velocity layer: the piano again, on its own line.
         let layer = reference.clone();
         // The engine is the same line 3 dB smoother — a voicing offset — plus a
         // bump on one note.
-        let mut engine: Vec<(u8, [f64; 7])> = reference
+        let mut engine: Vec<(u8, [f64; 8])> = reference
             .iter()
             .map(|&(k, v)| (k, v.map(|x| x - 3.0)))
             .collect();
@@ -1879,14 +2034,14 @@ mod tests {
         // interpolation lands, and the median offset is still zero.
         const PATTERN: [f64; 9] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.0];
         let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
-        let engine: Vec<(u8, [f64; 7])> = keys
+        let engine: Vec<(u8, [f64; 8])> = keys
             .iter()
-            .map(|&k| (k, [slope * (f64::from(k) - 60.0) - offset; 7]))
+            .map(|&k| (k, [slope * (f64::from(k) - 60.0) - offset; 8]))
             .collect();
-        let reference: Vec<(u8, [f64; 7])> = keys
+        let reference: Vec<(u8, [f64; 8])> = keys
             .iter()
             .zip(PATTERN)
-            .map(|(&k, p)| (k, [slope * (f64::from(k) - 60.0) + scatter * p; 7]))
+            .map(|(&k, p)| (k, [slope * (f64::from(k) - 60.0) + scatter * p; 8]))
             .collect();
         let mut layer = reference.clone();
         layer[5].1 = layer[5].1.map(|x| x + take);
@@ -1967,10 +2122,10 @@ mod tests {
         // a median over nine reads that as zero.
         let takes = |offset: f64, take: f64| -> Lines {
             let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
-            let engine: Vec<(u8, [f64; 7])> =
-                keys.iter().map(|&k| (k, [-offset; 7])).collect();
-            let reference: Vec<(u8, [f64; 7])> = keys.iter().map(|&k| (k, [0.0; 7])).collect();
-            let layer: Vec<(u8, [f64; 7])> = keys.iter().map(|&k| (k, [take; 7])).collect();
+            let engine: Vec<(u8, [f64; 8])> =
+                keys.iter().map(|&k| (k, [-offset; 8])).collect();
+            let reference: Vec<(u8, [f64; 8])> = keys.iter().map(|&k| (k, [0.0; 8])).collect();
+            let layer: Vec<(u8, [f64; 8])> = keys.iter().map(|&k| (k, [take; 8])).collect();
             Lines::new(engine, reference, layer)
         };
         let line = lines(4.0, 0.0);
@@ -2048,18 +2203,18 @@ mod tests {
         // A piano whose two capsules agree with themselves to 0.2 dB and whose
         // register carries no trend: the honest floor under both halves.
         let rows = |values: &dyn Fn(u8) -> f64| -> Lines {
-            let engine: Vec<(u8, [f64; 7])> =
-                keys.iter().map(|&k| (k, [values(k); 7])).collect();
-            let reference: Vec<(u8, [f64; 7])> = keys.iter().map(|&k| (k, [0.0; 7])).collect();
-            let layer: Vec<(u8, [f64; 7])> = keys.iter().map(|&k| (k, [0.2; 7])).collect();
+            let engine: Vec<(u8, [f64; 8])> =
+                keys.iter().map(|&k| (k, [values(k); 8])).collect();
+            let reference: Vec<(u8, [f64; 8])> = keys.iter().map(|&k| (k, [0.0; 8])).collect();
+            let layer: Vec<(u8, [f64; 8])> = keys.iter().map(|&k| (k, [0.2; 8])).collect();
             Lines::new(engine, reference, layer)
         };
         let line_rows = |values: &dyn Fn(u8) -> f64| -> Lines {
             let line_keys = [60u8, 62, 64, 65, 67];
-            let engine: Vec<(u8, [f64; 7])> =
-                line_keys.iter().map(|&k| (k, [values(k); 7])).collect();
-            let reference: Vec<(u8, [f64; 7])> =
-                line_keys.iter().map(|&k| (k, [0.0; 7])).collect();
+            let engine: Vec<(u8, [f64; 8])> =
+                line_keys.iter().map(|&k| (k, [values(k); 8])).collect();
+            let reference: Vec<(u8, [f64; 8])> =
+                line_keys.iter().map(|&k| (k, [0.0; 8])).collect();
             Lines::new(engine, reference.clone(), reference)
         };
 
@@ -2242,15 +2397,15 @@ mod tests {
         // line-scored one reads eight.
         let line_keys = [60u8, 62, 64, 65, 67];
         let line = Lines::new(
-            line_keys.iter().map(|&k| (k, [8.0; 7])).collect(),
-            line_keys.iter().map(|&k| (k, [0.0; 7])).collect(),
-            line_keys.iter().map(|&k| (k, [0.1; 7])).collect(),
+            line_keys.iter().map(|&k| (k, [8.0; 8])).collect(),
+            line_keys.iter().map(|&k| (k, [0.0; 8])).collect(),
+            line_keys.iter().map(|&k| (k, [0.1; 8])).collect(),
         );
         let keys: Vec<u8> = (51u8..=75).step_by(3).collect();
         let pop = Lines::new(
-            keys.iter().map(|&k| (k, [0.0; 7])).collect(),
-            keys.iter().map(|&k| (k, [0.0; 7])).collect(),
-            keys.iter().map(|&k| (k, [0.1; 7])).collect(),
+            keys.iter().map(|&k| (k, [0.0; 8])).collect(),
+            keys.iter().map(|&k| (k, [0.0; 8])).collect(),
+            keys.iter().map(|&k| (k, [0.1; 8])).collect(),
         );
         let columns = compare(Window::Head, &line, &pop, &salamander_keys());
         for c in columns.iter().filter(|c| c.gated_on_balance) {

@@ -287,6 +287,9 @@ cargo run --release -p piano-tuner -- noise \
     data/salamander presets/salamander-c5.toml --out /tmp/balanced.toml
 cargo run --release -p piano-tuner -- mics \
     data/salamander presets/salamander-c5.toml --out presets/salamander-c5.toml
+cargo run --release -p piano-tuner -- level \
+    data/salamander presets/salamander-c5.toml \
+    --passes 3 --out presets/salamander-c5.toml   # last: `fit` re-pins what it writes
 cargo run --release -p piano-tuner -- ab      # A/B renders into renders/
 cargo run --release -p piano-tuner -- stereo  # the stereo A/B into renders/stereo/
 cargo run --release -p forensics --bin verify_milestone_b -- [old-preset.toml]

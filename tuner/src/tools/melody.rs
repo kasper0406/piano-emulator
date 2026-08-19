@@ -225,7 +225,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             &line_notes,
             window,
         )?;
-        let (population, _, _, _, _) = measure_phrase(
+        let (population, _, _, ladder_engine, ladder_reference) = measure_phrase(
             &preset,
             &sfz,
             &data,
@@ -236,6 +236,13 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         )?;
         engine_audio.write_wav(out.join(format!("{}_engine.wav", line_phrase.name)))?;
         reference_audio.write_wav(out.join(format!("{}_reference.wav", line_phrase.name)))?;
+        // The ladder itself, which is where **every bar on this board comes
+        // from** and which was measured and thrown away until item 456. A
+        // reader who wants to know whether the engine's D#3 is as loud as the
+        // piano's has to be able to listen to the two, and the `loudness`
+        // column's whole subject is a thing one hears before one measures it.
+        ladder_engine.write_wav(out.join(format!("{}_engine.wav", ladder_phrase.name)))?;
+        ladder_reference.write_wav(out.join(format!("{}_reference.wav", ladder_phrase.name)))?;
         columns.extend(melody::compare(window, &line, &population, &recorded));
         let pair = (engine_notes, reference_notes);
         match window {
@@ -405,7 +412,8 @@ tune with one note wrong in it is what opened `DECISIONS.md` 284.\n\n\
 | `strike` | attack tonality of the first 30 ms from the note's own strike, dB — large is a line spectrum, zero is a continuum | `[noise.strike]`, against the tonal attack (`DECISIONS.md` 341) |\n\
 | `channel` | `10 log10((E_L + E_R) / 2 E_M)` over the note's window, dB | `[voicing.mics]`, against the note's own mono fold-down (`DECISIONS.md` 394) |\n\
 | `balance` | `10 log10(E_L / E_R)` at the note's own `f0`, heterodyned, dB — positive is a left lean | `[voicing.mics]`, against the recording's own lean at the same note (`DECISIONS.md` 446) |\n\
-| `splitting` | that same image position at `f0` **minus** its energy-weighted mean over the note's own partials 2-4, dB — positive means the pitch is left of the note's own colour | `[voicing.mics]`, against the recording's own split at the same note (`DECISIONS.md` 451) |\n\n\
+| `splitting` | that same image position at `f0` **minus** its energy-weighted mean over the note's own partials 2-4, dB — positive means the pitch is left of the note's own colour | `[voicing.mics]`, against the recording's own split at the same note (`DECISIONS.md` 451) |\n\
+| `loudness` | A-weighted energy of the note's own window on the **mono fold-down**, dB | `notes.partial_gains`' per-key level, against the recording of the same key (`DECISIONS.md` 456-457) |\n\n\
 The first three are measured in **two windows** of the same note, found again \
 inside the phrase by the largest rise in a 1 ms envelope — the sampler plays \
 every recording from its own start, so the offset between a note-on and its \
@@ -591,6 +599,48 @@ gated.\n\n\
             c.standout,
             melody::note_name(c.standout_key),
             c.bar,
+        );
+    }
+    let _ = write!(
+        out,
+        "\n## The seam\n\n\
+`DECISIONS.md` 456. Every column above carries a `seam` — how far the engine's \
+distance from one recorded key departs from the register's **median** distance \
+— and until this milestone not one of them was gated on it. `loudness` is the \
+column where that is not a detail but the whole defect, and it is the one \
+column of this board whose verdict is a seam.\n\n\
+It is the A-weighted energy of the note's own head on the **mono fold-down** \
+— the only column here that is a function of how *loud* the note is at all. \
+`roughness`, `wobble` and `hf` are shapes, `strike`, `channel` and `splitting` \
+are ratios and `balance` is a position; a note eight decibels under the piano's \
+own at the same key moves none of them, which is exactly what `DECISIONS.md` \
+453 found on C4 and what item 272 decided not to write anywhere. A-weighted \
+because that is what makes a level comparable across keys — 261.6 and 392.0 Hz \
+are 2.3 dB apart on that curve before anything about the piano is considered — \
+and mono because items 417 and 451 forbid solving a level in the pair.\n\n\
+Its **median** is printed and never gated: for this column that median is the \
+engine's master gain against the library's mastering, about 15 dB, and it is \
+nobody's error. What is gated is the departure from it, against the same \
+statistic with the neighbouring velocity layer standing in for the engine — two \
+takes of one piano, or how far a recorded key's own level stands from the \
+recorded register's trend, whichever is larger — times {:.2}.\n\n\
+| metric | window | seam | at | bar | two layers of one key | the register's own | median (ungated) | verdict |\n\
+|---|---|--:|---|--:|--:|--:|--:|---|\n",
+        melody::ALLOWANCE,
+    );
+    for c in columns.iter().filter(|c| c.gated_on_seam) {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | **{:.2}** | {} | {:.2} | {:.2} | {:.2} | {:+.2} | {} |",
+            c.metric,
+            c.window.name(),
+            c.seam,
+            melody::note_name(c.seam_key),
+            c.seam_bar,
+            c.seam_floor,
+            c.seam_bar / melody::ALLOWANCE,
+            c.balance,
+            if c.seam_pass { "pass" } else { "**FAIL**" },
         );
     }
     let _ = write!(

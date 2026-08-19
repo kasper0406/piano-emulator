@@ -1895,12 +1895,12 @@ struct MelodyBoard {
     recorded: realism::RecordedKeys,
     line: Phrase,
     line_notes: Vec<melody::LineNote>,
-    line_reference: Vec<(u8, [f64; 7])>,
-    line_layer: Vec<(u8, [f64; 7])>,
+    line_reference: Vec<(u8, [f64; 8])>,
+    line_layer: Vec<(u8, [f64; 8])>,
     ladder: Phrase,
     ladder_notes: Vec<melody::LineNote>,
-    ladder_reference: Vec<(u8, [f64; 7])>,
-    ladder_layer: Vec<(u8, [f64; 7])>,
+    ladder_reference: Vec<(u8, [f64; 8])>,
+    ladder_layer: Vec<(u8, [f64; 8])>,
 }
 
 impl MelodyBoard {
@@ -1927,7 +1927,7 @@ impl MelodyBoard {
                     notes: &[melody::LineNote],
                     name: &str,
                     events: &[TimedEvent]|
-         -> Result<Vec<(u8, [f64; 7])>, piano_tuner::Error> {
+         -> Result<Vec<(u8, [f64; 8])>, piano_tuner::Error> {
             let audio = melody::reference_line(sfz, data, phrase, name, events)?;
             Ok(melody::per_key(&melody::measure_line(
                 &audio,
@@ -1958,7 +1958,7 @@ impl MelodyBoard {
     /// One candidate's melody columns, off two engine renders.
     fn columns(&self, preset: &Preset) -> Vec<melody::Column> {
         let hz = partial_hz_of(preset);
-        let engine = |phrase: &Phrase, notes: &[melody::LineNote]| -> Vec<(u8, [f64; 7])> {
+        let engine = |phrase: &Phrase, notes: &[melody::LineNote]| -> Vec<(u8, [f64; 8])> {
             let events = engine_events::to_render_events(&phrase.events);
             let (left, right) = render_to_buffer(preset, &events, phrase.duration_s as f32);
             let audio =

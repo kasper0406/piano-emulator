@@ -64,6 +64,10 @@ the preset factory, in the order the stages run:
   tail [data/salamander] [preset.toml] [--key <n>] [--passes <n>] [--out <f>]
         stage 2, the upper partials' decay: notes.partial_sigma_scale and
         notes.synthesized_decay
+  level [data/salamander] [preset.toml] [--passes <n>] [--out <f>]
+        stage 2, a key's own loudness against the recording of the same
+        key: a shrunk, compass-smoothed per-key gain written through
+        notes.partial_gains' own pinning (DECISIONS.md 457, re-opening 272)
   noise [data/salamander] [preset.toml] [--key <n>] [--out <f>]
         stage 2, the mechanism's balance: [noise.strike]'s level and
         velocity law, inverted on the engine's own attack against the
@@ -153,6 +157,7 @@ fn run(args: Vec<String>) -> Exit {
         Some("survey") => Ok(survey(&args[1..])?),
         Some("fit") => tools::fit::run(rest()),
         Some("sympathetic") => Ok(tools::sympathetic::run(rest())?),
+        Some("level") => tools::level::run(rest()),
         Some("tail") => tools::tail::run(rest()),
         Some("bench") => tools::bench::run(rest()),
         Some("compass") => tools::compass::run(rest()),

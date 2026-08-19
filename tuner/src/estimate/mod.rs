@@ -43,6 +43,7 @@ pub mod duplex;
 pub mod halo;
 pub mod hammer;
 pub mod inharmonic;
+pub mod level;
 pub mod melody;
 pub mod mics;
 pub mod motion;

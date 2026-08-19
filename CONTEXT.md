@@ -62,16 +62,25 @@ instrument. MIT, free, open source; App Store via AUv3 planned
 - Stability: every eigenmode strictly inside the unit circle (asserted at
   construction, fuzzed at schema rails); sympathetic loop gain validated
   against the realized bridge filter; DRIVE_CEILING backstop.
-- **Unscored dimensions are how this repository fails.** Four times now a
+- **Unscored dimensions are how this repository fails.** Five times now a
   defect a listener heard sat under a fully green board because no column was a
   function of it: the mechanism's loudness against its own note (D341), the
   pair's energy against the note's mono fold-down (D394), the two capsules'
   per-band level asymmetry (D417, accepted as unscored rather than modelled),
-  and **which loudspeaker a note's fundamental comes out of** (D446). The
-  pattern is always the same — every board is a *mono fold-down* or a
-  *symmetric* function of the pair, and the defect lives in what those throw
-  away. Before adding a mechanism, ask which statistic would move if it were
-  wrong; if the answer is "none", that is the column to write first.
+  **which loudspeaker a note's fundamental comes out of** (D446), and — the
+  fifth and the plainest — **how loud the note is** (D453/D456: every melody
+  column was a shape, a ratio or a position, so a C4 nine decibels under the
+  piano's own moved none of them). The first four have one pattern, every board
+  being a *mono fold-down* or a *symmetric* function of the pair; the fifth has
+  another and it is now its own rule: **every per-note verdict on the melody
+  board was a *median* over the recorded keys, and a per-key error cancels out
+  of a median.** Each column had carried a `seam` — the worst departure from
+  that median — since D288 and not one was gated on it. Before adding a
+  mechanism, ask which statistic would move if it were wrong; if the answer is
+  "none", that is the column to write first, and ask it of the *order statistic*
+  as well as of the quantity. The shape recurs one level up: D457's level fit
+  also moved the whole melodic register 3-6 dB against the compass line, which
+  a seam taken against the register's own median cannot see (D457's caveat ii).
 - Provenance: measured vs synthesized preset values are marked
   (`notes.synthesized_texture` / `synthesized_decay`); fitting uses only
   genuinely recorded reference keys; scoring does too (transposed reference
@@ -84,10 +93,15 @@ instrument. MIT, free, open source; App Store via AUv3 planned
 `bench` (REALISM.md: mel vs floor, modulation, attack, release, stereo
 coherence + per-channel columns), `compass` (88 keys vs strung-alike
 neighbors + recordings), `melody` (the Ode line: roughness/wobble/hf/strike
-/channel/**balance**, head+tail windows, recorded-key bars; **every window is
+/channel/**balance**/`splitting`/**`loudness`**, head+tail windows,
+recorded-key bars; **every window is
 counted from an onset found in the 3 kHz-and-up band** — D452, because below
 that a 1 ms envelope of a bass note is its carrier and the old detector landed
-+73 ms past C4's own hammer on the engine and +42 on the recording), motion columns A1/A2/B1/B2
++73 ms past C4's own hammer on the engine and +42 on the recording;
+**`loudness` is D456's, the first column on any board here that is a function
+of a level, and the first whose verdict is a *seam* — the worst per-key
+departure from the register's median error, where every balance verdict is
+that median and cannot see a per-key error at all**), motion columns A1/A2/B1/B2
 (FM axes), limiter budget, release-click, stability fuzz, perf (<50% of one
 core; currently ~30%).
 
@@ -124,7 +138,24 @@ core; currently ~30%).
    falsification that keeps the exclusion narrower than the defect.
    D404/D406/D411/D414 are the four mechanism attempts that did not land and
    are what a fifth must start from.
-4. `the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do` — the
+5. `no_beat_rate_is_shared_across_the_measured_presets_compass` — **new at
+   D458 and a histogram edge rather than a defect**, so it is a red that should
+   be closed by re-basing a statistic and not by any preset. It counts, over
+   4082 (key, partial) cells, the largest set sharing an eigenmode beat rate to
+   within one millihertz, and requires it under one cell in fifty. The shipped
+   preset read **80 of 4082 — 1.96 % against a bar of 2.00 %, a margin of 1.6
+   cells** — and D455's decay refit reads **85**. `forensics/beat_census`
+   prints what those cells are: **78 % of all cells have a mode split under
+   0.05 Hz** and are excluded outright, another 907 sit between 0.05 and
+   0.10 Hz, and the "worst bin" is the densest millihertz of that pile-up **at
+   the bottom edge of the counted range** — a beat period of eighteen seconds.
+   78 of the 85 are *different cells* from the 80 before, over 40 keys and 46
+   partial indices, with no pattern; the clusters the test names by hand
+   (`notes.false_beat`'s 3.0 Hz ceiling in 29 cells, its 0.37 Hz floor in 52)
+   are both under the bar. Any refit of `notes.partial_sigma_scale` reshuffles
+   it. Two fit-side attempts to close it were measured and one was reverted for
+   costing the melody board's head `roughness` (D458).
+6. `the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do` — the
    melody board's `balance` column, **new and red on the instrument that
    shipped** (D446-448). `10 log10(E_L / E_R)` at each note's own
    fundamental, median over the recorded ladder: **+8.84 dB against a bar of
@@ -147,9 +178,10 @@ core; currently ~30%).
 
 - Iterate with plain `cargo test` (dev profile is opt-level 3; release-only
   gates self-skip). Full `cargo test --release --workspace` at most twice per
-  agent, at phase ends. Measured in this tree at D452: **716 green / 5 reds**,
-  every red named (D260's duplex, D418's two, D446's `balance`, and D451's
-  `splitting`). Historical baseline: **712 green / 4 documented reds**
+  agent, at phase ends. Measured in this tree at D458: **722 green / 6 reds**,
+  every red named (D260's duplex, D418's two, D446's `balance`, D451's
+  `splitting`, and D458's `no_beat_rate_is_shared_across_the_measured_presets_compass`
+  — a histogram edge rather than a defect, see the reds list). Historical baseline: **712 green / 4 documented reds**
   (D418, verified and left standing by D423-425; the fourth is D446's
   `balance` column, which adds four green tests and one red one).
 - Any command trending past ~5 minutes: parallelize or split the tool; never
@@ -257,36 +289,67 @@ both ways (D415): `mono_balance` (median, still the gate) reads **+7.93** at
 252 Hz where `mono_pooled` (energy-weighted) reads **+2.78**, and eight of
 nineteen bands change sign between them.
 
-**C4 is measurably wrong in two ways and only one of them has a home**
-(D452-453). The listener's "that C sounds off" is **not** pitch (+0.17 cents
-relative) and is **not** the mic stage: both defects reproduce on **a single
-note struck alone, mono, at velocity 88**, so the pair, the phrase, the limiter
-and the master gain are exonerated by construction (`forensics/c4_ledger`).
-**(a) Level.** A-weighted head energy against the recording of the same key,
-normalised to the nine-key ladder median: **C4 −8.96 dB, D#3 −8.27, A3 +4.03,
-C5 +1.08**, everything else inside ±1.1. Half of it is `notes.partial_gains` —
-at C4 and D#3 the fitted row *costs* the note 2.56 / 2.81 dB of head level and
-they are the only rows costing more than 2.5 dB (F#3, C5 and D#5 cost
-0.36-1.04; every other row is *worth* +0.19 to +2.12). The other half is the per-key level `energy_offset`
-removes and **D272 decided not to write anywhere**; the compass prints it
-(C4 −19.0 dB against an 88-key median of −15.05) and cannot flag it, because
-its z divides by the 3.34 dB rms of key-to-key error D272 accepted. Closing
-this is **re-opening D272**, not fixing a bug. **(b) Held octave, C4 only.**
-`notes.partial_sigma_scale[C4][k=1] = 0.5338` where the recording asks for
-1.6-2.8× that (method-sensitive; D453 names the span-convention question). Over 0.10 → 1.50 s the recording's C4 keeps its octave (k2 − k1
-+3.5 → +0.1 dB) and the engine's collapses (−3.3 → **−20.2**); **the decay law
-alone, with the row cleared, reproduces the recording's relationship to
-0.4 dB**, so the fitted row is worth −14.6 dB of the defect and is worse than
-nothing. The mechanism is a *composition*: `shaping::partial_sigma_scale`
-normalises the row to geometric mean one over **all** partials, `tail` then
-corrects **only above 2 kHz** (D304/D320), and the sub-2 kHz cells are left
-divided by the original geometric mean — visible as a rule, not a key
-(sampled ladder keys' whole rows 2.17/2.91/1.83/1.94, their sub-2 kHz halves
-1.00/0.90/0.75/0.39, which is D334's own step and what D335 propagated rather
-than questioned). **Which stage owns the band below 2 kHz is the open
-question**, both answers are milestone-sized re-fits, and that is why D453 is
-attribution-only. D#3 shares (a) and not (b) — its `k=1` cell is exactly 1.000
-and its octave delta is +1.46 dB.
+**C4's two defects are closed, and what is left of each is named**
+(D452-458). The listener's "that C sounds off" was **not** pitch (+0.17 cents
+relative) and **not** the mic stage: both defects reproduce on a single note
+struck alone, mono, at velocity 88 (`forensics/c4_ledger`), so the pair, the
+phrase, the limiter and the master gain were exonerated by construction.
+
+**(a) The level — D272 is re-opened and has a written home** (D457). A key's
+own loudness against the recording of the same key now lives in
+`notes.partial_gains`, written through that field's own pinning by a new
+re-entrant stage, `piano-tuner level`. D272's objection was right and is the
+design: the removed level's spread is 4.82 dB, a smooth curve explains a
+quarter of it, the residual is white, and carried in full it puts F#5 17.9 dB
+over its neighbours — so what is written is each key's own measurement
+**shrunk per key toward the compass line by `1 − (take_sigma / departure)²`**,
+with the noise measured on the library as the distance between two takes of one
+key (1.40 dB here), capped at the piano's *own* worst key-to-key level residual
+(6.40 dB). A-weighted head energy against the recording of the same key,
+normalised to the nine-key ladder median: **C4 −8.96 → −0.96, D#3 −8.27 →
+−1.20**, worst key on the ladder **8.96 → 1.85 dB**, every key improved or
+held. The tune's own contour (A-weighted 125 ms steps into and out of every
+C4, `forensics/melody_contour`) went from **−1.75 in / +1.10 out** — a *dip*
+into the note the recording *lifts* into, at +2.44 / −1.41 — to **+1.03 /
+−0.37**: the sign is the piano's now. **The gate this class was invisible to
+is the melody board's `loudness` column** (D456), gated on its **seam**, and
+the shipped-before preset fails it at C4 (8.87 against a bar of 5.21) where
+this one passes (1.90 at A3).
+
+**(b) The held octave — the sub-2 kHz band has an owner** (D454-455). The span
+convention was decided first and by measurement (D454): a partial's fall is now
+the difference of two **mean-power readings over a 0.45 s window** at the same
+two instants, slid rather than narrowed at the strike, which is the only
+convention of seven whose answer survives moving the span's edges (1.18 / 1.46
+against the old reading-at-an-instant's 1.50 / 1.94, and least squares' 1.69 /
+6.67). The band below 2 kHz then went to **`tail`, per partial, closed on the
+render** (D455) — not to `shaping` normalising the low band separately, and
+that is measured rather than argued: renormalising C4's low half half-fixes
+`k = 1` (0.53 → 0.71 where the render asks 0.97) and *breaks* `k = 2`
+(0.87 → 1.16 where it asks 0.93). The seam was never the piano: the correction
+the render asks for below 2 kHz is the reciprocal of what shaping's whole-row
+normalisation divided out, rising with the key exactly as the share of a row's
+partials above 2 kHz does (median ×1.43 over the recorded keys, ×2.70 at C5).
+After the refit the octave-against-fundamental decay relationship's mean
+`|error|` over the ladder is **8.30 → 3.09 dB** with **C4 +13.50 → −0.60**, and
+C4's held `k2 − k1` at 1.5 s is **−20.2 → −5.1** against the recording's +0.1.
+D335's step is **gone at its source** — the recorded keys' sub-2 kHz geometric
+means come back to one, `LowDecay`'s line goes flat (`exp(+0.5488 −
+0.01411·key)`, r −0.797 → `exp(+0.0745 + 0.00031·key)`, r +0.034) — so its
+falsification changed material rather than retiring. Melody tail `hf`
+3.75 → 3.06; band decay gap tenor 6-12k +5.27 → +7.92, treble 2-6k
++11.52 → +10.93.
+
+**What is left, in order of size** (D458): the beat-census red above; **D#5's
+octave**, the one ladder key whose decay relationship regressed, whose `k = 2`
+renders 24.5 dB under the recording's at 0.10 s and is therefore a
+`partial_gains` hole rather than a decay; the **5.1 dB left of C4's held
+octave**, which is entirely the 5.8 dB the two partials already differ by at
+0.10 s and is a gain-row question a per-key scalar cannot reach; the low band's
+converged residual sitting at 1.10 rather than 1.00 because a per-cell deadband
+approached from one side stops early; and the fact that `fit --stage
+partial_gains` re-pins every row it re-fits, so **`level` must be re-run after
+any `fit`**.
 
 Treble sympathetic halo ~21 dB short (board late field); per-key brightness
 tilt not drawn for unsampled keys (needs more recorded keys by policy);

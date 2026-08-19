@@ -53,11 +53,18 @@
 //! where it does not; the keys whose rows carry a target rather than a
 //! measurement are named in `notes.synthesized_decay`.
 //!
-//! It is idempotent: the keys the provenance list names are cleared before the
-//! stage runs again, the sampled keys' loop has a stop wide enough to be a fixed
-//! point rather than a ratchet (`tail::BandFall::partial_median_ratio_error`),
-//! and a second run over its own output reproduces the same 61 rows, the same 37
-//! drawn keys and **every cell to the last digit**.
+//! It is idempotent where idempotence is load-bearing: the keys the provenance
+//! list names are cleared before the stage runs again, the sampled keys' loop
+//! has a stop wide enough to be a fixed point rather than a ratchet
+//! (`tail::BandFall::partial_median_ratio_error`), and a second run over its own
+//! output reproduces the same 61 rows, the same 37 drawn keys, every cell above
+//! 2 kHz to the last digit, and the sub-2 kHz structure (`DECISIONS.md` 455's
+//! rows byte-identical, recorded/drawn low geomean medians unmoved, drawn keys
+//! within x1.016). What a re-run does **not** reproduce is a minority of
+//! recorded-key low cells whose measured correction sits on a beat or floor
+//! edge — about 14 move outside `LOW_DEADBAND`'s own x1.18 resolution — which
+//! is `DECISIONS.md` 458's named open item, and why the beat census reshuffles
+//! across refits.
 //!
 //! ```sh
 //! cargo run --release -p piano-tuner -- tail \
@@ -78,7 +85,8 @@ use piano_emulator::types::Event;
 use piano_tuner::cache;
 use piano_tuner::estimate::tail::{
     engine_band_fall, extend_row, fit_tail_to, levels_at_instants, measurable_db,
-    bank_owns_band, low_mean, low_row, partial_band_fall, partial_envelopes, reach, reach_to,
+    bank_owns_band, low_correct_row, low_mean, low_row, partial_band_fall, partial_envelopes,
+    reach, reach_to,
     BandFall, DecayModel, DecayPoint,
     DrawnDecay, LowDecay, PartialBandFall, PartialTail, SideFall, TailCorrection, FLOOR_FROM_S,
     HOP_S, LOW_BAND,
@@ -643,72 +651,6 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let mut drawn_row = vec![false; stage_owns.len()];
 
-    // The band the correction curve holds at one, and the seam that left
-    // (`DECISIONS.md` 334-335). Under 2 kHz a row is `estimate::shaping`'s
-    // work and `TailCorrection::at` deliberately writes nothing, so the 30
-    // sampled keys carry a measured sub-2 kHz tilt and the other 58 carry
-    // exactly 1.000 — a fitted/unfitted step in one band, and the largest thing
-    // the melody gate's tail `hf` column can see, because that column is a
-    // *share* whose denominator is the fundamental. `LowDecay` makes it a
-    // compass quantity like the two bands above it: the line through the keys
-    // that measured it times their own interpolated departures from it.
-    //
-    // Written **once**, before the passes and not inside them. Everything else
-    // here is a correction measured on the render and iterated to its own fixed
-    // point; this is a statement about the piano read off the recordings, and
-    // multiplying it in again every pass would compound a number that has
-    // nothing to converge against.
-    let low = LowDecay::fit(
-        &keys
-            .iter()
-            .copied()
-            .filter(|k| sampled.contains(k) && !stage_owns[usize::from(k - FIRST_KEY)])
-            .filter_map(|key| {
-                let params = preset.string_params(key);
-                let partial_hz: Vec<f64> = (1..=params.partial_count())
-                    .map(|j| f64::from(params.partial_freq(j)))
-                    .collect();
-                let (mean, _) = low_mean(
-                    &preset.notes.partial_sigma_scale[usize::from(key - FIRST_KEY)],
-                    &partial_hz,
-                )?;
-                Some((key, mean))
-            })
-            .collect::<Vec<_>>(),
-    );
-    println!(
-        "\nthe band under {:.0} Hz, which only a sampled key ever had:\n  \
-         exp({:+.4}{:+.5}·key) x{:.2} (r {:+.3}, n {}) — {:.3} at A0, {:.3} at C4, {:.3} at A4, {:.3} at C5",
-        LOW_BAND.1,
-        low.line.intercept,
-        low.line.slope,
-        low.line.sigma.exp(),
-        low.line.correlation,
-        low.line.points,
-        low.at(21),
-        low.at(60),
-        low.at(69),
-        low.at(72),
-    );
-    if passes > 0 {
-        for &key in &keys {
-            let i = usize::from(key - FIRST_KEY);
-            if !stage_owns[i] {
-                continue;
-            }
-            let params = preset.string_params(key);
-            let partial_hz: Vec<f64> = (1..=params.partial_count())
-                .map(|j| f64::from(params.partial_freq(j)))
-                .collect();
-            let seeded = low_row(&preset.notes.partial_sigma_scale[i], &partial_hz, low.at(key));
-            if seeded != preset.notes.partial_sigma_scale[i] {
-                preset.notes.partial_sigma_scale[i] = seeded;
-                drawn_row[i] = true;
-            }
-        }
-        preset.validate()?;
-        rows = measure(&preset, &keys)?;
-    }
     for pass in 1..=passes {
         for r in &rows {
             let i = usize::from(r.key - FIRST_KEY);
@@ -735,6 +677,20 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 reach_to(&partial_hz, drawn.ceiling_hz)
             };
+            // The band under 2 kHz, which `TailCorrection::at` holds at one
+            // and nothing on a render ever measured until `DECISIONS.md` 455:
+            // corrected per partial, against this key's own recording, and only
+            // at a key that has one. A key with no recording gets nothing here —
+            // its low cells stay whatever `shaping` left, which for a key
+            // `shaping` never reached is 1.0, the law alone.
+            if is_sampled && !stage_owns[i] {
+                preset.notes.partial_sigma_scale[i] = low_correct_row(
+                    &preset.notes.partial_sigma_scale[i],
+                    &partial_hz,
+                    &r.tails,
+                    DAMPING,
+                );
+            }
             let correction =
                 TailCorrection::from_band_falls(falls, row_reach).damped(DAMPING);
             if correction.is_empty() {
@@ -779,6 +735,94 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             gate(84, 108, 1),
         );
     }
+    // ---- the band under 2 kHz at a key nobody recorded ----------------------
+    //
+    // `TailCorrection::at` returns exactly 1.0 below `HF1`, so until item 455
+    // nothing measured this band on a render at all: it was `estimate::shaping`'s
+    // alone, and shaping normalises a row over *every* partial it measured, so
+    // the sub-2 kHz half of a sampled key's row carried a normaliser the partials
+    // above 2 kHz had set. `low_correct_row` now closes that half on the render
+    // at every recorded key, which is what this draw's population is read from.
+    //
+    // Read **after** the passes and not before them, which is the ordering item
+    // 455 changed and the whole of what it changed here. Before them the
+    // population is the unfitted rows — the step of item 335, sub-one and
+    // sloping with the key — and drawing from it is what propagated that step
+    // to the other 58 keys instead of questioning it. After them it is what the
+    // recordings say once each key has been closed against its own, and on a
+    // refitted preset that is a flat line near one.
+    //
+    // Still written once and never inside a pass: this is a statement about the
+    // piano read off the keys that measured it, not a correction with a fixed
+    // point to iterate to.
+    let low = LowDecay::fit(
+        &keys
+            .iter()
+            .copied()
+            .filter(|k| sampled.contains(k) && !stage_owns[usize::from(k - FIRST_KEY)])
+            .filter_map(|key| {
+                let params = preset.string_params(key);
+                let partial_hz: Vec<f64> = (1..=params.partial_count())
+                    .map(|j| f64::from(params.partial_freq(j)))
+                    .collect();
+                let (mean, _) = low_mean(
+                    &preset.notes.partial_sigma_scale[usize::from(key - FIRST_KEY)],
+                    &partial_hz,
+                )?;
+                Some((key, mean))
+            })
+            .collect::<Vec<_>>(),
+    );
+    println!(
+        "\nthe band under {:.0} Hz, read off the recorded keys after they were fitted:\n  \
+         exp({:+.4}{:+.5}·key) x{:.2} (r {:+.3}, n {}) — {:.3} at A0, {:.3} at C4, {:.3} at A4, {:.3} at C5",
+        LOW_BAND.1,
+        low.line.intercept,
+        low.line.slope,
+        low.line.sigma.exp(),
+        low.line.correlation,
+        low.line.points,
+        low.at(21),
+        low.at(60),
+        low.at(69),
+        low.at(72),
+    );
+    if passes > 0 {
+        for &key in &keys {
+            let i = usize::from(key - FIRST_KEY);
+            if !stage_owns[i] {
+                continue;
+            }
+            let params = preset.string_params(key);
+            let partial_hz: Vec<f64> = (1..=params.partial_count())
+                .map(|j| f64::from(params.partial_freq(j)))
+                .collect();
+            // **No deadband on the draw**, unlike `low_correct_row`'s per cell,
+            // and it is a measurement rather than a preference: suppressing a
+            // draw whose factor is inside the fit's own resolution was tried
+            // and costs the melody board's head `roughness` 1.29 -> 1.53
+            // against a bar of 1.36 (`DECISIONS.md` 455). A drawn key's low
+            // cells are what put it on the same footing as the recorded key
+            // beside it, and "within the resolution" is not "nothing" when the
+            // alternative is a key with no cells there at all.
+            let seeded = low_row(&preset.notes.partial_sigma_scale[i], &partial_hz, low.at(key));
+            if seeded != preset.notes.partial_sigma_scale[i] {
+                preset.notes.partial_sigma_scale[i] = seeded;
+                drawn_row[i] = true;
+            }
+        }
+        preset.notes.synthesized_decay = keys
+            .iter()
+            .copied()
+            .filter(|k| {
+                let i = usize::from(k - FIRST_KEY);
+                drawn_row[i] && !preset.notes.partial_sigma_scale[i].is_empty()
+            })
+            .collect();
+        preset.validate()?;
+        rows = measure(&preset, &keys)?;
+    }
+
     let rows = rows;
     if let Some(path) = &out {
         println!(
@@ -800,9 +844,9 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // is a lower bound on the truth, `≤` where the engine has, `?` where both
     // have and it is not evidence in either direction.
     println!(
-        "\n{:>4} {:>5} {:>6} {:>6} {:>6} {:>7} {:>7} {:>7} {:>7} {:>7} {:>6} {:>10} {:>10} {:>11} {:>11}",
-        "key", "note", "bank", "reach", "meas", "top k", "top Hz", "c<=rch", "c>rch", "c>2kHz",
-        "row", "gap 2-6k", "gap 6-12k", "stop 2-6k", "stop 6-12k",
+        "\n{:>4} {:>5} {:>6} {:>6} {:>6} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>6} {:>10} {:>10} {:>11} {:>11}",
+        "key", "note", "bank", "reach", "meas", "top k", "top Hz", "c<=rch", "c>rch", "c<2kHz",
+        "c>2kHz", "row", "gap 2-6k", "gap 6-12k", "stop 2-6k", "stop 6-12k",
     );
     // What each band's stop would say now, and where it came from: `m` for a
     // key closed against its own recording, `d` for one closed against the draw.
@@ -834,7 +878,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             "-"
         };
         println!(
-            "{:>4} {:>5} {:>6} {:>6} {:>6} {:>7} {:>7.0} {:>7} {:>7} {:>7} {:>6} {:>9.2}{} {:>9.2}{} {:>11} {:>11}",
+            "{:>4} {:>5} {:>6} {:>6} {:>6} {:>7} {:>7.0} {:>7} {:>7} {:>7} {:>7} {:>6} {:>9.2}{} {:>9.2}{} {:>11} {:>11}",
             r.key,
             note_name(r.key),
             r.tails.len(),
@@ -852,6 +896,12 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 measured
                     .iter()
                     .filter(|t| t.k > r.reach)
+                    .filter_map(|t| t.correction())
+            )),
+            fmt(median(
+                measured
+                    .iter()
+                    .filter(|t| t.hz < LOW_BAND.1)
                     .filter_map(|t| t.correction())
             )),
             fmt(median(
