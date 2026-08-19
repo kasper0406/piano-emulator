@@ -167,23 +167,12 @@ green and a failing test always means something is actually wrong):**
    widening the pair takes `splitting` *green* while taking `comb` worse
    (`the_comb_gate_fails_on_a_pair_that_stands_twice_as_wide`), which is the
    arithmetic of `splitting = balance − comb` and not a coincidence.
-5. `no_beat_rate_is_shared_across_the_measured_presets_compass` — **new at
-   D458 and a histogram edge rather than a defect**, so it is a red that should
-   be closed by re-basing a statistic and not by any preset. It counts, over
-   4082 (key, partial) cells, the largest set sharing an eigenmode beat rate to
-   within one millihertz, and requires it under one cell in fifty. The shipped
-   preset read **80 of 4082 — 1.96 % against a bar of 2.00 %, a margin of 1.6
-   cells** — and D455's decay refit reads **85**. `forensics/beat_census`
-   prints what those cells are: **78 % of all cells have a mode split under
-   0.05 Hz** and are excluded outright, another 907 sit between 0.05 and
-   0.10 Hz, and the "worst bin" is the densest millihertz of that pile-up **at
-   the bottom edge of the counted range** — a beat period of eighteen seconds.
-   78 of the 85 are *different cells* from the 80 before, over 40 keys and 46
-   partial indices, with no pattern; the clusters the test names by hand
-   (`notes.false_beat`'s 3.0 Hz ceiling in 29 cells, its 0.37 Hz floor in 52)
-   are both under the bar. Any refit of `notes.partial_sigma_scale` reshuffles
-   it. Two fit-side attempts to close it were measured and one was reverted for
-   costing the melody board's head `roughness` (D458).
+5. *(closed by deletion, D464)* the measured-preset beat census — a histogram
+   edge rather than a defect (D458's 5-cells-over-bar reading reshuffled across
+   refits), deleted by the owner's direction. The construction-level census
+   (`string::tests::no_beat_rate_is_shared_across_the_compass`) still gates the
+   metronome; `forensics/beat_census` remains the instrument if a listener ever
+   reports a coherent pulse.
 6. `the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do` — the
    melody board's `balance` column, **new and red on the instrument that
    shipped** (D446-448). `10 log10(E_L / E_R)` at each note's own
