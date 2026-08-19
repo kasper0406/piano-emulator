@@ -914,7 +914,8 @@ rather than at its own optimum {:.1}-{:.1} Hz x{:.3})",
             true,
             &feasible,
         );
-        voicing = modal_refine(&base, &rows, &phrases, &melody_board, constrained);
+        let banded = modal_refine(&base, &rows, &phrases, &melody_board, constrained);
+        voicing = choose_band_or_none(&base, &rows, &phrases, &melody_board, banded, &feasible);
     }
 
     if let (Some(trim), true) = (trimmed, wants("image")) {
@@ -1442,6 +1443,81 @@ fn modal_channel_band(c: &ChannelColumn) -> bool {
     c.lo_hz >= 125.0 && c.hi_hz <= 500.0
 }
 
+/// **The one candidate no search over `[voicing.mics.modal]`'s three knobs can
+/// reach: the section with no band in it at all** (`DECISIONS.md` 451).
+///
+/// Every stage above this one moves `lo_hz`, `hi_hz` and `lift` inside their
+/// bounds, and `Knob::set` on a `None` band is a no-op by construction, so the
+/// grid, the compass, the simplex and the diagonal refinement between them can
+/// make a band narrow, wide, weak or strong and can never make it *absent*.
+/// That is not a small gap in the search space. `soundboard::ModalLobe` is a
+/// twelfth-order cascade whose response `B` is complex, `L = m(1 + B)` and
+/// `R = m(1 − B)`, so **a lift of zero is not the same instrument as no band**:
+/// the shipped grid's weakest cell is 0.25 and even at 0.05 — the knob's own
+/// floor — the cascade's phase is still turning inside the band. Absence is a
+/// corner of the feasible set and a corner has to be evaluated, not
+/// approached.
+///
+/// So it is evaluated, on **the same constrained objective** the banded point
+/// was chosen with, and with its own two trims refitted first: `width` and
+/// `diffuse_coherence` are fitted *together* with the band since item 379
+/// (`BAND_KNOBS` says why), so holding the banded point's trims on a bandless
+/// pair would be scoring an instrument nobody would ship. Whichever of the two
+/// scores lower is what this stage returns, and both scores are printed, which
+/// is the frontier this comparison is worth quoting from.
+fn choose_band_or_none(
+    preset: &Preset,
+    rows: &[Row],
+    phrases: &[PhraseRow],
+    melody_board: &MelodyBoard,
+    banded: MicVoicing,
+    feasible: &Feasible,
+) -> MicVoicing {
+    println!("\nband or no band: the corner of the feasible set the three knobs cannot reach");
+    let bare = search(
+        preset,
+        rows,
+        phrases,
+        melody_board,
+        MicVoicing {
+            modal: None,
+            ..banded
+        },
+        TRIM_KNOBS,
+        true,
+        feasible,
+    );
+    let objective = modal_objective(preset, rows, phrases, melody_board);
+    let scored = batch(&[banded, bare], &objective);
+    let (with, without) = (scored[0], scored[1]);
+    let describe = |v: MicVoicing, score: f64| {
+        format!(
+            "width {:.4} x coherence {:.4}, {} -> {score:.3} bars out",
+            v.width,
+            v.diffuse_coherence,
+            v.modal.map_or_else(
+                || "no [modal] band".to_string(),
+                |b| format!("{:.1}-{:.1} Hz x{:.4}", b.lo_hz, b.hi_hz, b.lift)
+            )
+        )
+    };
+    println!("  with a band:    {}", describe(banded, with));
+    println!("  with none:      {}", describe(bare, without));
+    if without < with {
+        println!(
+            "  -> the band is removed: {:.3} bars better on the same objective",
+            with - without
+        );
+        bare
+    } else {
+        println!(
+            "  -> the band is kept: absence costs {:.3} bars on the same objective",
+            without - with
+        );
+        banded
+    }
+}
+
 /// Multiplicative steps the diagonal refinement tries, largest first.
 const MODAL_REFINE_STEPS: [f64; 5] = [1.25, 1.12, 1.06, 1.03, 1.015];
 
@@ -1783,17 +1859,21 @@ fn boards_for(
 // The melody board, as a term of this objective
 // ---------------------------------------------------------------------------
 
-/// The columns of `piano-tuner melody` that this fit's three knobs can move.
+/// The columns of `piano-tuner melody` that this fit's knobs can move.
 ///
 /// `strike`, `roughness`, `wobble` and `hf` are all functions of the mono
 /// fold-down and of tables no microphone parameter touches, so charging them
-/// here would add a constant and its render noise. `channel` and `balance` are
-/// the two the pair writes.
-const MELODY_METRICS: [&str; 2] = ["channel", "balance"];
+/// here would add a constant and its render noise. `channel`, `balance` and
+/// `splitting` are the three the pair writes, and they are three rather than
+/// two since `DECISIONS.md` 451: a pair can put a note's fundamental in the
+/// right loudspeaker and its own overtones in the other one, and the first two
+/// columns are both blind to that — `channel` because it is a sum over the
+/// pair, `balance` because it reads one frequency per note.
+const MELODY_METRICS: [&str; 3] = ["channel", "balance", "splitting"];
 
-/// **The melody board's two stereo columns, in this objective** — the term
-/// `DECISIONS.md` 447 adds, and item 416's own lesson applied: *close on what
-/// the gates read*.
+/// **The melody board's three stereo columns, in this objective** — the term
+/// `DECISIONS.md` 447 adds and item 451 widens, with item 416's own lesson
+/// applied: *close on what the gates read*.
 ///
 /// The reason it is here and not checked afterwards is the whole of item 446.
 /// The band this stage fits acts over 174-456 Hz; every fundamental of the Ode
@@ -1815,12 +1895,12 @@ struct MelodyBoard {
     recorded: realism::RecordedKeys,
     line: Phrase,
     line_notes: Vec<melody::LineNote>,
-    line_reference: Vec<(u8, [f64; 6])>,
-    line_layer: Vec<(u8, [f64; 6])>,
+    line_reference: Vec<(u8, [f64; 7])>,
+    line_layer: Vec<(u8, [f64; 7])>,
     ladder: Phrase,
     ladder_notes: Vec<melody::LineNote>,
-    ladder_reference: Vec<(u8, [f64; 6])>,
-    ladder_layer: Vec<(u8, [f64; 6])>,
+    ladder_reference: Vec<(u8, [f64; 7])>,
+    ladder_layer: Vec<(u8, [f64; 7])>,
 }
 
 impl MelodyBoard {
@@ -1847,7 +1927,7 @@ impl MelodyBoard {
                     notes: &[melody::LineNote],
                     name: &str,
                     events: &[TimedEvent]|
-         -> Result<Vec<(u8, [f64; 6])>, piano_tuner::Error> {
+         -> Result<Vec<(u8, [f64; 7])>, piano_tuner::Error> {
             let audio = melody::reference_line(sfz, data, phrase, name, events)?;
             Ok(melody::per_key(&melody::measure_line(
                 &audio,
@@ -1878,7 +1958,7 @@ impl MelodyBoard {
     /// One candidate's melody columns, off two engine renders.
     fn columns(&self, preset: &Preset) -> Vec<melody::Column> {
         let hz = partial_hz_of(preset);
-        let engine = |phrase: &Phrase, notes: &[melody::LineNote]| -> Vec<(u8, [f64; 6])> {
+        let engine = |phrase: &Phrase, notes: &[melody::LineNote]| -> Vec<(u8, [f64; 7])> {
             let events = engine_events::to_render_events(&phrase.events);
             let (left, right) = render_to_buffer(preset, &events, phrase.duration_s as f32);
             let audio =
@@ -1922,9 +2002,11 @@ fn partial_hz_of(preset: &Preset) -> impl Fn(u8) -> Vec<f64> + '_ {
 /// The melody board's exceedance, in the same currency [`gate_excess`] uses.
 ///
 /// Both halves of a column are charged and each only where it is a verdict:
-/// `balance` is gated on the median over the recorded ladder **and** on the
-/// line's own spread (`melody::METRIC_IS_SPREAD`), `channel` on the median
-/// alone. A fit that drives this to zero is a fit that turns those columns of
+/// `balance` and `splitting` are gated on their median **and** on the line's
+/// own spread (`melody::METRIC_IS_SPREAD`), `channel` on the median alone. The
+/// medians are not taken over the same keys — `splitting`'s is the line's and
+/// the other two are the recorded ladder's (`melody::METRIC_ON_LINE`) — which
+/// is a property of the columns and needs nothing here. A fit that drives this to zero is a fit that turns those columns of
 /// `tuner/tests/melody.rs` green, which is the only thing it can earn here.
 fn melody_excess(columns: &[melody::Column]) -> f64 {
     columns

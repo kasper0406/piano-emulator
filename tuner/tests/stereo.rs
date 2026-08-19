@@ -305,6 +305,20 @@ struct Measured {
     /// The control under the whole of 369-372.
     without_modal: Vec<StereoItem>,
     without_modal_channels: Vec<realism::ChannelItem>,
+    /// **The same pair with a mode-controlled band on it**, whichever way the
+    /// shipped preset happens to fall (`DECISIONS.md` 452): the shipped band
+    /// when there is one, and `melody::M17_MODAL_BAND` — the band item 418
+    /// fitted and item 449 shipped — when there is not.
+    ///
+    /// The control `the_per_channel_column_sees_the_mode_controlled_band_and_
+    /// only_it` is a statement about the *column*, not about the preset: it
+    /// says that this board moves when a band is added and moves it in the
+    /// band's own bands. Once nothing ships a band, "the shipped preset with
+    /// the band deleted" is the shipped preset, the difference is zero, and the
+    /// control would assert that a column measuring the band correctly is
+    /// broken. So the control is taken between *these two* instead, and it
+    /// asks the same question either way round.
+    with_modal_channels: Vec<realism::ChannelItem>,
 }
 
 /// The recording's side of the comparison: one row per recorded key, the take
@@ -425,6 +439,23 @@ fn measured() -> Option<&'static Measured> {
                 .collect::<Vec<realism::ChannelItem>>()
         };
         let (without_modal, without_modal_channels) = score(&bare);
+        // One more render set only when the shipped preset has no band of its
+        // own; when it has one, the banded instrument is the shipped one and is
+        // already measured.
+        let shipped_band = preset.voicing.mics.and_then(|m| m.modal);
+        let with_modal_channels = match shipped_band {
+            Some(_) => channels.clone(),
+            None => {
+                let mut banded = preset.clone();
+                let (lo_hz, hi_hz, lift) = piano_tuner::estimate::melody::M17_MODAL_BAND;
+                banded.voicing.mics =
+                    banded.voicing.mics.map(|m| piano_emulator::preset::MicVoicing {
+                        modal: Some(piano_emulator::preset::ModalBand { lo_hz, hi_hz, lift }),
+                        ..m
+                    });
+                score(&banded).1
+            }
+        };
         Some(Measured {
             items,
             channels,
@@ -433,6 +464,7 @@ fn measured() -> Option<&'static Measured> {
             panned_channels: channel_side(|r| &r.panned_channels),
             without_modal,
             without_modal_channels,
+            with_modal_channels,
         })
     })
     .as_ref()
@@ -985,23 +1017,33 @@ in{text}",
     }
 }
 
-/// **The control the per-channel column needs to be a measurement**: the
-/// mode-controlled lobe deleted, everything else the same.
+/// **The control the per-channel column needs to be a measurement**: the same
+/// pair with and without a mode-controlled lobe, everything else the same.
 ///
-/// The lobe is what this milestone repaired, so the column has to be able to
+/// The lobe is what items 392-418 repaired, so the column has to be able to
 /// see it — and it has to see it *in the lobe's own two bands* and nowhere
 /// else, or it is measuring something the lobe did not do. What it must not do
 /// is red out on the capsule pair alone in bands the pair never touches.
+///
+/// **Both instruments are named rather than assumed** (`DECISIONS.md` 452).
+/// This used to be "the shipped preset against the shipped preset with the
+/// band deleted", which stopped being two instruments the moment nothing
+/// shipped a band: the difference would be zero and the control would report
+/// that a column measuring the lobe perfectly is broken. `Measured::
+/// with_modal_channels` is the banded side whichever way the preset falls —
+/// the shipped band when there is one, `melody::M17_MODAL_BAND` when there is
+/// not — so the control asks its own question in both worlds. It is a
+/// statement about the **column**, not about what ships.
 #[test]
 fn the_per_channel_column_sees_the_mode_controlled_band_and_only_it() {
     let Some(m) = measured() else {
         eprintln!("no data/salamander in this tree; skipping the per-channel control");
         return;
     };
-    let with = realism::channel_columns(&m.channels);
+    let with = realism::channel_columns(&m.with_modal_channels);
     let without = realism::channel_columns(&m.without_modal_channels);
     let text = format!(
-        "\nwith the mode-controlled band:\n{}\nwithout it:\n{}",
+        "\nwith a mode-controlled band:\n{}\nwithout one:\n{}",
         realism::channel_report(&with),
         realism::channel_report(&without)
     );
@@ -1032,12 +1074,12 @@ fn the_per_channel_column_sees_the_mode_controlled_band_and_only_it() {
         .fold(0.0, f64::max);
     assert!(
         inside > 0.5,
-        "deleting the mode-controlled band moved its own bands by only {inside:.2} dB — this \
+        "adding the mode-controlled band moved its own bands by only {inside:.2} dB — this \
 column cannot be measuring it{text}"
     );
     assert!(
         outside < inside,
-        "deleting the mode-controlled band moved a band it does not live in ({outside:.2} dB) by \
+        "adding the mode-controlled band moved a band it does not live in ({outside:.2} dB) by \
 more than one it does ({inside:.2}){text}"
     );
 }

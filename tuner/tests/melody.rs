@@ -61,6 +61,7 @@
 //! Every test here needs the Salamander library and skips itself without it,
 //! the same way `tests/reference_cache.rs` does.
 
+use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -473,6 +474,39 @@ fn the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do() {
     gate("balance", Window::Head);
 }
 
+/// **Whether a note of the tune arrives from one place in the image or comes
+/// apart across it** (`DECISIONS.md` 451).
+///
+/// `splitting` is `image(f1) − Σ w_k image(f_k) / Σ w_k` over the note's own
+/// partials 2-4, where `image` is the balance column's own per-partial
+/// heterodyne and `w_k` is the pair energy it was read from: the fundamental's
+/// place in the stereo image, measured against where that same note's colour
+/// is. It is `balance`'s other half in the same sense that `balance` is
+/// `channel`'s — `balance` reads **one** frequency per note and a stage that is
+/// a *band* does not move a note, it moves the part of a note inside its edges.
+///
+/// The band item 422 shipped spans 174.3-456.5 Hz. Every fundamental of the Ode
+/// line (261.6 to 392.0 Hz) is inside it and **not one** of those notes' second
+/// partials is (523 Hz and up), so every note of the tune had its pitch panned
+/// and its colour left where it was, and the ear was handed a note arriving
+/// from two places at once. That is heard as *the temperament is off* with zero
+/// cents of tuning error anywhere — the session that opened item 451 verified
+/// the preset's own `f0` table consistent to 0.3 cents at the seam before
+/// measuring this — and it is why the column exists.
+///
+/// It is scored on the **line's own five pitches** and not on the recorded
+/// ladder, which no other balance column on this board is
+/// (`melody::METRIC_ON_LINE`). The reason is arithmetic and is in that
+/// constant: resampling multiplies every frequency of a take by one factor and
+/// touches neither channel, so a transposed reference note's image ratios —
+/// and therefore its split — are the take's own, exactly. Item 448(d) asked a
+/// successor for "a statistic scored on the tune's own register rather than on
+/// the whole recorded ladder"; this is it.
+#[test]
+fn no_note_of_the_line_arrives_from_two_places_at_once() {
+    gate("splitting", Window::Head);
+}
+
 /// **The falsification for the column above, and it is the milestone's own
 /// finding**: put item 418's band back and the column goes red, in the
 /// direction and at the size item 446 measured.
@@ -518,6 +552,64 @@ against a bar of {:.2}, {}",
         channel.balance,
         channel.balance_bar,
         if channel.balance_pass { "green" } else { "red" }
+    );
+}
+
+/// **The falsification for the splitting column, and it is the same
+/// instrument** (`DECISIONS.md` 451-452): put item 418's band back and the tune
+/// comes apart across the image again.
+///
+/// The two columns convict the same band for two different things and both
+/// have to be seen to fail on it, or the pair of them is one column written
+/// twice. `balance` fails because the band **pans** the fundamentals; this one
+/// fails because the band's two edges bracket those fundamentals and nothing
+/// else of those notes, so what is panned is a *part* of each note. A
+/// mechanism that panned the whole note would fail the first and pass this.
+///
+/// It asserts the size and prints the line note by note, because the per-note
+/// number is the attribution: on the band this test installs, F4's fundamental
+/// sits **21.8 dB** away from its own second, third and fourth partials, where
+/// the recording's F4 sits 1.4 dB from its own.
+#[test]
+fn the_splitting_gate_fails_on_the_band_the_milestone_started_from() {
+    let Some(sfz) = sfz() else {
+        eprintln!("no data/salamander in this tree; skipping the splitting falsification");
+        return;
+    };
+    let before = with_the_lobe_before_the_refit(shipped_preset());
+    let (columns, _, _) = score(&before, &sfz);
+    let text = melody::report(&columns);
+    println!("{text}");
+    let splitting = column(&columns, "splitting", Window::Head);
+    assert!(
+        !splitting.balance_pass,
+        "item 418's band passes the splitting column, so that column does not test \
+         what it was written for\n{text}"
+    );
+    // The line, note by note, is the attribution and is printed whether or not
+    // anything fails: which notes come apart and by how much is what a listener
+    // is describing when they call a tune out of tune.
+    for n in &splitting.notes {
+        println!(
+            "  {}: engine splits {:+.2} dB where the recording splits {:+.2} — {:+.2}",
+            melody::note_name(n.key),
+            n.engine,
+            n.reference,
+            n.error
+        );
+    }
+    // And the column it is not: `balance` reads one frequency per note, so a
+    // band that panned each note *whole* would move it by the same amount and
+    // leave this column at nothing. If a successor ever makes the two move
+    // together on every instrument, this print is the notice that one of them
+    // has stopped earning its place.
+    let balance = column(&columns, "balance", Window::Head);
+    println!(
+        "the same instrument on the column beside it: balance {:+.2} against a bar of \
+{:.2}, {}",
+        balance.balance,
+        balance.balance_bar,
+        if balance.balance_pass { "green" } else { "red" }
     );
 }
 
@@ -586,6 +678,36 @@ fn the_recordings_own_line_passes_the_balance_column() {
         "the recordings' own line fails the column that scores instruments \
          against it: balance {:+.2} of {:.2}, spread {:.2} of {:.2}\n{text}",
         balance.balance, balance.balance_bar, balance.standout, balance.bar
+    );
+    // **And the same for `splitting`, which is the column this control matters
+    // most for** (`DECISIONS.md` 451). A real AB pair does split a note a
+    // little — a soundboard's partials radiate from different parts of the
+    // plate, and two spaced capsules place them at slightly different points —
+    // so the target is the recording's own number and never zero: the reference
+    // line splits C4 by −13.71 dB, D4 by +2.67 and F4 by −1.36 at its own
+    // partials. A column that read "any split at all is a defect" would fail
+    // the piano it is scored against, which is exactly what this asserts it
+    // does not.
+    let splitting = column(&columns, "splitting", Window::Head);
+    assert!(
+        splitting.balance.abs() < 1e-9,
+        "the recordings split differently from themselves by {:+.3} dB\n{text}",
+        splitting.balance
+    );
+    assert!(
+        splitting.pass,
+        "the recordings' own line fails the splitting column that scores instruments \
+         against it: balance {:+.2} of {:.2}, spread {:.2} of {:.2}\n{text}",
+        splitting.balance, splitting.balance_bar, splitting.standout, splitting.bar
+    );
+    assert!(
+        splitting
+            .notes
+            .iter()
+            .any(|n| n.reference.abs() > 1.0),
+        "the recording's own line splits no note by more than a decibel, so this \
+         control cannot distinguish a bar taken off the recording from a bar of \
+         zero\n{text}"
     );
     // Every column, not just this one: a control that only holds for the column
     // it was written for is not a control.
@@ -818,4 +940,106 @@ fn only_c4_of_the_melody_is_a_recording() {
             c.population.len()
         );
     }
+}
+
+/// The onset the whole board's windows hang off, and the shape of signal that
+/// made it miss by most of a window.
+///
+/// `DECISIONS.md` 452. Every column of this file is measured over a span
+/// counted from [`melody::note_onset`], so a detector that lands late does not
+/// report a wrong onset — it reports a wrong *note*, measured from an eighth of
+/// a second into its own decay while the note beside it is measured from its
+/// hammer. On the melody render as shipped it landed **+73 ms** past the
+/// engine's C4 and **+42 ms** past the recording's, at C4 and nowhere else.
+///
+/// The cause is arithmetic and this test is built out of it rather than out of
+/// a render. The detector maximised the rise of a **1 ms** RMS envelope. One
+/// millisecond is a quarter of a period at 261.6 Hz, so that "envelope" is the
+/// waveform's own ripple, and on a note whose attack *swells* — which the
+/// engine's C4 does, reaching its loudest 20 ms in and only 4 dB above the tail
+/// it is struck into — the largest ripple-rise is wherever the swell is
+/// steepest and not where the hammer is. The signal below is that shape and
+/// nothing else: a decaying neighbour, a 3 ms broadband hammer at a known time,
+/// and a C4 that takes 25 ms to arrive.
+///
+/// Both halves are asserted, because only the pair is a falsification: the
+/// **old** detector's shape (1 ms blocks, no band) must miss by more than half
+/// the head window's own length, and the shipped one must land inside a block.
+#[test]
+fn the_onset_detector_finds_the_hammer_and_not_the_fundamental() {
+    let sr = f64::from(SAMPLE_RATE);
+    let strike_s = 0.5;
+    let signal = a_low_note_struck_into_a_tail(sr, strike_s);
+
+    // The shape the board shipped with, spelled out here rather than called, so
+    // that this test keeps reproducing the defect after the caller is fixed.
+    let old = piano_tuner::realism::strike_near_banded(
+        &signal, sr, strike_s, 0.05, 0.12, 1.0, 0.0,
+    );
+    let new = melody::note_onset(&signal, sr, strike_s);
+    let old_ms = 1000.0 * (old - strike_s);
+    let new_ms = 1000.0 * (new - strike_s);
+
+    assert!(
+        old_ms > 30.0,
+        "the 1 ms broadband detector is supposed to miss this shape and \
+         landed {old_ms:+.1} ms from the hammer; if this stops failing the \
+         defect of item 452 can no longer be reproduced and the test is lying"
+    );
+    assert!(
+        new_ms.abs() <= 2.0 * melody::ONSET_BLOCK_MS,
+        "the shipped detector landed {new_ms:+.1} ms from the hammer \
+         (the old one: {old_ms:+.1} ms)"
+    );
+}
+
+/// A C4 with a slow attack struck into the tail of a note a third above it.
+///
+/// Built to the shape the engine's own render has and no more: a fundamental
+/// that **swells** over 25 ms — the thing that fools a 1 ms envelope — over a
+/// partial series whose upper members arrive at the hammer and are gone in a
+/// quarter of a second, which is the thing a high-passed envelope sees. The
+/// hammer's own burst is in there at the level `DECISIONS.md` 339 measured it,
+/// twenty-one decibels under the note's own content in the same octave, so that
+/// this cannot pass by finding a burst the real signal does not have.
+///
+/// Deterministic: the burst is a fixed linear-congruential sequence, because a
+/// test that renders a different noise on every run is not a pin.
+fn a_low_note_struck_into_a_tail(sample_rate: f64, strike_s: f64) -> Vec<f32> {
+    const F0: f64 = 261.63;
+    const PARTIALS: usize = 24;
+    let n = (1.2 * sample_rate) as usize;
+    let mut out = vec![0.0f32; n];
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    for (i, s) in out.iter_mut().enumerate() {
+        let t = i as f64 / sample_rate;
+        // The note before: an E4 that has been decaying since 0.
+        let mut v = 0.030 * (-t / 0.9).exp() * (2.0 * PI * 329.63 * t).sin();
+        if t >= strike_s {
+            let u = t - strike_s;
+            for k in 1..=PARTIALS {
+                let kf = k as f64;
+                let hz = kf * F0;
+                if 2.0 * hz >= sample_rate {
+                    break;
+                }
+                // The fundamental takes 25 ms to arrive and the upper partials
+                // take one, which is what a coupled unison does and is the
+                // whole of the defect: the note's *level* peaks 20 ms in, its
+                // *band* peaks at the hammer.
+                let rise = if k == 1 { 0.025 } else { 0.001 };
+                let fall = 1.4 / kf.powf(0.8);
+                let a = 0.055 / kf.powf(1.7);
+                v += a * (1.0 - (-u / rise).exp()) * (-u / fall).exp()
+                    * (2.0 * PI * hz * t).sin();
+            }
+            if u < 0.003 {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let noise = (2.0 * (seed >> 33) as f64 / f64::from(u32::MAX >> 1)) - 1.0;
+                v += 0.0006 * noise * (1.0 - u / 0.003);
+            }
+        }
+        *s = v as f32;
+    }
+    out
 }

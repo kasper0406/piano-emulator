@@ -13,7 +13,8 @@
 //! |---|---|
 //! | `*_panpot.wav` | `[voicing.mics]` deleted: one mono voice scaled into two channels, and the board's two orthogonal taps. What the instrument was before item 351. |
 //! | `*_pair.wav` | the virtual capsule pair alone (`[voicing.mics.modal]` deleted): item 359's fitted geometry, four of six bands. |
-//! | `*_engine.wav` | the shipped preset: the pair **and** the board's mode-controlled band. |
+//! | `*_engine.wav` | the shipped preset. |
+//! | `*_m17.wav` | **written only when the shipped preset has no `[voicing.mics.modal]`**: today's pair with the band item 418 fitted and item 449 shipped put back, and nothing else moved. The instrument item 451's corner stage exists to retire. |
 //! | `*_reference.wav` | the Salamander recording of the same music. |
 //!
 //! # What is being listened for, and why the levels are shared
@@ -89,6 +90,23 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut panpot = shipped.clone();
     panpot.voicing.mics = None;
+    // **The instrument the corner stage exists to retire, kept on the page as
+    // a take** (`DECISIONS.md` 451). Once the shipped preset carries no
+    // `[voicing.mics.modal]`, `pair_only` *is* `shipped` and the A/B that
+    // matters is no longer "the pair with and without a band" but "the band
+    // that shipped through item 449 against the one that does not have it".
+    // The band is `melody::M17_MODAL_BAND` — the same constant the melody
+    // board's two falsifications install — so this take is built from whatever
+    // preset ships rather than from a file somebody has to keep in step.
+    let m17 = (shipped.voicing.mics.and_then(|m| m.modal).is_none()).then(|| {
+        let mut p = shipped.clone();
+        let (lo_hz, hi_hz, lift) = melody::M17_MODAL_BAND;
+        p.voicing.mics = Some(piano_emulator::preset::MicVoicing {
+            modal: Some(piano_emulator::preset::ModalBand { lo_hz, hi_hz, lift }),
+            ..mics
+        });
+        p
+    });
 
     let pieces = [melody::soprano(), realism::chords_pedal()];
     let mut sections = String::new();
@@ -106,11 +124,23 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             },
             Take {
                 name: "engine",
-                title: "the shipped preset: the pair and the mode-controlled band",
+                title: if m17.is_some() {
+                    "the shipped preset: the pair, and no mode-controlled band"
+                } else {
+                    "the shipped preset: the pair and the mode-controlled band"
+                },
                 audio: render_engine(&shipped, phrase),
             },
         ];
-        // One gain for all three engine takes — they share a mono sum, so a
+        if let Some(m17) = &m17 {
+            takes.push(Take {
+                name: "m17",
+                title: "the band item 418 fitted and item 449 shipped, put back on \
+today's pair — the instrument this milestone replaced",
+                audio: render_engine(m17, phrase),
+            });
+        }
+        // One gain for every engine take — they share a mono sum, so a
         // per-take normalisation would be measuring the side signal and
         // removing it.
         let engine_rms = rms(&takes[2].audio.mono());
@@ -119,7 +149,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         if engine_rms <= 0.0 || reference_rms <= 0.0 {
             return Err(format!("{} rendered silence", phrase.name).into());
         }
-        let mut gains = vec![f64::from(TARGET_RMS) / engine_rms; 3];
+        let mut gains = vec![f64::from(TARGET_RMS) / engine_rms; takes.len()];
         gains.push(f64::from(TARGET_RMS) / reference_rms);
         takes.push(Take {
             name: "reference",
@@ -148,17 +178,48 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         sections.push_str(&section(phrase, &takes));
     }
 
+    // **What this board is an A/B of changes with the band** (`DECISIONS.md`
+    // 451). With no `[voicing.mics.modal]` in the shipped preset the `_pair`
+    // take and the `_engine` take are the same instrument, and the comparison
+    // a listener wants is against the band that used to be there — which is
+    // what `_m17` is.
+    let milestone = if m17.is_some() {
+        "\n## What removing the band changed, and what these files are\n\n\
+         **The shipped preset carries no `[voicing.mics.modal]`.** So `_engine` and\n\
+         `_pair` are the same instrument, sample for sample, and the fourth engine take\n\
+         `_m17` is the band that shipped from item 418 to item 449 — `174.3-456.5 Hz`\n\
+         at a lift of `0.99` — put back on today's pair and on nothing else. That is\n\
+         the A/B this board now exists for, and it is the one the listener made: play\n\
+         `ode_soprano_m17.wav` and `ode_soprano_engine.wav` one after the other.\n\n\
+         What to listen for is **not** a width difference. The band's two edges bracket\n\
+         every fundamental of this line — 261.6 to 392.0 Hz inside 174.3-456.5 — and\n\
+         **none** of those notes' second partials, which start at 523 Hz. `L = m(1+B)`\n\
+         and `R = m(1−B)`, so wherever `Re B > 0` the band is not a widener but a\n\
+         **pan**: on `_m17` each note's *pitch* is pulled towards one loudspeaker while\n\
+         that same note's *colour* stays where the pair put it, and the ear is handed a\n\
+         note arriving from two places at once. Measured on this very render, F4's\n\
+         fundamental sits **21.8 dB** away from its own second, third and fourth\n\
+         partials in the image, and G4's **16.8**, where the recording's F4 sits 1.4 dB\n\
+         from its own — `renders/melody/MELODY.md`'s `splitting` column, item 451. A\n\
+         listener hears that as the note coming apart, part of what was reported —\n\
+         the C4 percept itself traced further, to items 452-453's mono-domain level\n\
+         and decay defects — and the preset's own `f0` table is right to 0.3 cents.\n\n\
+         The mono fold-down of all four engine takes is identical, so none of this is a\n\
+         level and none of it is audible in mono.\n\n"
+    } else {
+        ""
+    };
     let report = format!(
         "# The stereo image, heard\n\n\
-         *`piano-tuner stereo` — `PHYSICS.md` §8, `DECISIONS.md` 313-317, 346-379\n\
-         and 392-425.*\n\n\
+         *`piano-tuner stereo` — `PHYSICS.md` §8, `DECISIONS.md` 313-317, 346-379,\n\
+         392-425 and 446-453.*\n{milestone}\n\
          Every other board in `renders/` scores a **mono sum**, on purpose: a stereo\n\
          distance would mostly measure somebody else's microphones. This one is the\n\
          exception, and it exists because the largest single difference ever measured\n\
          between this engine and the recording was invisible to all of them — the\n\
          recording's two channels correlate at **+0.95 below 125 Hz and about zero\n\
          above it**, and the engine's did exactly the reverse (item 314).\n\n\
-         Two pieces of music, four takes each. The three engine takes share **one\n\
+         Two pieces of music. The engine takes share **one\n\
          gain**, because they share a mono sum sample for sample: fold any two of\n\
          them down and the difference is `f32` rounding. Everything you can hear\n\
          between them is side energy, which is the subject. The recording is matched\n\

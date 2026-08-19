@@ -404,7 +404,8 @@ tune with one note wrong in it is what opened `DECISIONS.md` 284.\n\n\
 | `hf` | 2-6 kHz share of the note's power, dB | brilliance, at absolute frequency (`DECISIONS.md` 292) |\n\
 | `strike` | attack tonality of the first 30 ms from the note's own strike, dB — large is a line spectrum, zero is a continuum | `[noise.strike]`, against the tonal attack (`DECISIONS.md` 341) |\n\
 | `channel` | `10 log10((E_L + E_R) / 2 E_M)` over the note's window, dB | `[voicing.mics]`, against the note's own mono fold-down (`DECISIONS.md` 394) |\n\
-| `balance` | `10 log10(E_L / E_R)` at the note's own `f0`, heterodyned, dB — positive is a left lean | `[voicing.mics]`, against the recording's own lean at the same note (`DECISIONS.md` 446) |\n\n\
+| `balance` | `10 log10(E_L / E_R)` at the note's own `f0`, heterodyned, dB — positive is a left lean | `[voicing.mics]`, against the recording's own lean at the same note (`DECISIONS.md` 446) |\n\
+| `splitting` | that same image position at `f0` **minus** its energy-weighted mean over the note's own partials 2-4, dB — positive means the pitch is left of the note's own colour | `[voicing.mics]`, against the recording's own split at the same note (`DECISIONS.md` 451) |\n\n\
 The first three are measured in **two windows** of the same note, found again \
 inside the phrase by the largest rise in a 1 ms envelope — the sampler plays \
 every recording from its own start, so the offset between a note-on and its \
@@ -506,16 +507,30 @@ engine.\n\n\
     let _ = write!(
         out,
         "\n## The balances\n\n\
-`DECISIONS.md` 341, 394, 446. `strike`, `channel` and `balance` ask a different \
-question from the three above them, so they are gated on a different number. The \
-three ask *does one note of the line stand out from the rest*, which the engine \
-answers on its own and which needs no recording of the note. These three ask *is \
-the mechanism as loud against the note as the piano's is*, *do the two \
-loudspeakers play this note as the piano's two channels do* and *does this \
-note's own fundamental come out of the loudspeaker the piano's comes out of* — \
-all comparisons with a recording, and therefore only meaningful at a key the \
-library recorded, so all are scored on the **recorded ladder** and not on the \
-line at all, as the median over those keys of `engine - recording`.\n\n\
+`DECISIONS.md` 341, 394, 446, 451. `strike`, `channel`, `balance` and \
+`splitting` ask a different question from the three above them, so they are \
+gated on a different number. The three ask *does one note of the line stand out \
+from the rest*, which the engine answers on its own and which needs no recording \
+of the note. These four ask *is the mechanism as loud against the note as the \
+piano's is*, *do the two loudspeakers play this note as the piano's two channels \
+do*, *does this note's own fundamental come out of the loudspeaker the piano's \
+comes out of* and *does the note arrive from one place in the image at all* — \
+all comparisons with a recording, and therefore only meaningful where the \
+reference note is a real measurement of the piano, as the median of \
+`engine - recording`.\n\n\
+Three of the four take that median over the **recorded ladder** and score the \
+one note of the line that is a recording, which is item 328's rule: a transposed \
+reference note's inharmonicity, decay and brightness are a neighbour's run \
+through a resampler, and scoring against them measures the resampler. \
+**`splitting` takes it over the line's own five pitches**, and the exception is \
+arithmetic rather than a concession (`DECISIONS.md` 451): resampling multiplies \
+every frequency of a take by one factor and touches neither channel's amplitude, \
+so a transposed note's `E_L/E_R` at its own k-th partial *is* the take's, exactly \
+— and a split is a difference of two such ratios. It has to be scored there, \
+because the defect it was written for is a **band**: over the recorded ladder \
+D#3 has its fundamental below the band and its second partial inside it, and C5 \
+and D#5 are clear of the band altogether, so a median over the ladder mixes three \
+regimes and reports the smallest. The melodic register is one regime.\n\n\
 `channel` is `10 log10((E_L + E_R) / 2 E_M)`: what the two loudspeakers put in \
 the room against what this note's own mono fold-down says they do. **It is the \
 only column on this board, or on any board in this repository, that is not a \
@@ -528,12 +543,27 @@ missing half and the reason it is missing is arithmetic: `E_L + E_R` is \
 symmetric under swapping the two channels, so an instrument that puts every \
 fundamental of a tune seven decibels into the left loudspeaker, against a \
 recording that leans one and a half decibels right, moves `channel` by nothing \
-(`DECISIONS.md` 446). It is also the **one column of this board that carries \
-both verdicts**: the balance half convicts a uniform lean, which a median over \
-nine recorded keys can see and the line's own trend cannot, and the spread half \
-convicts note-to-note jumps, which the line answers on its own and a median \
-cannot see because they cancel in it. Its spread verdict is in the evenness \
-table above and its balance verdict is here.\n\n\
+(`DECISIONS.md` 446).\n\n\
+`splitting` is that same reading at `f0` **minus** the energy-weighted mean of \
+it over the note's own partials 2-4 — how far the pitch sits from the note's \
+own colour in the image. It is `balance`'s missing half for a reason of the \
+same shape one more time: `balance` reads **one** frequency per note, and a \
+stage that is a *band* does not move a note, it moves the part of a note that \
+lies inside its edges. The band item 422 shipped spans 174.3-456.5 Hz, which \
+contains every fundamental of this line (261.6 to 392.0 Hz) and **none** of \
+those notes' second partials (523 Hz and up), so every note of the tune had its \
+pitch panned one way and its colour left where it was. A listener is handed a \
+note arriving from two places at once, with zero cents of tuning error anywhere \
+(`DECISIONS.md` 451; the *that C sounds off* percept itself is item 453's \
+mono-domain pair — this column is the image half of the session's findings). The \
+weights are the pair energy each reading was taken from, so a partial that is \
+not sounding — a ratio of two noise floors — weighs nothing.\n\n\
+`balance` and `splitting` are the **two columns of this board that carry both \
+verdicts**: the balance half convicts a whole line pulled the same way, which a \
+median can see and the line's own trend cannot, and the spread half convicts \
+note-to-note jumps, which the line answers on its own and a median cannot see \
+because they cancel in it. Their spread verdicts are in the evenness table above \
+and their balance verdicts are here.\n\n\
 The bar is the larger of two things, times {:.2}: the median distance between \
 **two takes of one recorded key** (the same key out of the neighbouring velocity \
 layer), which is the same velocity-layer floor `REALISM.md` quotes beside every \
@@ -581,6 +611,93 @@ velocity layer — kept so the size of the change is visible rather than asserte
             c.clone_layer_standout * melody::ALLOWANCE,
         );
     }
+    // **The two image tables, side by side** — the session's own measurement
+    // in the form it was made in (`DECISIONS.md` 449, 451). Everything in them
+    // is in the per-column tables below as well; the point of putting them
+    // here is that *which loudspeaker a note comes out of* and *whether it
+    // comes out of one at all* are two readings of one pair of channels, and a
+    // reader comparing the engine's line with the recording's should not have
+    // to hold two pages open.
+    let image_table = |metric: &str, what: &str| -> String {
+        use std::fmt::Write as _;
+        let mut table = String::new();
+        let Some(c) = columns
+            .iter()
+            .find(|c| c.metric == metric && c.window == melody::Window::Head)
+        else {
+            return table;
+        };
+        let _ = write!(table, "\n\n{what}\n\n|  |");
+        for n in &c.notes {
+            let _ = write!(table, " {} |", melody::note_name(n.key));
+        }
+        let _ = write!(table, " median |\n|---|");
+        for _ in &c.notes {
+            let _ = write!(table, "--:|");
+        }
+        let _ = writeln!(table, "--:|");
+        let median = |pick: &dyn Fn(&melody::LineNoteScore) -> f64| -> f64 {
+            let mut v: Vec<f64> = c.notes.iter().map(pick).filter(|x| x.is_finite()).collect();
+            v.sort_by(f64::total_cmp);
+            if v.is_empty() {
+                f64::NAN
+            } else {
+                v[v.len() / 2]
+            }
+        };
+        let rows: [(&str, fn(&melody::LineNoteScore) -> f64); 3] = [
+            ("engine", |n| n.engine),
+            ("recordings", |n| n.reference),
+            ("error", |n| n.error),
+        ];
+        for (label, pick) in rows {
+            let _ = write!(table, "| {label} |");
+            for n in &c.notes {
+                let v = pick(n);
+                if v.is_finite() {
+                    let _ = write!(table, " {v:+.2} |");
+                } else {
+                    let _ = write!(table, " *unscored* |");
+                }
+            }
+            let _ = writeln!(table, " **{:+.2}** |", median(&pick));
+        }
+        let _ = writeln!(
+            table,
+            "\nbalance **{:+.2}** against a bar of {:.2} — {}; the line's own spread \
+{:.2} at {} against {:.2} — {}.",
+            c.balance,
+            c.balance_bar,
+            if c.balance_pass { "pass" } else { "**FAIL**" },
+            c.standout,
+            melody::note_name(c.standout_key),
+            c.bar,
+            if c.spread_pass { "pass" } else { "**FAIL**" },
+        );
+        table
+    };
+    let _ = write!(
+        out,
+        "\n## The image, note by note\n\n\
+Two readings of one pair of channels, over the head window, positive is a left \
+lean. `balance` says **which loudspeaker** the pitch comes out of; `splitting` \
+says whether the pitch and the note's own colour come out of the same one. \
+Neither is a number the mono fold-down every other board in this repository is \
+computed on can carry (`DECISIONS.md` 446, 451).{}{}\n",
+        image_table(
+            "balance",
+            "**`balance`** — `10 log10(E_L / E_R)` at each pitch's own fundamental. \
+Scored at the one note of this line the library recorded; the median row is the \
+line's, and the column's verdict is taken over the recorded ladder."
+        ),
+        image_table(
+            "splitting",
+            "**`splitting`** — the same reading at the fundamental minus its \
+energy-weighted mean over that note's own partials 2-4. Every note of the line is \
+scored, because a resampler carries an image ratio through unchanged \
+(`melody::METRIC_ON_LINE`), and the median row **is** the column's verdict."
+        ),
+    );
     let _ = write!(
         out,
         "\n## The five pitches\n\n\
@@ -606,7 +723,7 @@ only where the reference note is a recording of that key.\n\n"
                 n.reference,
                 n.layer,
                 n.engine_residual,
-                if n.recorded {
+                if n.scored {
                     format!("{:+.2}", n.error)
                 } else {
                     "*transposed — unscored*".to_string()
@@ -641,12 +758,14 @@ only where the reference note is a recording of that key.\n\n"
         let _ = write!(
             out,
             "## Every note of the `{title}` window, in time order\n\n\
-| at | key | source | roughness e/r | wobble e/r | hf e/r | strike e/r |\n|--:|---|---|--:|--:|--:|--:|\n"
+| at | key | source | roughness e/r | wobble e/r | hf e/r | strike e/r | balance e/r | splitting e/r |\n\
+|--:|---|---|--:|--:|--:|--:|--:|--:|\n"
         );
         for (e, r) in engine.iter().zip(reference) {
             let _ = writeln!(
                 out,
-                "| {:.2} | {} | {} | {:.2}/{:.2} | {:.2}/{:.2} | {:.1}/{:.1} | {:.1}/{:.1} |",
+                "| {:.2} | {} | {} | {:.2}/{:.2} | {:.2}/{:.2} | {:.1}/{:.1} | {:.1}/{:.1} | \
+{:+.1}/{:+.1} | {:+.1}/{:+.1} |",
                 e.onset_s,
                 melody::note_name(e.key),
                 if recorded.is_recorded(e.key) {
@@ -661,7 +780,11 @@ only where the reference note is a recording of that key.\n\n"
                 e.hf_db,
                 r.hf_db,
                 e.strike_db,
-                r.strike_db
+                r.strike_db,
+                e.balance_db,
+                r.balance_db,
+                e.split_db,
+                r.split_db
             );
         }
         let _ = writeln!(out);

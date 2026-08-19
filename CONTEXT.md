@@ -84,7 +84,10 @@ instrument. MIT, free, open source; App Store via AUv3 planned
 `bench` (REALISM.md: mel vs floor, modulation, attack, release, stereo
 coherence + per-channel columns), `compass` (88 keys vs strung-alike
 neighbors + recordings), `melody` (the Ode line: roughness/wobble/hf/strike
-/channel/**balance**, head+tail windows, recorded-key bars), motion columns A1/A2/B1/B2
+/channel/**balance**, head+tail windows, recorded-key bars; **every window is
+counted from an onset found in the 3 kHz-and-up band** — D452, because below
+that a 1 ms envelope of a bass note is its carrier and the old detector landed
++73 ms past C4's own hammer on the engine and +42 on the recording), motion columns A1/A2/B1/B2
 (FM axes), limiter budget, release-click, stability fuzz, perf (<50% of one
 core; currently ~30%).
 
@@ -144,7 +147,9 @@ core; currently ~30%).
 
 - Iterate with plain `cargo test` (dev profile is opt-level 3; release-only
   gates self-skip). Full `cargo test --release --workspace` at most twice per
-  agent, at phase ends. Suite baseline: **712 green / 4 documented reds**
+  agent, at phase ends. Measured in this tree at D452: **716 green / 5 reds**,
+  every red named (D260's duplex, D418's two, D446's `balance`, and D451's
+  `splitting`). Historical baseline: **712 green / 4 documented reds**
   (D418, verified and left standing by D423-425; the fourth is D446's
   `balance` column, which adds four green tests and one red one).
 - Any command trending past ~5 minutes: parallelize or split the tool; never
@@ -251,6 +256,37 @@ not another filter design. D411's median-vs-pooled item is settled and printed
 both ways (D415): `mono_balance` (median, still the gate) reads **+7.93** at
 252 Hz where `mono_pooled` (energy-weighted) reads **+2.78**, and eight of
 nineteen bands change sign between them.
+
+**C4 is measurably wrong in two ways and only one of them has a home**
+(D452-453). The listener's "that C sounds off" is **not** pitch (+0.17 cents
+relative) and is **not** the mic stage: both defects reproduce on **a single
+note struck alone, mono, at velocity 88**, so the pair, the phrase, the limiter
+and the master gain are exonerated by construction (`forensics/c4_ledger`).
+**(a) Level.** A-weighted head energy against the recording of the same key,
+normalised to the nine-key ladder median: **C4 −8.96 dB, D#3 −8.27, A3 +4.03,
+C5 +1.08**, everything else inside ±1.1. Half of it is `notes.partial_gains` —
+at C4 and D#3 the fitted row *costs* the note 2.56 / 2.81 dB of head level and
+they are the only rows costing more than 2.5 dB (F#3, C5 and D#5 cost
+0.36-1.04; every other row is *worth* +0.19 to +2.12). The other half is the per-key level `energy_offset`
+removes and **D272 decided not to write anywhere**; the compass prints it
+(C4 −19.0 dB against an 88-key median of −15.05) and cannot flag it, because
+its z divides by the 3.34 dB rms of key-to-key error D272 accepted. Closing
+this is **re-opening D272**, not fixing a bug. **(b) Held octave, C4 only.**
+`notes.partial_sigma_scale[C4][k=1] = 0.5338` where the recording asks for
+1.6-2.8× that (method-sensitive; D453 names the span-convention question). Over 0.10 → 1.50 s the recording's C4 keeps its octave (k2 − k1
++3.5 → +0.1 dB) and the engine's collapses (−3.3 → **−20.2**); **the decay law
+alone, with the row cleared, reproduces the recording's relationship to
+0.4 dB**, so the fitted row is worth −14.6 dB of the defect and is worse than
+nothing. The mechanism is a *composition*: `shaping::partial_sigma_scale`
+normalises the row to geometric mean one over **all** partials, `tail` then
+corrects **only above 2 kHz** (D304/D320), and the sub-2 kHz cells are left
+divided by the original geometric mean — visible as a rule, not a key
+(sampled ladder keys' whole rows 2.17/2.91/1.83/1.94, their sub-2 kHz halves
+1.00/0.90/0.75/0.39, which is D334's own step and what D335 propagated rather
+than questioned). **Which stage owns the band below 2 kHz is the open
+question**, both answers are milestone-sized re-fits, and that is why D453 is
+attribution-only. D#3 shares (a) and not (b) — its `k=1` cell is exactly 1.000
+and its octave delta is +1.46 dB.
 
 Treble sympathetic halo ~21 dB short (board late field); per-key brightness
 tilt not drawn for unsampled keys (needs more recorded keys by policy);

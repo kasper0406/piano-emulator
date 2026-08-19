@@ -982,8 +982,8 @@ fn refine_onset(signal: &[f32], sample_rate: f64, frame_start: usize) -> f64 {
 ///
 /// This is the primitive both per-note windows in this repository are placed
 /// with — [`attack_tonality_delta`] here and `estimate::melody::note_onset`,
-/// which delegates to it — so that the two boards cannot drift apart on the one
-/// question of *where a note starts*.
+/// which delegates to [`strike_near_banded`] — so that the two boards cannot
+/// drift apart on the one question of *where a note starts*.
 pub fn strike_near(
     signal: &[f32],
     sample_rate: f64,
@@ -991,13 +991,68 @@ pub fn strike_near(
     back_s: f64,
     forward_s: f64,
 ) -> f64 {
-    let block = ((sample_rate * 0.001) as usize).max(1);
+    strike_near_banded(signal, sample_rate, near_s, back_s, forward_s, 1.0, 0.0)
+}
+
+/// [`strike_near`] with the two things that decide whether it finds a hammer
+/// exposed: the envelope's block length and the band the envelope is taken
+/// over.
+///
+/// **Both defaults are wrong for a low note and the reason is arithmetic**
+/// (`DECISIONS.md` 452). An RMS over one millisecond of a 261.6 Hz tone is not
+/// an envelope: the period is 3.8 ms, so the block covers a quarter of a cycle
+/// and the "envelope" swings by whatever the waveform does inside it. The rise
+/// this function maximises is then a rise of the *carrier*, not of the note,
+/// and on a note whose attack is soft the largest such rise lands wherever the
+/// ripple happens to be steepest — measured at up to **+73 ms** past C4's own
+/// hammer on the engine's melody render and **+42 ms** on the recording's.
+/// Lengthening the block alone does not fix it, because a longer block also
+/// blurs the attack it is looking for: at 3 ms the engine's C4 still misses by
+/// +16 and every other note acquires an 8-11 ms bias.
+///
+/// What fixes it is asking the *band the hammer is in*. A strike is the one
+/// broadband event in a melody; a sounding note's tail has almost nothing above
+/// 2 kHz, and neither does the low-frequency ripple that produces the miss. A
+/// 2 ms envelope of the signal high-passed at 2 kHz places every note of both
+/// sides of the melody render within **6 ms** of its grid time, worst case,
+/// against 73 ms for the shipped detector — and the residual few milliseconds
+/// are the search's own convention (it returns the *start* of the three-block
+/// span that rose the most), which is identical on both sides and so cancels.
+///
+/// `highpass_hz <= 0` skips the filter, which is what keeps [`strike_near`]
+/// bit-identical for the phrase board's `attack` column.
+pub fn strike_near_banded(
+    signal: &[f32],
+    sample_rate: f64,
+    near_s: f64,
+    back_s: f64,
+    forward_s: f64,
+    block_ms: f64,
+    highpass_hz: f64,
+) -> f64 {
+    let block = ((sample_rate * block_ms * 1e-3) as usize).max(1);
     let from = ((((near_s - back_s) * sample_rate) as isize).max(0)) as usize;
     let to = ((((near_s + forward_s) * sample_rate) as usize) + block).min(signal.len());
     if from + 4 * block >= to {
         return near_s;
     }
-    let envelope: Vec<f64> = signal[from..to]
+    // Filtered over the search span only, and with the filter's own settling
+    // taken before the span starts, so that a per-note call costs a couple of
+    // hundred milliseconds of biquad rather than a pass over the phrase.
+    let settle = if highpass_hz > 0.0 {
+        ((0.01 * sample_rate) as usize).min(from)
+    } else {
+        0
+    };
+    let span = &signal[from - settle..to];
+    let filtered;
+    let span: &[f32] = if highpass_hz > 0.0 {
+        filtered = highpassed(span, sample_rate, highpass_hz);
+        &filtered[settle..]
+    } else {
+        span
+    };
+    let envelope: Vec<f64> = span
         .chunks(block)
         .map(|c| {
             (c.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / c.len() as f64).sqrt()
@@ -1012,6 +1067,45 @@ pub fn strike_near(
         }
     }
     from as f64 / sample_rate + best.0 as f64 * block as f64 / sample_rate
+}
+
+/// Two second-order Butterworth high-pass sections in cascade, forward only.
+///
+/// Forward only on purpose: a zero-phase pass would smear the attack backwards
+/// in time, which is the one thing an onset detector must not do. The phase
+/// this adds at the cutoff is a fraction of a block.
+///
+/// **Two sections and not one**, because one is not enough for the job by a
+/// margin this repository can state: a single section is 12 dB/octave, which
+/// puts C4's fundamental only 35 dB down at a 2 kHz corner, and the note's own
+/// 2-6 kHz content sits 26 dB under that fundamental — so a third of what the
+/// "high band" envelope would be reading is the fundamental leaking through it,
+/// swelling on the fundamental's own schedule. Cascading the section takes the
+/// leak to 70 dB down and the band to what it says it is.
+fn highpassed(x: &[f32], sample_rate: f64, cutoff: f64) -> Vec<f32> {
+    let once = highpass_section(x, sample_rate, cutoff);
+    highpass_section(&once, sample_rate, cutoff)
+}
+
+fn highpass_section(x: &[f32], sample_rate: f64, cutoff: f64) -> Vec<f32> {
+    let w = (PI * cutoff / sample_rate).tan();
+    let k = std::f64::consts::SQRT_2;
+    let norm = 1.0 / (1.0 + k * w + w * w);
+    let (b0, b1, b2) = (norm, -2.0 * norm, norm);
+    let a1 = 2.0 * (w * w - 1.0) * norm;
+    let a2 = (1.0 - k * w + w * w) * norm;
+    let (mut x1, mut x2, mut y1, mut y2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    x.iter()
+        .map(|&s| {
+            let x0 = f64::from(s);
+            let y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            x2 = x1;
+            x1 = x0;
+            y2 = y1;
+            y1 = y0;
+            y0 as f32
+        })
+        .collect()
 }
 
 /// Spectral flatness of a block, as a *tonality* in dB: the arithmetic mean of
