@@ -1265,7 +1265,14 @@ impl Knob {
         match self {
             Knob::Spacing => (0.04, 0.99),
             Knob::Span => (0.5, 1.5),
-            Knob::Width => (0.05, 1.99),
+            // **The ceiling is the schema's own, which since `DECISIONS.md` 485
+            // is the owner's 0.3** (`soundboard::MIC_WIDTH`). It was 1.99, one
+            // hundredth inside the old rail; it is now the rail itself, because
+            // a fit that walked up to 0.3 and stopped is a fit that wanted more
+            // and was refused, which is a thing worth being able to read off a
+            // printed point. Nothing here clamps: a candidate above it would be
+            // a preset `Preset::validate` refuses.
+            Knob::Width => (0.05, 0.3),
             Knob::Coherence => (0.26, 7.9),
             // The engine bounds the edges at 40 Hz and 2 kHz; the search is
             // held inside the range the profile actually resolves — above the
@@ -2070,7 +2077,15 @@ fn boards_for(
 /// missing half of the same pair: every one of the four above is a function of
 /// two *magnitudes*, and half of where a listener puts a note is the
 /// interchannel *phase*.
-const MELODY_METRICS: [&str; 5] = ["channel", "balance", "splitting", "comb", "cue"];
+/// **Six since `DECISIONS.md` 485, and the sixth is the one the owner named.**
+/// `gradient` is the slope of the note's own image position against **key over
+/// the recorded ladder** — the same reading `balance` takes a median magnitude
+/// of, and the same statistic `comb` takes over the tune, over two octaves
+/// instead of five semitones. It is in this objective because it is the column
+/// this fit's own `width` writes and because the rail alone does not decide it:
+/// a `width` inside 0.3 with the pan spread in it can still walk the compass.
+const MELODY_METRICS: [&str; 6] =
+    ["channel", "balance", "splitting", "comb", "cue", "gradient"];
 
 /// **The melody board's three stereo columns, in this objective** — the term
 /// `DECISIONS.md` 447 adds and item 451 widens, with item 416's own lesson
@@ -2238,6 +2253,10 @@ fn melody_excess(columns: &[melody::Column]) -> f64 {
             }
             if c.gated_on_agreement && c.agreement.is_finite() && c.agreement_bar > 0.0 {
                 excess += (c.agreement / c.agreement_bar - PASS_MARGIN).max(0.0);
+            }
+            // The compass's own tilt (`DECISIONS.md` 485), charged the same way.
+            if c.gated_on_gradient && c.gradient_error.is_finite() && c.gradient_bar > 0.0 {
+                excess += (c.gradient_error / c.gradient_bar - PASS_MARGIN).max(0.0);
             }
             excess
         })

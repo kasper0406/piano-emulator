@@ -2641,6 +2641,43 @@ pub const STEREO_MS_CLAMP_DB: f64 = 60.0;
 /// perfect instrument, and a quarter more is the smallest margin that does not.
 pub const STEREO_ALLOWANCE: f64 = 1.25;
 
+/// **The most side energy a mono-exact pair may carry, as this board's own
+/// `r0`: zero** — `E_side = E_mid`, `|T| = 1`.
+///
+/// `DECISIONS.md` 486, and it is `MIC_MODAL_LIFT`'s rail of one written in the
+/// coherence board's units rather than a number anybody chose.
+/// `r0 = (E_mid − E_side)/(E_mid + E_side)`, so **`r0 < 0` *is*
+/// `E_side > E_mid`**; and writing the pair as `L = M(1 + T)`, `R = M(1 − T)`
+/// — which mono discipline forces (`DECISIONS.md` 470) — that band's
+/// `E_side/E_mid` is `|T|²`. Above `|T| = 1` the denominator `|1 − T|` can
+/// vanish: one loudspeaker inverts against the other and a partial's image
+/// `20 log10 |1 + T| / |1 − T|` is unbounded. That is exactly what item 418
+/// railed the lift at one to forbid, after a listener found the artifact three
+/// separate ways while this board was green on it.
+///
+/// So under the neutral policy of item 466 — and under the owner's verdict of
+/// item 485, which is what finally decides D470's budget — a target below zero
+/// is a target that asks for a mechanism the schema refuses. The **statistic**
+/// does not move, the **bar** does not move (it is still the recording against
+/// its own second take, or the material's own uncertainty, whichever is
+/// larger), and the **target** becomes `max(reference_r0, 0)`. Every band where
+/// the recording's own `r0` is positive is untouched, which on this library is
+/// four of six.
+///
+/// [`StereoColumn::excluded_r0`] is what that removes in each band and the gate
+/// prints it before it asserts anything, for item 417's reason verbatim: an
+/// acceptance nobody can read is indistinguishable from a widened bar.
+pub const NEUTRAL_SIDE_CEILING_R0: f64 = 0.0;
+
+/// The same ceiling in the per-channel board's units: `pair_db` is
+/// `10 log10(1 + E_side/E_mid)`, so `E_side/E_mid = 1` is
+/// **`10 log10 2 = 3.0103 dB`**.
+///
+/// `DECISIONS.md` 486. It is the number item 418 already quotes as "one is a
+/// ceiling of +3.01 dB where the recording's own two nodal bands read +3.54 and
+/// +3.88"; what item 486 does is stop asking for the 3.54 and the 3.88.
+pub const NEUTRAL_PAIR_CEILING_DB: f64 = 3.010_299_956_639_812;
+
 /// What two channels do in one band.
 #[derive(Clone, Copy, Debug)]
 pub struct StereoBand {
@@ -3242,8 +3279,18 @@ pub struct StereoColumn {
     /// Median mid/side ratio, both sides.
     pub engine_mid_side_db: f64,
     pub reference_mid_side_db: f64,
-    /// **The score**: |engine r0 − reference r0|, both medians. What this band
-    /// of the image *is*, engine against recording.
+    /// **The target the score is taken against**: `max(reference_r0, 0)` since
+    /// `DECISIONS.md` 486 — see [`NEUTRAL_SIDE_CEILING_R0`]. Equal to
+    /// [`Self::reference_r0`] in every band where the recording sees more sum
+    /// than difference.
+    pub target_r0: f64,
+    /// `target_r0 − reference_r0`: **how much of the recording's own
+    /// decorrelation this board has stopped asking for**, and it is zero in
+    /// every band where the recording's `r0` is positive. Printed by the gate
+    /// before it asserts.
+    pub excluded_r0: f64,
+    /// **The score**: |engine r0 − [`Self::target_r0`]|, both medians. What this
+    /// band of the image *is*, engine against the target.
     pub error: f64,
     /// **The floor**: the identical statistic between the reference and its
     /// alternate take — two recordings of one piano, reduced the same way.
@@ -3342,14 +3389,32 @@ pub fn stereo_columns(items: &[StereoItem]) -> Vec<StereoColumn> {
             let e_r0 = pick(|x| x.r0, engine);
             let r_r0 = pick(|x| x.r0, reference);
             let a_r0 = pick(|x| x.r0, alternate);
-            let errors: Vec<f64> = e_r0.iter().zip(&r_r0).map(|(e, r)| (e - r).abs()).collect();
-            let floors: Vec<f64> = a_r0.iter().zip(&r_r0).map(|(a, r)| (a - r).abs()).collect();
+            // **The target is the recording's own `r0` or the neutral policy's
+            // ceiling on the side energy, whichever asks for less side**
+            // (`DECISIONS.md` 486, `NEUTRAL_SIDE_CEILING_R0`). Item by item as
+            // well as on the median, because the per-item column is the one
+            // that says whether a band is right key by key.
+            let target = |r: f64| r.max(NEUTRAL_SIDE_CEILING_R0);
+            let errors: Vec<f64> = e_r0
+                .iter()
+                .zip(&r_r0)
+                .map(|(e, r)| (e - target(*r)).abs())
+                .collect();
+            let floors: Vec<f64> = a_r0
+                .iter()
+                .zip(&r_r0)
+                .map(|(a, r)| (a - target(*r)).abs())
+                .collect();
             let (median_e, median_r, median_a) = (
                 stereo_median(&e_r0),
                 stereo_median(&r_r0),
                 stereo_median(&a_r0),
             );
-            let error = (median_e - median_r).abs();
+            let target_r0 = target(median_r);
+            let error = (median_e - target_r0).abs();
+            // The floor stays what it always was — the recording against its own
+            // second take — because how finely a thing can be resolved is the
+            // recording's answer whatever the target is (`DECISIONS.md` 466).
             let floor = (median_a - median_r).abs();
             let scatter = stereo_sigma(&r_r0);
             let uncertainty = if readable.is_empty() {
@@ -3371,6 +3436,8 @@ pub fn stereo_columns(items: &[StereoItem]) -> Vec<StereoColumn> {
                 engine_r0: median_e,
                 reference_r0: median_r,
                 alternate_r0: median_a,
+                target_r0,
+                excluded_r0: target_r0 - median_r,
                 engine_peak_r: stereo_median(&pick(|x| x.peak_r.abs(), engine)),
                 reference_peak_r: stereo_median(&pick(|x| x.peak_r.abs(), reference)),
                 engine_lag_ms: stereo_median(&pick(|x| x.lag_ms, engine)),
@@ -3399,21 +3466,23 @@ pub fn stereo_report(columns: &[StereoColumn]) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
-        "| band | engine r@0 | reference r@0 | \\|err\\| | bar | floor | scatter | per-item \\|err\\| / floor | \
+        "| band | engine r@0 | reference r@0 | target r@0 | excluded | \\|err\\| | bar | floor | scatter | per-item \\|err\\| / floor | \
 engine peak \\|r\\| @ lag | reference peak \\|r\\| @ lag | engine M/S | reference M/S | n |"
     );
     let _ = writeln!(
         s,
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     );
     for c in columns {
         let _ = writeln!(
             s,
-            "| `{}` | {:+.3} | {:+.3} | {:.3} | {:.3}{} | {:.3} | {:.3} | {:.3} / {:.3} | \
+            "| `{}` | {:+.3} | {:+.3} | {:+.3} | {:+.3} | {:.3} | {:.3}{} | {:.3} | {:.3} | {:.3} / {:.3} | \
 {:.3} @ {:+.2} ms | {:.3} @ {:+.2} ms | {:+.1} dB | {:+.1} dB | {} |",
             c.name,
             c.engine_r0,
             c.reference_r0,
+            c.target_r0,
+            c.excluded_r0,
             c.error,
             c.bar,
             if c.pass { "" } else { " **RED**" },
@@ -3809,6 +3878,15 @@ pub struct ChannelColumn {
     pub engine_pair_db: f64,
     pub reference_pair_db: f64,
     pub alternate_pair_db: f64,
+    /// **The target [`Self::pair_balance`] is taken against**:
+    /// `min(reference_pair_db, `[`NEUTRAL_PAIR_CEILING_DB`]`)` since
+    /// `DECISIONS.md` 486. Equal to [`Self::reference_pair_db`] in every band
+    /// where the recording's pair carries no more side than sum.
+    pub target_pair_db: f64,
+    /// `reference_pair_db − target_pair_db`: how much of the recording's own
+    /// pair energy this board has stopped asking for, in decibels, and zero in
+    /// every band under the ceiling. Printed by the gate before it asserts.
+    pub excluded_pair_db: f64,
     /// **The loudness score**: the median over the items of the engine's
     /// `pair_db` less the recording's, *signed*, because the recording has its
     /// own value at every key and the question is whether the engine's is the
@@ -3954,10 +4032,17 @@ fn channel_columns_over(
             let floors = per_item(alternate);
             // The loudness column: signed, per item, against the recording's
             // own value at that key.
+            // **The target is the recording's own `pair_db` or the neutral
+            // policy's ceiling on the side energy, whichever asks for less
+            // side** (`DECISIONS.md` 486, `NEUTRAL_PAIR_CEILING_DB`). This is
+            // the coherence board's own re-bar read in the other of the two
+            // units item 418 says the shortfall lives in: `pair_db` is
+            // `10 log10(1 + E_side/E_mid)` and `E_side/E_mid = 1` is +3.0103 dB.
+            let pair_target = |r: f64| r.min(NEUTRAL_PAIR_CEILING_DB);
             let pair_of = |side: fn(&ChannelItem) -> &ChannelShape| -> Vec<f64> {
                 readable
                     .iter()
-                    .map(|it| of(side(it))[b].pair_db - of(&it.reference)[b].pair_db)
+                    .map(|it| of(side(it))[b].pair_db - pair_target(of(&it.reference)[b].pair_db))
                     .collect()
             };
             let mono_of = |side: fn(&ChannelItem) -> &ChannelShape| -> Vec<f64> {
@@ -4040,6 +4125,9 @@ fn channel_columns_over(
                 engine_pair_db: stereo_median(&pick(|x| x.pair_db, engine)),
                 reference_pair_db: stereo_median(&pick(|x| x.pair_db, reference)),
                 alternate_pair_db: stereo_median(&pick(|x| x.pair_db, alternate)),
+                target_pair_db: pair_target(stereo_median(&pick(|x| x.pair_db, reference))),
+                excluded_pair_db: stereo_median(&pick(|x| x.pair_db, reference))
+                    - pair_target(stereo_median(&pick(|x| x.pair_db, reference))),
                 pair_balance,
                 pair_floor,
                 pair_scatter,
@@ -4079,19 +4167,19 @@ pub fn channel_report(columns: &[ChannelColumn]) -> String {
         s,
         "| band | engine L / R | reference L / R | alternate L / R | \\|err\\| | reachable | \
 bar | excl. asym | floor | \
-scatter | per-item \\|err\\| / floor | pair E / R | balance | bar | mono E / R | balance | bar | \
+scatter | per-item \\|err\\| / floor | pair E / R | pair target | excl. side | balance | bar | mono E / R | balance | bar | \
 pooled | pooled floor | worst | n |"
     );
     let _ = writeln!(
         s,
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
     );
     for c in columns {
         let _ = writeln!(
             s,
             "| `{}` | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:+.2} / {:+.2} | {:.2} | {:.2}{} | \
 {:.2} | {:.2} | \
-{:.2} | {:.2} | {:.2}{} / {:.2} | {:+.2} / {:+.2} | {:+.2}{} | {:.2} | {:+.2} / {:+.2} | \
+{:.2} | {:.2} | {:.2}{} / {:.2} | {:+.2} / {:+.2} | {:+.2} | {:.2} | {:+.2}{} | {:.2} | {:+.2} / {:+.2} | \
 {:+.2}{} | {:.2} | {:+.2} | {:.2} | {} | {} |",
             c.name,
             c.engine_left_db,
@@ -4112,6 +4200,8 @@ pooled | pooled floor | worst | n |"
             c.per_key_floor,
             c.engine_pair_db,
             c.reference_pair_db,
+            c.target_pair_db,
+            c.excluded_pair_db,
             c.pair_balance,
             if c.pair_pass { "" } else { " **RED**" },
             c.pair_bar,

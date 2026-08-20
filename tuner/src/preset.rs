@@ -2721,7 +2721,11 @@ mod tests {
             spacing_m: 0.5,
             height_m: 0.45,
             span_m: 1.0,
-            width: 1.5,
+            // Inside `MIC_WIDTH`'s ceiling, which since `DECISIONS.md` 485 is
+            // the owner's 0.3: the base of a rejection list has to be a preset
+            // the schema accepts, or every row of it passes for the wrong
+            // reason.
+            width: 0.25,
             diffuse_coherence: 5.0,
             source_extent_m: 0.0,
             modal: Some(piano_emulator::preset::ModalBand {
@@ -2805,7 +2809,7 @@ mod tests {
         let mics = ours.voicing.mics.expect("the microphone pair came through");
         assert_eq!(
             (mics.spacing_m, mics.height_m, mics.span_m, mics.width, mics.diffuse_coherence),
-            (0.5, 0.45, 1.0, 1.5, 5.0)
+            (0.5, 0.45, 1.0, 0.25, 5.0)
         );
         assert_eq!(direction.vh_db_at_pp, -2.5);
         assert_eq!(direction.vh_db_at_ff, 3.75);
@@ -2889,7 +2893,11 @@ mod tests {
             spacing_m: 0.5,
             height_m: 0.45,
             span_m: 1.0,
-            width: 1.5,
+            // Inside `MIC_WIDTH`'s ceiling, which since `DECISIONS.md` 485 is
+            // the owner's 0.3: the base of a rejection list has to be a preset
+            // the schema accepts, or every row of it passes for the wrong
+            // reason.
+            width: 0.25,
             diffuse_coherence: 5.0,
             source_extent_m: 0.0,
             modal: Some(ModalBand {

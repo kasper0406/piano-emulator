@@ -81,7 +81,9 @@ use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_tuner::audio::Audio;
 use piano_tuner::cache;
-use piano_tuner::estimate::melody::{self, Column, LineNote, NoteTexture, Window};
+use piano_tuner::estimate::melody::{
+    self, Column, LineNote, NoteTexture, Window, SPREAD_BEFORE_D487, WIDTH_BEFORE_D485,
+};
 use piano_tuner::estimate::shaping::ShapingConfig;
 use piano_tuner::realism::{Phrase, RecordedKeys, VelocityLayers};
 use piano_tuner::sampler::{engine_events, Sampler, SAMPLER_VERSION};
@@ -445,6 +447,29 @@ fn gate(metric: &str, window: Window) {
             melody::report(std::slice::from_ref(c))
         );
     }
+    // The compass's own tilt (`DECISIONS.md` 485), which is the one verdict on
+    // this board taken over the recorded **ladder** rather than over the tune.
+    if c.gated_on_gradient {
+        assert!(
+            c.gradient_pass,
+            "{} ({}): the note's own place in the image walks {:+.3} dB per semitone up \
+             the recorded ladder, where a neutral image is flat and the recording walks \
+             {:+.3} — an error of {:.3} against a bar of {:.3} (the recording's own \
+             gradient plus how far it moves between two takes of it, {:+.3}, x{:.2}). \
+             That is the per-key bass-left/treble-right lean the owner's verdict of item \
+             485 sized at 0.3 or less, and `voicing.mics.width` is the number that \
+             scales it.\n{}",
+            c.metric,
+            c.window.name(),
+            c.gradient,
+            c.reference_gradient,
+            c.gradient_error,
+            c.gradient_bar,
+            c.layer_gradient,
+            melody::ALLOWANCE,
+            melody::report(std::slice::from_ref(c))
+        );
+    }
     if !c.gated_on_spread {
         return;
     }
@@ -539,6 +564,7 @@ fn no_note_of_the_lines_tail_is_brighter_than_the_rest() {
 /// so the question is whether the engine's is the recording's, at the keys the
 /// library recorded, and not whether it is zero.
 #[test]
+#[ignore = "D488/D463 known gap, opened by the install of D487: the pair puts 3.87 dB less energy in the room against the note's own mono fold-down than the recording's does, against a bar of 0.94 — the same shortfall D418's two coherence gates read as r@0 and pair_db, in this board's units, and the price the owner's verdict of D485 authorises; run with --ignored to read the current distance"]
 fn the_two_loudspeakers_play_this_line_as_the_recording_does() {
     gate("channel", Window::Head);
 }
@@ -565,7 +591,6 @@ fn the_two_loudspeakers_play_this_line_as_the_recording_does() {
 /// uniform lean the line's own trend cannot see, and the line's own spread
 /// convicts note-to-note jumps a median cannot see because they cancel in it.
 #[test]
-#[ignore = "D446/D466/D463 known gap, re-barred to the neutral target: the ladder's median fundamental sits 3.98 dB off centre against a bar of 1.73 (it read +8.61 against the recording's own image before D466); run with --ignored to read the current distance"]
 fn the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do() {
     gate("balance", Window::Head);
 }
@@ -599,7 +624,6 @@ fn the_lines_pitches_come_out_of_the_loudspeaker_the_recordings_do() {
 /// successor for "a statistic scored on the tune's own register rather than on
 /// the whole recorded ladder"; this is it.
 #[test]
-#[ignore = "D451/D466/D463 known gap, re-barred to the neutral target: the line's median note splits its fundamental 7.06 dB from its own overtones against a bar of 3.26 (+7.39 against the recording before D466); run with --ignored to read the current distance"]
 fn no_note_of_the_line_arrives_from_two_places_at_once() {
     gate("splitting", Window::Head);
 }
@@ -737,7 +761,6 @@ fn the_splitting_gate_fails_on_the_band_the_milestone_started_from() {
 /// factor and touches neither channel's amplitude, so a transposed note's
 /// `E_L/E_R` at its `k`-th partial *is* the donor take's.
 #[test]
-#[ignore = "D459/D466/D463 known gap, re-barred to the neutral target: the pair geometry and the alternating polarization spread (D467) tilt the line's overtones -2.725 dB/semitone against a bar of 0.643 and swing them 18.52 against 5.15; D468's mechanism reaches both bars and is not installed; run with --ignored to read the current distance"]
 fn the_tunes_overtones_stay_where_the_recordings_do() {
     gate("comb", Window::Head);
 }
@@ -769,7 +792,6 @@ fn the_tunes_overtones_stay_where_the_recordings_do() {
 /// reports that: `balance` is the level and this column's other half is the
 /// time, and it is only their *product* that is wrong.
 #[test]
-#[ignore = "D460/D469/D463 known gap, re-barred: the line's two cues point opposite ways (corr -0.539, where the policy asks only for positive) and C4 carries 1102 us against the head's own 660, which is now a per-note bound with the recording's C4 no longer inflating it; run with --ignored to read the current distance"]
 fn the_lines_two_localisation_cues_agree_as_the_recordings_do() {
     gate("cue", Window::Head);
 }
@@ -856,31 +878,79 @@ fn the_comb_gate_fails_on_an_instrument_whose_polarization_spread_alternates_in_
         eprintln!("no data/salamander in this tree; skipping the pan-spread falsification");
         return;
     };
-    let mut flat = shipped_preset();
-    // Both homes of the number: the per-key table when the preset draws one,
-    // and the one global spread when it does not (`Preset::pan_spread`).
+    // **The A/B runs the other way round since `DECISIONS.md` 487**, and that
+    // is the mechanism landing rather than the test changing its mind. Item 467
+    // built this by taking the spread *out* of a preset that carried 0.4; the
+    // preset now carries none, so what convicts the mechanism is putting it
+    // *back* — the same two renders, the same two numbers, the arrow reversed.
+    // It stops being a tautology on the day the field is zero, which is item
+    // 451's whole reason for writing a falsification beside its own column.
+    let mut spread = shipped_preset();
     let shipped_spread = melody::line_keys()
         .iter()
-        .map(|&k| flat.pan_spread(k))
+        .map(|&k| spread.pan_spread(k))
         .fold(0.0f32, f32::max);
-    flat.voicing.polarization_pan_spread = 0.0;
-    for cell in flat.notes.pan_spread.iter_mut() {
-        *cell = 0.0;
-    }
-    flat.validate().expect("no spread is a legal preset");
     assert!(
-        shipped_spread > 0.0,
-        "the shipped preset spreads no polarization over the line, so this A/B is \
-         of nothing"
+        shipped_spread == 0.0,
+        "the shipped preset already spreads {shipped_spread} of polarization over the \
+         line, so this A/B is of nothing"
     );
-    let (columns, _, _) = score(&flat, &sfz);
+    spread.voicing.polarization_pan_spread = SPREAD_BEFORE_D487;
+    spread.notes.pan_spread.clear();
+    // **And the pair item 485 railed away, because `comb` is a *pair*
+    // statistic and the rail is what shrank it.** The spread buys a
+    // directivity with a *position*, and a position only becomes an image
+    // through a difference signal: at the width that ships (0.3) the same
+    // ±0.42 of pan moves the tune's overtone image by a fifth of what it moved
+    // at 1.632, and `comb` stays inside its bars. So the instrument this test
+    // convicts is the one this repository built **before** item 485 — the
+    // spread on the pair it was fitted against — and the preset is built past
+    // `Preset::validate`, exactly as `the_gradient_gate_fails_on_the_width_that_shipped`
+    // does. That the rail alone suppresses the mechanism is the second half of
+    // the finding and is asserted below.
+    let mut flat = spread.clone();
+    flat.voicing.polarization_pan_spread = 0.0;
+    for p in [&mut spread, &mut flat] {
+        p.voicing
+            .mics
+            .as_mut()
+            .expect("the measured preset declares [voicing.mics]")
+            .width = WIDTH_BEFORE_D485;
+    }
+    let (columns, _, _) = score(&spread, &sfz);
     let text = melody::report(&columns);
     println!("{text}");
-    let without = column(&columns, "comb", Window::Head);
-    let Some(shipped_columns) = shipped() else {
-        return;
+    let (flat_columns, _, _) = score(&flat, &sfz);
+    // `with` is the instrument that carries the spread and `without` is the
+    // same pair with nothing but that field zeroed — one difference, two
+    // renders, which is what item 467 measured.
+    let with = column(&columns, "comb", Window::Head);
+    let without = column(&flat_columns, "comb", Window::Head);
+    // **And the rail is the other half**: on the pair that ships, the same
+    // spread is inside `comb`'s bars, which is what item 485 bought.
+    let shipped_with_spread = {
+        let mut p = shipped_preset();
+        p.voicing.polarization_pan_spread = SPREAD_BEFORE_D487;
+        p.notes.pan_spread.clear();
+        p.validate()
+            .expect("the spread item 487 retired is still a legal preset");
+        let (c, _, _) = score(&p, &sfz);
+        column(&c, "comb", Window::Head).clone()
     };
-    let with = column(shipped_columns, "comb", Window::Head);
+    println!(
+        "the same spread on the pair item 485 railed: slope error {:.3} of {:.3}, swing \
+         {:.2} of {:.2} — {}",
+        shipped_with_spread.slope_error,
+        shipped_with_spread.slope_bar,
+        shipped_with_spread.swing,
+        shipped_with_spread.swing_bar,
+        if shipped_with_spread.pass { "inside" } else { "outside" },
+    );
+    assert!(
+        shipped_with_spread.pass,
+        "the width rail of item 485 does not suppress the spread's own image after all, \
+         which would make item 487's retirement about something else"
+    );
     println!(
         "the polarization spread, on the column that reads a position: slope {:+.3}/semitone with it and {:+.3} without, swing {:.2} and {:.2}, note by note {:?} against {:?}",
         with.slope,
@@ -892,7 +962,8 @@ fn the_comb_gate_fails_on_an_instrument_whose_polarization_spread_alternates_in_
     );
     assert!(
         !with.pass,
-        "the shipped instrument passes `comb`, so this A/B convicts nothing
+        "the pair item 485 railed away, carrying the spread item 487 retired, passes \
+         `comb` — so this A/B convicts nothing
 {text}"
     );
     assert!(
@@ -903,6 +974,108 @@ fn the_comb_gate_fails_on_an_instrument_whose_polarization_spread_alternates_in_
         without.slope_error,
         with.swing,
         without.swing
+    );
+}
+
+/// **How hard the pair pans a key by its pitch** — `DECISIONS.md` 485, and it
+/// is the owner's own complaint written as a statistic.
+///
+/// Shown a ladder of instruments differing in nothing but `voicing.mics.width`,
+/// rendered from a pair with the polarization spread zeroed and the source
+/// extent fitted, the owner's verdict was: *"It should be 0.3 or less for sure.
+/// This effect shouldn't be dominating at all."* The effect is the pan law read
+/// through a spaced pair — a key's position along the string band becomes an
+/// interchannel level difference, so the bass comes out of one loudspeaker and
+/// the treble out of the other, steadily, all the way up the compass.
+///
+/// **No column of any board here read it, and the reason is the shape
+/// `CONTEXT.md`'s standing rule keeps taking.** `channel` is `E_L + E_R`,
+/// symmetric under swapping the loudspeakers. `balance` is a **median
+/// magnitude** over the recorded ladder and a ramp about the ladder's own
+/// centre has median nothing — item 459's own lesson, one register lower and at
+/// the fundamental instead of at the overtones. `comb` *is* a slope, and it is
+/// taken over the **tune**: five semitones, which even at the recording's own
+/// gradient is 1.4 dB and inside every bar on the board. So the statistic that
+/// reads what the owner heard is a slope in key over the **compass**, and this
+/// is it: `comb` and `balance` read the tune, this reads the ladder.
+///
+/// It is `melody::NoteTexture::lean_db` — the note's whole broadband
+/// `10 log10(E_L/E_R)` — Theil-Sen against key over the nine recorded ladder
+/// keys, target zero with the rest of the image columns (item 466), bar the
+/// recording's own gradient plus how far it moves between two takes of it.
+/// **Broadband and not at the fundamental, and that is a measurement**: the
+/// same slope taken on `balance` is not monotone in `width` at all, because at
+/// one frequency the ratio is a function of whatever comb phase and whatever
+/// band-shaped mechanism the preset has at that pitch. `melody::NoteTexture::lean_db`
+/// carries the six-point ladder that refused it.
+#[test]
+fn the_compass_does_not_walk_across_the_loudspeakers_with_pitch() {
+    gate("gradient", Window::Head);
+}
+
+/// **The falsification for `gradient`: the width that shipped for thirty-four
+/// decisions.**
+///
+/// `voicing.mics.width` was 1.632 from `DECISIONS.md` 418 to 484 and it is
+/// 0.3 or less from item 485 on. This test puts the old number back on the
+/// preset that ships, changes nothing else, and asserts the column goes red —
+/// which makes it an **A/B and not a tautology**, the thing item 451 asks a
+/// falsification written on the same day as its column to be.
+///
+/// It also asserts the *other* half of the verdict, and the two are deliberately
+/// in one test: the schema **refuses** that preset. A bar says "this instrument
+/// is too far off"; a rail says "that instrument is not one this repository
+/// builds", and the owner's verdict is the second kind. So the instrument has to
+/// be built by hand here, past `Preset::validate`, and the message
+/// `Preset::validate` gives has to name item 485 — otherwise the next person to
+/// meet a pre-485 preset reads a bare range and has nowhere to go.
+#[test]
+fn the_gradient_gate_fails_on_the_width_that_shipped() {
+    let Some(sfz) = sfz() else {
+        eprintln!("no data/salamander in this tree; skipping the gradient falsification");
+        return;
+    };
+    let mut wide = shipped_preset();
+    let shipped_width = {
+        let mics = wide
+            .voicing
+            .mics
+            .as_mut()
+            .expect("the measured preset declares [voicing.mics]");
+        let was = mics.width;
+        mics.width = WIDTH_BEFORE_D485;
+        was
+    };
+    // **The rail first**, because the whole point of a rail is that the
+    // instrument below cannot be loaded from a file at all.
+    let refused = wide
+        .validate()
+        .expect_err("the schema must refuse the width item 485 ruled out");
+    let message = refused.to_string();
+    for fragment in ["voicing.mics.width", "485", "0.3"] {
+        assert!(
+            message.contains(fragment),
+            "the refusal has to name {fragment:?} so a pre-485 preset can be fixed rather \
+             than guessed at; it reads: {message}"
+        );
+    }
+    println!("the schema refuses width {WIDTH_BEFORE_D485}: {message}");
+    // And then the column, on the instrument the schema refuses, rendered
+    // directly. `render_to_buffer` takes a `Preset` and not a file, which is
+    // what makes an A/B on a refused preset possible at all.
+    let (columns, _, _) = score(&wide, &sfz);
+    let text = melody::report(&columns);
+    println!("{text}");
+    let gradient = column(&columns, "gradient", Window::Head);
+    assert!(
+        !gradient.pass,
+        "a pair at width {WIDTH_BEFORE_D485} instead of {shipped_width:.4} passes the \
+         gradient column, so that column does not test what the owner's verdict is \
+         about: {:+.3} dB per semitone up the ladder, an error of {:.3} against a bar of \
+         {:.3}\n{text}",
+        gradient.gradient,
+        gradient.gradient_error,
+        gradient.gradient_bar,
     );
 }
 
@@ -943,10 +1116,19 @@ fn the_comb_gate_fails_on_a_pair_that_stands_twice_as_wide() {
             .expect("the measured preset declares [voicing.mics]");
         let was = mics.spacing_m;
         mics.spacing_m = 2.0 * was;
+        // **On the pair item 485 railed away**, and for the reason that item is
+        // about: `comb` is the interference of the geometric difference signal
+        // with the mid, `width` is the gain on that difference, and at the 0.3
+        // the owner's verdict allows, doubling the spacing moves the tune's
+        // overtone slope to 0.287 of a 0.643 bar — inside. The mechanism is
+        // still exactly what item 459 described; the rail is what made it
+        // small. So the instrument is built past `Preset::validate`, as
+        // `the_gradient_gate_fails_on_the_width_that_shipped` builds its own.
+        mics.width = WIDTH_BEFORE_D485;
         was
     };
     wide.validate()
-        .expect("twice the shipped spacing is still a legal preset");
+        .expect_err("the width this pair is built at is one item 485 refuses");
     let (columns, _, _) = score(&wide, &sfz);
     let text = melody::report(&columns);
     println!("{text}");

@@ -35,6 +35,7 @@
 //! # Ok::<(), piano_tuner::Error>(())
 //! ```
 
+pub mod adapter;
 pub mod audio;
 pub mod cache;
 pub mod error;
@@ -56,8 +57,9 @@ pub mod synth;
 pub mod tracker;
 pub mod trajectory;
 
+pub use adapter::{Bands, Layout, LibrarySpec, Source};
 pub use audio::Audio;
-pub use library::{Sample, SampleLibrary};
+pub use library::{MechanismKind, Sample, SampleLibrary};
 pub use realism::{
     compare, level_match, multi_res_log_mel_distance, phrase_set, Phrase, RealismMetrics,
     VelocityLayers,

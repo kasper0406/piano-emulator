@@ -1689,7 +1689,24 @@ impl Preset {
                 MIC_HEIGHT_M.1,
             )?;
             within("voicing.mics.span_m", m.span_m, MIC_SPAN_M.0, MIC_SPAN_M.1)?;
-            within("voicing.mics.width", m.width, MIC_WIDTH.0, MIC_WIDTH.1)?;
+            // **The ceiling on `width` is the owner's verdict rather than a
+            // stability bound, so it says so** (`DECISIONS.md` 485). Every
+            // other rail in this function is a number the engine or the schema
+            // needs; this one is a number a listener gave, and a preset written
+            // before item 485 fails here at a value that was legal for
+            // thirty-four decisions. `within`'s message would name the field
+            // and the range and leave a reader to guess why the range moved.
+            if !(m.width.is_finite() && (MIC_WIDTH.0..=MIC_WIDTH.1).contains(&m.width)) {
+                return Err(PresetError::invalid(format!(
+                    "voicing.mics.width is {}, expected a number in {}..={} — the ceiling is \
+                     the owner's verdict of DECISIONS.md 485 (\"it should be 0.3 or less for \
+                     sure; this effect shouldn't be dominating at all\") on the per-key \
+                     bass-left/treble-right lean this number scales, and it was {} until \
+                     then. A preset written before item 485 has to be refitted under the \
+                     rail rather than clamped to it.",
+                    m.width, MIC_WIDTH.0, MIC_WIDTH.1, 2.0_f32
+                )));
+            }
             within(
                 "voicing.mics.diffuse_coherence",
                 m.diffuse_coherence,
@@ -3432,7 +3449,11 @@ mod tests {
             spacing_m: 0.5,
             height_m: 0.45,
             span_m: 1.0,
-            width: 1.5,
+            // Inside `MIC_WIDTH`'s ceiling, which since `DECISIONS.md` 485 is
+            // the owner's 0.3: the base of a rejection list has to be a preset
+            // the schema accepts, or every row of it passes for the wrong
+            // reason.
+            width: 0.25,
             diffuse_coherence: 5.0,
             source_extent_m: 0.0,
             modal: Some(ModalBand {
@@ -4201,7 +4222,11 @@ mod tests {
             spacing_m: 0.5,
             height_m: 0.45,
             span_m: 1.0,
-            width: 1.5,
+            // Inside `MIC_WIDTH`'s ceiling, which since `DECISIONS.md` 485 is
+            // the owner's 0.3: the base of a rejection list has to be a preset
+            // the schema accepts, or every row of it passes for the wrong
+            // reason.
+            width: 0.25,
             diffuse_coherence: 5.0,
             source_extent_m: 0.0,
             modal: Some(ModalBand {

@@ -41,7 +41,11 @@ fn mic_preset() -> Preset {
         spacing_m: 0.12,
         height_m: 0.12,
         span_m: 1.2,
-        width: 1.4,
+        // Inside `MIC_WIDTH`'s ceiling, which since `DECISIONS.md` 485 is the
+        // owner's 0.3. The fixture only has to be a *legal* pair with every
+        // branch of `Mics` in it; what it was before the rail moved is not part
+        // of what it tests.
+        width: 0.28,
         diffuse_coherence: 2.5,
         source_extent_m: 0.0,
         modal: Some(ModalBand {

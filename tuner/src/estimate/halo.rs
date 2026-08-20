@@ -389,6 +389,314 @@ pub fn resonance_level(
     })
 }
 
+// ---------------------------------------------------------------------------
+// The `halo` column
+// ---------------------------------------------------------------------------
+
+/// The velocity the column is read at, on both sides.
+pub const HALO_VELOCITY: u8 = 90;
+
+/// The bottom of the column's population.
+///
+/// C4 up: the register `docs/history/TUNING_REPORT.md` §4 names the halo a
+/// *treble* phenomenon in, and the register the recordings of the halo alone
+/// reach the top of the compass in. The library has release resonances from A0,
+/// and the shortfall is there too (+16.1 dB at C3) — it is printed by
+/// `forensics/treble_halo` and deliberately not scored here, because a bass
+/// key's halo and a treble key's are two different mixtures of the same
+/// mechanism and one seam over both would be a seam over two populations.
+pub const HALO_FIRST_KEY: u8 = 60;
+
+/// How long the key is held before it is released, seconds. The reference pays
+/// `rt_decay` for exactly this long.
+pub const HALO_HOLD_S: f64 = 1.0;
+
+/// The `halo` column's bar, dB (`DECISIONS.md` 502) — and its provenance is
+/// **wider than the column it bars**, which is worth knowing before anybody
+/// quotes it as a property of the ten keys.
+///
+/// It is the recording's own worst take-to-take departure: the same statistic
+/// read from the neighbouring velocity layer of the same key, with no engine in
+/// it. It is taken over the **fourteen** keys the library records a `harmL*`
+/// release resonance for, C3 to D#6 — *not* over the ten keys from
+/// [`HALO_FIRST_KEY`] up that the column actually scores. Three details a
+/// successor should not have to re-derive, all of them printed by
+/// `forensics/treble_halo --harm`:
+///
+/// * The **worst is at A3**, which is below [`HALO_FIRST_KEY`] and therefore
+///   not in the column's population at all. Over the column's own ten keys the
+///   worst take-to-take departure is **1.37 dB, at C5**.
+/// * It is **direction-dependent**. The partner is the velocity layer *above*
+///   the one v90 falls in, where the key has one; reading the layer *below*
+///   instead moves the worst to **1.39 dB, at C5**, and takes A3's down to
+///   0.24.
+/// * So 1.42 is a worst over a wider set read in one direction, and it is used
+///   anyway and deliberately: every one of those readings lands between 1.37
+///   and 1.42 dB, the seam it bars is over twenty, and a bar that would have to
+///   move by an order of magnitude to change a verdict is a bar whose last
+///   digit is not what the verdict rests on.
+pub const HALO_BAR_DB: f64 = 1.42;
+
+/// One key's row of the column.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HaloRow {
+    pub key: u8,
+    pub recorded: ResonanceLevel,
+    pub engine: ResonanceLevel,
+}
+
+impl HaloRow {
+    /// Positive means the engine is too quiet, which is the direction §4 and §5
+    /// both found it in.
+    pub fn error_db(&self) -> f64 {
+        self.recorded.peak_db - self.engine.peak_db
+    }
+}
+
+/// **`halo`: how loud the rest of the instrument is when one key is struck**
+/// (`DECISIONS.md` 500-502) — the first statistic in this repository that is a
+/// function of the treble sympathetic halo at all.
+///
+/// # Why the census it replaces could not be one
+///
+/// `docs/history/TUNING_REPORT.md` §4's between-partial census has a **floor**,
+/// and the floor is the note itself: on an 85 ms window the struck note's own
+/// decaying partials smear outside the guard band at about −48 dB, so a census
+/// that reads −47 is reading leakage. Measured on the shipped instrument by
+/// `forensics/treble_halo`, with the bus and the segments removed so that there
+/// is provably no halo in the render at all, the census reads **−53.5 at C6 and
+/// −38.9 at C7 on a 341 ms window — and the shipped instrument reads −47.6 and
+/// −38.1**, which is 0.08 and 0.86 dB of daylight. `salamander_targets`'
+/// `between C6` and `between C7` rows have therefore been aimed at a quantity
+/// no legal setting of any knob can move, which is [`HaloTarget`]'s own
+/// version of the mistake `CONTEXT.md` calls an unscored dimension: a column
+/// that is a perfectly good statistic pointed at the wrong answer.
+///
+/// # What this is instead
+///
+/// The halo **recorded alone**. Salamander samples the string resonance a key
+/// leaves behind separately from the note and separately from the key-off
+/// thump (`harmL*`, [`crate::library::MechanismKind::StringResonance`]), so the reference side
+/// of this column needs no census, no tracker and no guard band: it is a file
+/// that contains the halo and nothing else. The engine side is the same signal
+/// obtained the same way — by **subtraction**, the note struck and released
+/// twice over, once as the instrument is and once with `resonance_coupling` at
+/// zero and `notes.duplex` emptied, which is exactly and only the sympathetic
+/// contribution because the engine is deterministic.
+///
+/// The statistic is §5's own and unchanged: [`resonance_level`]'s `peak_db`,
+/// the peak of the halo against the peak of a strike of the same key at the
+/// same velocity. **What is new is that the reference side pays `rt_decay`**
+/// (`DECISIONS.md` 501). A release recording is what the strings still hold
+/// when the damper lands, so its level depends on how long the key was held,
+/// and the SFZ says by how much: 6-9 dB per second on these files. The engine's
+/// halo has been decaying for [`HALO_HOLD_S`] too, so the reference's has to.
+/// Reading it without that is reading the halo **8.2 dB too loud on the median
+/// key**, which is where `salamander_targets`' `harmLC3` = −31 and
+/// `harmLC5` = −39 came from — they re-measure at **−39.7 and −44.5**.
+///
+/// # The population, the verdict and the bar
+///
+/// The population is the recorded keys the library has a release resonance for,
+/// from [`HALO_FIRST_KEY`] up: **ten keys, C4 to D#6** by minor thirds. It
+/// stops at the top because above the damper break there is no release to
+/// record and no honest reference exists at all, and it starts at C4 for
+/// [`HALO_FIRST_KEY`]'s own reason. The library records four more below it, C3
+/// to A3, and they are printed by `forensics/treble_halo --harm` and not
+/// scored — but note that the **bar** below is taken over all fourteen.
+///
+/// The verdict is a **seam**: the worst per-key shortfall, not the median.
+/// `CONTEXT.md`'s own rule, from D453/D456 and again from D459 — a per-key
+/// error cancels out of a median and a ramp cancels out of it twice — and this
+/// defect is both. The median is printed beside it and so is the slope.
+///
+/// The bar is the reference's own take floor with no engine in it: the same
+/// statistic read from the **neighbouring velocity layer** of the same key,
+/// which is a second independent recording of the same piano playing very
+/// nearly the same note ([`crate::realism::VelocityLayers`]). Its worst is
+/// **1.42 dB**, and [`HALO_BAR_DB`] carries the whole provenance: over the
+/// fourteen keys rather than this population's ten, at A3 rather than at a key
+/// the column scores, and read against the layer above rather than the one
+/// below. The halo file itself has no second take
+/// in this library — `harmS*` is a different velocity tier and `harmV3*` a
+/// different take of a different thing (they disagree with `harmL*` by up to
+/// 17.7 dB and 31 semitones) — so this bar is a **lower** bound on the
+/// reference's own noise and is used as a seam's bar rather than as the
+/// standard error of a median (which is 0.16 dB and would be absurd for a
+/// physical level).
+#[derive(Clone, Debug, Default)]
+pub struct HaloColumn {
+    pub rows: Vec<HaloRow>,
+}
+
+impl HaloColumn {
+    /// The **seam**: the key with the worst shortfall, and how far short it is.
+    pub fn seam(&self) -> Option<(u8, f64)> {
+        self.rows
+            .iter()
+            .map(|r| (r.key, r.error_db()))
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+    }
+
+    /// The median shortfall, printed beside the seam and never gated on: a
+    /// median cannot see a per-key error and cannot see a ramp.
+    pub fn median_db(&self) -> f64 {
+        let mut v: Vec<f64> = self.rows.iter().map(HaloRow::error_db).collect();
+        v.sort_by(f64::total_cmp);
+        if v.is_empty() {
+            return f64::NAN;
+        }
+        v[v.len() / 2]
+    }
+
+    /// The shortfall's slope up the compass, dB per semitone — the shape of the
+    /// defect, which is what says it is a *treble* halo and not a global level.
+    pub fn slope_db_per_semitone(&self) -> f64 {
+        let n = self.rows.len() as f64;
+        if n < 2.0 {
+            return f64::NAN;
+        }
+        let mean_key = self.rows.iter().map(|r| f64::from(r.key)).sum::<f64>() / n;
+        let mean_err = self.rows.iter().map(HaloRow::error_db).sum::<f64>() / n;
+        let (mut num, mut den) = (0.0, 0.0);
+        for row in &self.rows {
+            let dk = f64::from(row.key) - mean_key;
+            num += dk * (row.error_db() - mean_err);
+            den += dk * dk;
+        }
+        num / den
+    }
+
+    pub fn passes(&self) -> bool {
+        self.seam().is_some_and(|(_, e)| e.abs() <= HALO_BAR_DB)
+    }
+}
+
+/// The reference side of the column: Salamander's own recording of one key's
+/// halo, against its own recording of that key struck.
+///
+/// Both files are taken at the level the *instrument* plays them — `volume`,
+/// the SFZ velocity law, and on the release side `rt_decay` for the hold — so
+/// the ratio is a property of the piano and not of the two groups' gain
+/// staging.
+pub fn recorded_halo_level(
+    library: &crate::library::SampleLibrary,
+    key: u8,
+    velocity: u8,
+    hold_s: f64,
+    attack_veltrack: f64,
+) -> Option<ResonanceLevel> {
+    let strike = library.nearest_layer(key, velocity)?;
+    let halo = library
+        .mechanism_of(crate::library::MechanismKind::StringResonance)
+        .into_iter()
+        .find(|s| s.key == Some(key) && s.lovel <= velocity && velocity <= s.hivel)?;
+    let law = |veltrack: f64| veltrack / 100.0 * 40.0 * (f64::from(velocity) / 127.0).log10();
+    let strike_audio = crate::audio::load_at(&strike.path, 48_000).ok()?;
+    let halo_audio = crate::audio::load_at(&halo.path, 48_000).ok()?;
+    resonance_level(
+        &halo_audio.mono(),
+        halo.volume_db + law(halo.amp_veltrack.unwrap_or(0.0)) - halo.rt_decay * hold_s,
+        &strike_audio.mono(),
+        strike.volume_db + law(attack_veltrack),
+        48_000.0,
+    )
+}
+
+/// The engine side of the column: the sympathetic contribution to one key,
+/// isolated by subtraction rather than by a window.
+///
+/// The same note is struck and released twice — once as the instrument is, once
+/// with `resonance_coupling` at zero and `notes.duplex` emptied — and the
+/// engine is deterministic, so what is left after the release is exactly and
+/// only the halo, with the struck string, the hammer and the mechanism removed
+/// by cancellation. The mechanism noises are silenced on **both** renders
+/// besides, because `harm*` is a recording of the strings alone and a key-off
+/// thump is not halo.
+pub fn engine_halo_level(
+    preset: &piano_emulator::preset::Preset,
+    key: u8,
+    velocity: u8,
+    hold_s: f64,
+) -> Option<ResonanceLevel> {
+    use piano_emulator::render::{render_to_buffer, RenderEvent};
+    use piano_emulator::types::{Event, SAMPLE_RATE};
+
+    let mut quiet = preset.clone();
+    for event in [
+        &mut quiet.noise.key_off,
+        &mut quiet.noise.damper_lift,
+        &mut quiet.noise.pedal_down,
+        &mut quiet.noise.pedal_up,
+    ] {
+        for anchor in &mut event.level_db {
+            anchor.db = -200.0;
+        }
+    }
+    let mut bare = quiet.clone();
+    bare.voicing.resonance_coupling = 0.0;
+    bare.notes.duplex = Vec::new();
+
+    let hold = hold_s as f32;
+    let events = [
+        RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(velocity) }),
+        RenderEvent::new(hold, Event::NoteOff { key, vel: 64 }),
+    ];
+    let mono = |l: &[f32], r: &[f32]| -> Vec<f32> {
+        l.iter().zip(r).map(|(&a, &b)| 0.5 * (a + b)).collect()
+    };
+    let (wl, wr) = render_to_buffer(&quiet, &events, hold + 4.0);
+    let (bl, br) = render_to_buffer(&bare, &events, hold + 4.0);
+    let with = mono(&wl, &wr);
+    let without = mono(&bl, &br);
+    let halo: Vec<f32> = with
+        .iter()
+        .zip(&without)
+        .skip((hold * SAMPLE_RATE) as usize)
+        .map(|(&a, &b)| a - b)
+        .collect();
+    let (sl, sr) = render_to_buffer(
+        &quiet,
+        &[RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(velocity) })],
+        2.0,
+    );
+    resonance_level(&halo, 0.0, &mono(&sl, &sr), 0.0, f64::from(SAMPLE_RATE))
+}
+
+/// The whole column, on one instrument against one library.
+///
+/// `attack_veltrack` is the SFZ's own `amp_veltrack` on the struck-note groups
+/// (73 in Salamander's), which is the only number the reference side needs that
+/// [`crate::library::SampleLibrary`] does not carry per sample.
+pub fn halo_column(
+    preset: &piano_emulator::preset::Preset,
+    library: &crate::library::SampleLibrary,
+    attack_veltrack: f64,
+) -> HaloColumn {
+    let mut keys: Vec<u8> = library
+        .mechanism_of(crate::library::MechanismKind::StringResonance)
+        .into_iter()
+        .filter_map(|s| s.key)
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let rows = keys
+        .into_iter()
+        .filter(|&k| k >= HALO_FIRST_KEY)
+        .filter_map(|key| {
+            let recorded =
+                recorded_halo_level(library, key, HALO_VELOCITY, HALO_HOLD_S, attack_veltrack)?;
+            let engine = engine_halo_level(preset, key, HALO_VELOCITY, HALO_HOLD_S)?;
+            Some(HaloRow {
+                key,
+                recorded,
+                engine,
+            })
+        })
+        .collect();
+    HaloColumn { rows }
+}
+
 /// One thing the fit is trying to hit: a measured target with a tolerance, and
 /// the frequency it lives at.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -407,54 +715,65 @@ pub struct HaloTarget {
     pub tolerance_db: f64,
 }
 
-/// `docs/history/TUNING_REPORT.md` §4 and §5's targets, as the fit reads them.
+/// **The targets the halo fit closes on — re-decided at `DECISIONS.md` 501.**
 ///
-/// The C4 row is not a target but a *constraint*: §4's first reading is that
-/// the mid-range was already right, so the fit must be able to fail on it.
+/// They used to be three of §4's between-partial census rows and two of §5's
+/// `harm*` levels, and every one of the five was wrong in one of two ways.
+///
+/// **The census rows could not be moved.** `between C6` and `between C7` sit on
+/// the census's own leakage floor — the struck note's partials smeared outside
+/// the guard band — and `halo::the_between_partial_census_cannot_see_the_halo_at_all`
+/// is the falsification: taking the bus *and* the segments out of the
+/// instrument entirely moves the C6 row by **0.08 dB** and the C7 row by
+/// **0.86**, on a window three times longer than the shipped `HaloConfig`'s,
+/// where the recordings stand 20 to 28 dB above the engine. `between C4` is on
+/// the same floor (§4's own update measures it at −47.2 with every path
+/// removed, against the −47.0 the instrument renders). A target no mechanism
+/// can move is not a target, and three of the five were pulling the fit's
+/// weighted mean around by their tolerances alone.
+///
+/// **The two `harm` rows were 8-9 dB too loud.** A release recording is what
+/// the strings still hold when the damper lands, so its level depends on how
+/// long the key was held — and the SFZ says by how much, 6 to 9 dB per second
+/// on these files. `halo_level` renders a **one-second** hold, so the reference
+/// has to pay one second of `rt_decay` too, and `harmLC3` = −31 and
+/// `harmLC5` = −39 did not. Re-measured with the hold paid
+/// (`forensics/treble_halo`), on the same files, at the same velocity: **−39.7
+/// and −44.5**.
+///
+/// What is here now is the [`HaloColumn`] itself: the halo recorded alone, at
+/// five keys spanning the register the column scores, each placed on the
+/// backbone at **the frequency its own halo actually radiates at** — the
+/// recorded resonance's own centroid, rather than a band guessed from the
+/// struck key. The tolerance is the column's bar ([`HALO_BAR_DB`]) at every
+/// row, so the fit's objective and the gate's verdict are the same quantity.
 pub fn salamander_targets() -> Vec<HaloTarget> {
-    vec![
-        HaloTarget {
-            name: "harmLC3",
-            key: 48,
-            hz: 314.0,
-            target_db: -31.0,
-            tolerance_db: 3.0,
-        },
-        HaloTarget {
-            name: "harmLC5",
-            key: 72,
-            hz: 507.0,
-            target_db: -39.0,
-            tolerance_db: 3.0,
-        },
-        HaloTarget {
-            name: "between C4",
-            key: 60,
-            hz: 1_000.0,
-            // §4: −44.3 dB recorded against −47.0 rendered. The engine is
-            // inside the band already and the fit's job here is not to move.
-            target_db: -45.5,
-            tolerance_db: 1.5,
-        },
-        HaloTarget {
-            name: "between C6",
-            key: 84,
-            hz: 2_500.0,
-            // §4: −22.1 dB soft, −26.4 dB loud.
-            target_db: -24.0,
-            tolerance_db: 2.0,
-        },
-        HaloTarget {
-            name: "between C7",
-            key: 96,
-            hz: 5_000.0,
-            // §4: −15.9, −13.0 and −3.5 dB over the velocity layers. The band
-            // is wide because the quantity is wide: it moves 12 dB with
-            // velocity, which is the finding and not the error bar.
-            target_db: -9.75,
-            tolerance_db: 6.25,
-        },
-    ]
+    // key, the recorded halo's own centroid (Hz), and its level against a
+    // strike of the same key after a one-second hold (dB) — all three measured
+    // by `forensics/treble_halo` on the library, with no engine in any of them.
+    const MEASURED: [(u8, f64, f64); 5] = [
+        (48, 314.0, -39.74),
+        (60, 409.0, -44.03),
+        (72, 507.0, -44.52),
+        (84, 951.0, -55.62),
+        (87, 1_008.0, -47.88),
+    ];
+    MEASURED
+        .iter()
+        .map(|&(key, hz, target_db)| HaloTarget {
+            name: match key {
+                48 => "harmLC3",
+                60 => "harmLC4",
+                72 => "harmLC5",
+                84 => "harmLC6",
+                _ => "harmLD#6",
+            },
+            key,
+            hz,
+            target_db,
+            tolerance_db: HALO_BAR_DB,
+        })
+        .collect()
 }
 
 /// How far one render is from one target.

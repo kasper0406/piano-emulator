@@ -167,7 +167,10 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     };
     let out: Option<PathBuf> = flag("--out").map(PathBuf::from);
     let passes: usize = flag("--passes").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let sfz = data.join("SalamanderGrandPiano-V3+20200602.sfz");
+    // Whichever library this tree is, rather than Salamander's own filename:
+    // `adapter::instrument_path` resolves a described library through its
+    // LibrarySpec and an undescribed one by its single map (DECISIONS.md 521).
+    let sfz = piano_tuner::adapter::instrument_path(&data)?;
     if !sfz.exists() {
         eprintln!("the reference piano is not here: {}", sfz.display());
         std::process::exit(2);

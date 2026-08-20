@@ -19,3 +19,5 @@ renders/
 # measurement pipeline has to be (`DECISIONS.md` 65, 324).
 /data/*
 !/data/fetch_salamander.sh
+!/data/fetch_bitklavier.sh
+!/data/fetch_vcsl_knight_upright.sh

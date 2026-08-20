@@ -25,7 +25,9 @@ use std::time::Instant;
 use piano_tuner::estimate::decay::{DecayConfig, DecayCurve};
 use piano_tuner::estimate::directivity::{balance_drift, pan_spread_for_drift, DirectivityConfig};
 use piano_tuner::estimate::hammer::HammerConfig;
-use piano_tuner::estimate::noise::{fit_noise, NoiseConfig};
+use piano_tuner::estimate::noise::{
+    fit_noise_screened, NoiseConfig, NoiseScreening, MAX_MECHANISM_LEVEL_DB,
+};
 use piano_tuner::estimate::spread::{SigmaSpread, SpreadConfig};
 use piano_tuner::pipeline::{analyze_note, NoteConfig};
 use piano_tuner::preset::{equal_temperament, key_index, Preset, PresetBuilder};
@@ -46,6 +48,13 @@ usage:
 one recording:
   track <in.wav|in.flac> --f0 <hz>     the partial trajectories
   estimate <in.wav|in.flac> --f0 <hz>  the whole per-note analysis
+
+the library adapter, run once per library rather than once per fit:
+  adapt <library-id> --root <dir> [--out <f.sfz>] [--resample]
+        writes the instrument definition a library does not ship, from its
+        LibrarySpec over the files actually on disk, and (--resample) brings
+        a tree published at another rate onto the engine's clock in one
+        offline pass. `adapt --list` names the libraries described.
 
 the preset factory, in the order the stages run:
   survey <instrument.sfz> --preset <base.toml> [options]
@@ -69,9 +78,15 @@ the preset factory, in the order the stages run:
         key: a shrunk, compass-smoothed per-key gain written through
         notes.partial_gains' own pinning (DECISIONS.md 457, re-opening 272)
   noise [data/salamander] [preset.toml] [--key <n>] [--out <f>]
+        [--stage balance|mechanism] [--base presets/default.toml]
         stage 2, the mechanism's balance: [noise.strike]'s level and
         velocity law, inverted on the engine's own attack against the
-        recordings' at the recorded keys
+        recordings' at the recorded keys. --stage mechanism is the other
+        four events instead — key_off, damper_lift, pedal_down, pedal_up,
+        read off the library's own mechanism recordings and screened
+        against MAX_MECHANISM_LEVEL_DB, a group that fails it inheriting
+        --base's table rather than writing one (DECISIONS.md 531). It has
+        no render in it, is re-entrant, and may write in place.
   mics [data/salamander] [preset.toml] [--out <f>] [--stage <name>]...
         stage 2, the microphone pair: [voicing.mics]. --stage geometry
         inverts spacing_m and span_m from the recording's own interchannel
@@ -81,6 +96,12 @@ the preset factory, in the order the stages run:
         band, both on the engine's render against the same recordings.
         All but profile run when --stage is not given. --no-holdout skips
         the held-out velocity check.
+
+the listening material, per preset, against its OWN library:
+  listen <data-dir> <preset.toml> [renders/<name>]
+        the melody line and a pedalled chord phrase, engine and that
+        library's own recordings, each normalised separately, with a
+        README.md naming which of the tune's keys are genuine takes
 
 the standing boards, each writing its own document:
   bench [data] [renders/realism] [preset.toml]     -> REALISM.md
@@ -152,12 +173,14 @@ type Exit = std::result::Result<(), Box<dyn std::error::Error>>;
 fn run(args: Vec<String>) -> Exit {
     let rest = || args[1..].to_vec();
     match args.first().map(String::as_str) {
+        Some("adapt") => tools::adapt::run(rest()),
         Some("track") => Ok(track(&args[1..])?),
         Some("estimate") => Ok(estimate(&args[1..])?),
         Some("survey") => Ok(survey(&args[1..])?),
         Some("fit") => tools::fit::run(rest()),
         Some("sympathetic") => Ok(tools::sympathetic::run(rest())?),
         Some("level") => tools::level::run(rest()),
+        Some("listen") => tools::listen::run(rest()),
         Some("tail") => tools::tail::run(rest()),
         Some("bench") => tools::bench::run(rest()),
         Some("compass") => tools::compass::run(rest()),
@@ -515,11 +538,21 @@ fn survey(args: &[String]) -> Result<()> {
         return Ok(());
     };
     let credit = options.credit.clone().unwrap_or_default();
-    let mut builder = survey.builder(base, &decay).description(format!(
+    // The gate's refusals go into `description`, which is this schema's own
+    // free-form provenance field ("which piano, which recordings, which
+    // pipeline run"): a mechanism table left at the base preset's value is not
+    // a measurement of this piano and the file has to say so rather than
+    // leaving the reader to recognise §5's numbers. `DECISIONS.md` 531.
+    let described = format!(
         "estimated by piano-tuner from {}{}{credit}",
         options.sfz,
         if credit.is_empty() { "" } else { "; " }
-    ));
+    );
+    let described = match &noise {
+        Some((_, screening)) => screening.describe(&described),
+        None => described,
+    };
+    let mut builder = survey.builder(base, &decay).description(described);
     if let Some(name) = &options.name {
         builder = builder.name(name.clone());
     }
@@ -539,7 +572,7 @@ fn survey(args: &[String]) -> Result<()> {
     if let Some(pan_spread) = pan_spread.filter(|s| *s > 0.0) {
         builder = builder.pan_spread(pan_spread as f32);
     }
-    if let Some(noise) = noise {
+    if let Some((noise, _)) = noise {
         builder = builder.noise(noise);
     }
     let preset = builder.build()?;
@@ -689,14 +722,30 @@ fn report_spread(survey: &Survey, base: &Preset, config: &SpreadConfig) {
 fn report_mechanism(
     library: &piano_tuner::SampleLibrary,
     base: &Preset,
-) -> Option<piano_tuner::preset::NoiseTables> {
+) -> Option<(piano_tuner::preset::NoiseTables, NoiseScreening)> {
     let config = NoiseConfig::default();
     let measurements = measure_mechanism(library, &config);
     if measurements.is_empty() {
         println!("\nno mechanism recordings in this library");
         return None;
     }
-    println!("\n mechanism   key   re strike   decay to -40 dB   centroid   against");
+    let (fitted, screening) = fit_noise_screened(&measurements, &base.noise, &config);
+    print_mechanism(&measurements, &fitted, &screening);
+    Some((fitted, screening))
+}
+
+/// The measured table, the gate's verdict on it, and what was written.
+///
+/// Shared with `tools::noise`'s own mechanism stage so that both roads to the
+/// same tables print the same evidence (`DECISIONS.md` 531).
+pub fn print_mechanism(
+    measurements: &piano_tuner::estimate::noise::MechanismMeasurements,
+    fitted: &piano_tuner::preset::NoiseTables,
+    screening: &NoiseScreening,
+) {
+    println!(
+        "\n mechanism   key   re strike   decay to -40 dB   centroid   against   plausible"
+    );
     let rows = [
         ("key_off", &measurements.key_off),
         ("pedal_down", &measurements.pedal_down),
@@ -705,16 +754,41 @@ fn report_mechanism(
     for (name, metrics) in rows {
         for metric in metrics.iter() {
             println!(
-                "{name:>10} {:>5} {:>11.1} {:>17.3} {:>10.0} {:>9}",
+                "{name:>10} {:>5} {:>11.1} {:>17.3} {:>10.0} {:>9} {:>11}",
                 metric.key.map_or("-".to_string(), |k| k.to_string()),
                 metric.level_db,
                 metric.decay_s,
                 metric.centroid_hz,
                 metric.reference_key,
+                if metric.level_db <= MAX_MECHANISM_LEVEL_DB {
+                    "yes"
+                } else {
+                    "HOT"
+                },
             );
         }
     }
-    let fitted = fit_noise(&measurements, &base.noise, &config);
+    println!(
+        "\nthe plausibility gate, at {MAX_MECHANISM_LEVEL_DB:.1} dB against the group's own \
+         notes (DECISIONS.md 531):"
+    );
+    for (name, screen) in screening.events() {
+        if !screen.recorded() {
+            println!("  {name:>12}  not recorded by this library — inherited");
+            continue;
+        }
+        println!(
+            "  {name:>12}  {} of {} plausible, hottest {:+.2} dB — {}",
+            screen.kept,
+            screen.read,
+            screen.hottest_db,
+            if screen.accepted() {
+                "written"
+            } else {
+                "REFUSED, inherited from the base preset"
+            }
+        );
+    }
     println!(
         "\nkey-off: {} anchors, {:.0} Hz, {:.3} s, {:.1} dB of velocity",
         fitted.key_off.level_db.len(),
@@ -722,7 +796,6 @@ fn report_mechanism(
         fitted.key_off.decay_s,
         fitted.key_off.velocity_db
     );
-    Some(fitted)
 }
 
 /// How far each note's stereo balance travels while it decays, and the

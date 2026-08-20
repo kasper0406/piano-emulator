@@ -69,7 +69,10 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             Preset::load(Path::new("presets/salamander-c5.toml"))?,
         ),
     ];
-    let library = SampleLibrary::from_sfz(root.join("SalamanderGrandPiano-V3+20200602.sfz")).ok();
+    // Whichever library this tree is (DECISIONS.md 521).
+    let library = piano_tuner::adapter::instrument_path(&root)
+        .and_then(SampleLibrary::from_sfz)
+        .ok();
 
     for key in KEYS {
         let name = note_name(key);

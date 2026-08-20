@@ -67,7 +67,10 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         args.next()
             .unwrap_or_else(|| "presets/salamander-c5.toml".into()),
     );
-    let sfz = data.join("SalamanderGrandPiano-V3+20200602.sfz");
+    // Whichever library this tree is, rather than Salamander's own filename:
+    // `adapter::instrument_path` resolves a described library through its
+    // LibrarySpec and an undescribed one by its single map (DECISIONS.md 521).
+    let sfz = piano_tuner::adapter::instrument_path(&data)?;
     if !sfz.exists() {
         eprintln!(
             "the reference piano is not here: {}\nrun data/fetch_salamander.sh first (707 MiB).",

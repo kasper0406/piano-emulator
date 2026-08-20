@@ -33,6 +33,18 @@
 //! **The pedal's velocity law.** The SFZ gives the pedal groups no
 //! `amp_veltrack`, and there is no pedal drive in the recordings to fit one
 //! against; the base preset's figure stands.
+//!
+//! # What is refused rather than written
+//!
+//! Everything above assumes the recordings *are* the piano's mechanism. On two
+//! of the three libraries in this repository they are not: they are the
+//! editor's gain and the hall's reverb, and reading them as a mechanism writes
+//! a key-off thump as loud as the note it belongs to. [`MAX_MECHANISM_LEVEL_DB`]
+//! is the plausibility gate that refuses them, and a group that fails it is
+//! **inherited from the base preset rather than written** — the same convention
+//! `[noise.strike]` already had (`engine::preset`, "Fields a preset may leave
+//! out"): a mechanism table at the base's own value is one nobody measured on
+//! this piano. `DECISIONS.md` 531.
 
 use crate::preset::{EventNoise, NoiseAnchor, NoiseTables, HIGHEST_KEY, LOWEST_KEY};
 
@@ -84,6 +96,221 @@ const MAX_DECAY_S: f64 = 10.0;
 const MIN_CENTROID_HZ: f64 = 1.0;
 const MAX_CENTROID_HZ: f64 = 0.45 * 48_000.0;
 
+/// The hottest a mechanism recording may sit against the note it belongs to and
+/// still be a measurement of a **piano** rather than of an editor, in dB.
+///
+/// Every reading here is a peak relative to a velocity-90 strike of the same
+/// key with both sides at the level the instrument plays them, so the number is
+/// directly comparable across libraries and directly comparable to the
+/// literature. Two anchors bound it, and they agree:
+///
+/// * **Measured, in this repository.** The only mechanism group here that is
+///   demonstrably the piano's own is Salamander's `//HammerNoise` (`volume=-37`
+///   in its own SFZ, `PHYSICS.md` §5). Run through
+///   [`measure_mechanism`](crate::survey::measure_mechanism) its **88** key-off
+///   recordings read **−39.0 dB at the quietest key and −24.64 dB at the
+///   hottest**, median **−32.9**; the anchors that reduction writes into
+///   `presets/salamander-c5.toml` run −37.08 to −30.06. Its two pedal-down
+///   takes read −35.8 and −40.8, its two pedal-up takes −42.4 and −48.8.
+/// * **Measured, in the literature.** Askenfelt removed C4's strings and
+///   replaced them with a dummy mass to record the structure-borne path alone
+///   (STL-QPSR 34(4) 15, 1993; `PHYSICS.md` §5): the mechanism sits **~40 dB
+///   below the string partials**, and the touch precursor 30–40 dB below the
+///   first transversal wave. `PHYSICS.md`'s own build note says the same thing
+///   as a specification — "band-limited to ~2 kHz and ~40 dB under the
+///   partials".
+///
+/// So a genuine mechanism noise lives in roughly −39 … −25 dB and neither
+/// source comes within twenty decibels of its own note. The gate is the hottest
+/// genuine reading measured here plus **three take-to-take sigmas** of the
+/// library it was measured on (1.40 dB, `DECISIONS.md` 457):
+/// −24.64 + 3 × 1.40 = **−20.44**, taken to the whole decibel on the measured
+/// side. Three sigmas rather than a margin chosen for comfort, so that
+/// re-measuring Salamander on a different take cannot rail its own table; the
+/// whole decibel on the measured side rather than the loose one, so that
+/// rounding can only refuse more.
+///
+/// It is a **floor under an absurdity**, not a fit target: nothing between −39
+/// and −21 dB is judged by it at all, and every reading Salamander offers
+/// clears it by 3.6 dB or more. What it catches is the class `DECISIONS.md` 528
+/// named on the bitKlavier grand and 531 found still written into the preset —
+/// a key-off group published at the editor's own gain with the hall on it,
+/// which reads **−14.9 to +10.87 dB** against its own note, median −3.25. Not
+/// one of its 88 recordings is under −21, and **21 of them are louder than the
+/// note they belong to**: a damper landing louder than the chord.
+pub const MAX_MECHANISM_LEVEL_DB: f64 = -21.0;
+
+/// The share of a group's readings that has to survive [`MAX_MECHANISM_LEVEL_DB`]
+/// for the group to be written at all.
+///
+/// A **strict majority**, and the reason is not statistical taste: the
+/// per-anchor reduction is already a median, so it survives a few broken files
+/// on its own (`eighty_eight_measured_keys_become_a_handful_of_anchors` puts one
+/// key 20 dB out and the anchor does not move). What a median cannot survive is
+/// a group that is hot *as a group*. Once half or more of a library's mechanism
+/// recordings are implausible, the ones that pass are that group's quiet tail —
+/// the takes whose own note happened to be loud — and a table drawn from them
+/// is a measurement of the tail, not of the mechanism.
+///
+/// Strict, because the case that decides it is a two-take pedal group: the
+/// bitKlavier grand's two pedal-down takes read −33.4 and −20.2 dB, and there is
+/// no majority in one of two. A median of one surviving take is a coin toss
+/// dressed as a measurement.
+pub const MIN_PLAUSIBLE_SHARE: f64 = 0.5;
+
+/// What the plausibility gate found in one mechanism group.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Screening {
+    /// Recordings the library offered and that decoded.
+    pub read: usize,
+    /// How many of them sit at or under [`MAX_MECHANISM_LEVEL_DB`].
+    pub kept: usize,
+    /// The hottest reading in the group, dB against its own note. `NaN` when
+    /// the group is empty.
+    pub hottest_db: f64,
+}
+
+impl Screening {
+    /// Whether the library recorded this event at all.
+    pub fn recorded(&self) -> bool {
+        self.read > 0
+    }
+
+    /// Whether the group may be written into a preset.
+    pub fn accepted(&self) -> bool {
+        self.read > 0 && self.kept as f64 > MIN_PLAUSIBLE_SHARE * self.read as f64
+    }
+
+    /// Why a group was refused, in one line, or `None` when it was not.
+    pub fn refusal(&self) -> Option<String> {
+        (self.recorded() && !self.accepted()).then(|| {
+            format!(
+                "{} of {} readings sit at or under {MAX_MECHANISM_LEVEL_DB:.1} dB against \
+                 their own note (hottest {:+.2} dB)",
+                self.kept, self.read, self.hottest_db
+            )
+        })
+    }
+}
+
+/// The gate's verdict on a whole library. `damper_lift` is not here because it
+/// is derived from the key-off recordings and carries their verdict.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NoiseScreening {
+    pub key_off: Screening,
+    pub pedal_down: Screening,
+    pub pedal_up: Screening,
+}
+
+impl NoiseScreening {
+    /// The events by the name they carry in the preset, key-off's verdict
+    /// standing for the damper lift it is derived from.
+    pub fn events(&self) -> [(&'static str, Screening); 4] {
+        [
+            ("key_off", self.key_off),
+            ("damper_lift", self.key_off),
+            ("pedal_down", self.pedal_down),
+            ("pedal_up", self.pedal_up),
+        ]
+    }
+
+    /// The events that were recorded, read, and refused.
+    pub fn refused(&self) -> Vec<&'static str> {
+        self.events()
+            .into_iter()
+            .filter(|(_, s)| s.recorded() && !s.accepted())
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// A preset's `description` with this verdict on it, replacing any earlier
+    /// one.
+    ///
+    /// Idempotent, because the mechanism stage is re-entrant and a description
+    /// that grew a clause per run would be a log rather than a statement. The
+    /// clause is always last and always starts [`PROVENANCE_MARKER`], so
+    /// removing the old one is removing a suffix.
+    pub fn describe(&self, description: &str) -> String {
+        let kept = match description.find(PROVENANCE_MARKER) {
+            Some(at) => &description[..at],
+            None => description,
+        };
+        match self.provenance() {
+            Some(clause) => format!("{kept}{PROVENANCE_MARKER}{clause}"),
+            None => kept.to_string(),
+        }
+    }
+
+    /// The sentence a preset's `description` carries when a table was refused,
+    /// which is where this repository records that a value is not a
+    /// measurement of the piano the preset names.
+    pub fn provenance(&self) -> Option<String> {
+        let refused = self.refused();
+        if refused.is_empty() {
+            return None;
+        }
+        let named: Vec<String> = refused.iter().map(|n| format!("[noise.{n}]")).collect();
+        let list = match named.split_last() {
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+            None => unreachable!("refused is not empty"),
+        };
+        Some(format!(
+            "{list} {} — its mechanism recordings read hotter than \
+             {MAX_MECHANISM_LEVEL_DB:.1} dB against their own notes, which is the \
+             library's editorial gain and its room rather than the action \
+             (DECISIONS.md 531)",
+            if named.len() == 1 {
+                "is INHERITED from presets/default.toml and is not a measurement of this piano"
+            } else {
+                "are INHERITED from presets/default.toml and are not measurements of this piano"
+            },
+        ))
+    }
+}
+
+/// What [`NoiseScreening::describe`] writes its clause behind, and finds an
+/// earlier one by. It has to be a string nothing else in a description can
+/// produce, because removing the old clause is removing everything after it.
+pub const PROVENANCE_MARKER: &str = "; mechanism noise: ";
+
+/// One group, screened: the readings that are a mechanism, and the verdict.
+///
+/// A reading is refused when it does not decode to a finite level, or when it
+/// sits hotter than [`MAX_MECHANISM_LEVEL_DB`] against its own note — which
+/// includes the two ways the old code hid the same defect, a reading that
+/// **inverts** (louder than the note, a positive level) and one that **rails**
+/// (clamped to 0 dB on the way into the preset by [`clamp_db`]).
+pub fn screen(metrics: &[EventMetrics]) -> (Vec<EventMetrics>, Screening) {
+    let read: Vec<EventMetrics> = metrics
+        .iter()
+        .copied()
+        .filter(|m| m.level_db.is_finite())
+        .collect();
+    let kept: Vec<EventMetrics> = read
+        .iter()
+        .copied()
+        .filter(|m| m.level_db <= MAX_MECHANISM_LEVEL_DB)
+        .collect();
+    let hottest_db = read
+        .iter()
+        .map(|m| m.level_db)
+        .fold(f64::NAN, |a, b| if a.is_nan() || b > a { b } else { a });
+    let screening = Screening {
+        read: read.len(),
+        kept: kept.len(),
+        hottest_db,
+    };
+    (
+        if screening.accepted() {
+            kept
+        } else {
+            Vec::new()
+        },
+        screening,
+    )
+}
+
 /// One mechanism recording, measured.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EventMetrics {
@@ -131,11 +358,30 @@ pub fn fit_noise(
     base: &NoiseTables,
     config: &NoiseConfig,
 ) -> NoiseTables {
+    fit_noise_screened(measurements, base, config).0
+}
+
+/// [`fit_noise`], with the plausibility gate's verdict beside the tables.
+///
+/// The verdict is what a caller writes into the preset's `description` and
+/// prints: a table this returns unchanged from `base` is one the library did
+/// not record **or** one it recorded implausibly, and those are different
+/// facts about the same piano.
+pub fn fit_noise_screened(
+    measurements: &MechanismMeasurements,
+    base: &NoiseTables,
+    config: &NoiseConfig,
+) -> (NoiseTables, NoiseScreening) {
     let velocity_db = key_off_velocity_db(measurements, config)
         .unwrap_or(f64::from(base.key_off.velocity_db))
         .min(config.max_velocity_db);
+    // Screened once per *group*, not once per table: the damper lift is
+    // derived from the key-off recordings, so refusing them refuses it.
+    let (key_off_metrics, key_off_screen) = screen(&measurements.key_off);
+    let (pedal_down_metrics, pedal_down_screen) = screen(&measurements.pedal_down);
+    let (pedal_up_metrics, pedal_up_screen) = screen(&measurements.pedal_up);
     let key_off = fit_event(
-        &measurements.key_off,
+        &key_off_metrics,
         &base.key_off,
         velocity_db,
         0.0,
@@ -145,7 +391,7 @@ pub fn fit_noise(
     );
     // The lift is the fall, lighter and shorter — see the module header.
     let damper_lift = fit_event(
-        &measurements.key_off,
+        &key_off_metrics,
         &base.damper_lift,
         velocity_db,
         config.damper_lift_db,
@@ -154,7 +400,7 @@ pub fn fit_noise(
         config,
     );
     let pedal_down = fit_event(
-        &measurements.pedal_down,
+        &pedal_down_metrics,
         &base.pedal_down,
         f64::from(base.pedal_down.velocity_db),
         0.0,
@@ -163,7 +409,7 @@ pub fn fit_noise(
         config,
     );
     let pedal_up = fit_event(
-        &measurements.pedal_up,
+        &pedal_up_metrics,
         &base.pedal_up,
         f64::from(base.pedal_up.velocity_db),
         0.0,
@@ -171,7 +417,7 @@ pub fn fit_noise(
         1.0,
         config,
     );
-    NoiseTables {
+    let tables = NoiseTables {
         key_off,
         damper_lift,
         pedal_down,
@@ -181,7 +427,15 @@ pub fn fit_noise(
         // silence, unless something already fitted one — stands.
         // `estimate::attack` is what fills it, from the struck notes themselves.
         strike: base.strike.clone(),
-    }
+    };
+    (
+        tables,
+        NoiseScreening {
+            key_off: key_off_screen,
+            pedal_down: pedal_down_screen,
+            pedal_up: pedal_up_screen,
+        },
+    )
 }
 
 /// The dB the SFZ's own tracking law puts between the softest and loudest
@@ -300,6 +554,14 @@ pub fn compass_anchors(
 
 /// A mechanism event louder than the note it belongs to is a broken
 /// measurement, and the engine refuses one.
+///
+/// **This clamp is a backstop and was never a gate.** Before `DECISIONS.md` 531
+/// it was the only thing standing between an implausible reading and the
+/// preset, and what it did with one was *round it to the rail* — which is how
+/// `presets/concert-grand-d.toml` came to ship a key-off at exactly 0.0 dB, a
+/// damper landing as loud as the note. [`screen`] refuses the reading now; this
+/// still holds the arithmetic legal for the derived damper lift, whose −6 dB
+/// offset is applied after the anchor is taken.
 fn clamp_db(db: f64) -> f32 {
     if db.is_finite() {
         db.min(0.0) as f32
@@ -426,6 +688,51 @@ mod tests {
             ),
             base
         );
+    }
+
+    /// The gate's own arithmetic, at its two edges and on the group that
+    /// derives from another (`DECISIONS.md` 531).
+    #[test]
+    fn a_reading_hotter_than_its_own_note_is_not_a_mechanism() {
+        // The boundary is inclusive on the plausible side, so a library
+        // measured at exactly the constant is written.
+        let at = metrics(Some(60), MAX_MECHANISM_LEVEL_DB, 0.24, 190.0);
+        let over = metrics(Some(60), MAX_MECHANISM_LEVEL_DB + 0.01, 0.24, 190.0);
+        assert_eq!(screen(&[at]).1.kept, 1);
+        assert_eq!(screen(&[over]).1.kept, 0);
+        // Not finite is not read at all — it is neither kept nor a refusal.
+        assert_eq!(screen(&[metrics(Some(60), f64::NAN, 0.24, 190.0)]).1.read, 0);
+
+        // Salamander's own table passes untouched, and says nothing.
+        let base = NoiseTables::default();
+        let config = NoiseConfig::default();
+        let (fitted, screening) = fit_noise_screened(&measured(), &base, &config);
+        assert!(screening.refused().is_empty(), "{screening:?}");
+        assert_eq!(screening.provenance(), None);
+        assert_eq!(fitted, fit_noise(&measured(), &base, &config));
+        assert!((screening.key_off.hottest_db + 25.4).abs() < 1e-9, "{screening:?}");
+
+        // A key-off group hot enough to be refused takes the damper lift with
+        // it, because the lift is derived from those same recordings — and it
+        // leaves the pedals alone, because they are a different group.
+        let mut hot = measured();
+        for m in &mut hot.key_off {
+            m.level_db += 30.0;
+        }
+        let (fitted, screening) = fit_noise_screened(&hot, &base, &config);
+        assert_eq!(fitted.key_off, base.key_off);
+        assert_eq!(fitted.damper_lift, base.damper_lift);
+        // (§5's pedal reading *is* the default's, so "accepted" is the
+        // assertion here and not "different from the base".)
+        assert!(screening.pedal_down.accepted(), "{screening:?}");
+        assert!(screening.pedal_up.accepted(), "{screening:?}");
+        assert_eq!(screening.refused(), vec!["key_off", "damper_lift"]);
+        let described = screening.describe("from somewhere");
+        assert!(described.starts_with("from somewhere; mechanism noise: "), "{described}");
+        assert_eq!(screening.describe(&described), described);
+        // And a later run that finds nothing wrong takes the clause back off.
+        let (_, clean) = fit_noise_screened(&measured(), &base, &config);
+        assert_eq!(clean.describe(&described), "from somewhere");
     }
 
     #[test]

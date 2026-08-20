@@ -90,7 +90,10 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let out = PathBuf::from(args.next().unwrap_or_else(|| "renders/realism".into()));
     let preset_path = PathBuf::from(args.next().unwrap_or_else(|| DEFAULT_PRESET.into()));
 
-    let sfz = data.join("SalamanderGrandPiano-V3+20200602.sfz");
+    // Whichever library this tree is, rather than Salamander's own filename:
+    // `adapter::instrument_path` resolves a described library through its
+    // LibrarySpec and an undescribed one by its single map (DECISIONS.md 521).
+    let sfz = piano_tuner::adapter::instrument_path(&data)?;
     if !sfz.exists() {
         eprintln!(
             "the reference piano is not here: {}\nrun data/fetch_salamander.sh first (707 MiB).",
@@ -627,16 +630,21 @@ and gain and a frequency-dependent coherence on the board's diffuse field (`DECI
 351-358), its five numbers since fitted off the recording rather than swept (`DECISIONS.md` \
 359-367) — and the sign of every band became the recording's. What that could not reach was \
 125 Hz to 500 Hz, and *no* two-point geometry can: the recording's own +0.95 at 100 Hz and \
-about zero one octave up is a step no spatial coherence function has. What closed it is the \
-board's **mode-controlled band** (`[voicing.mics.modal]`, `DECISIONS.md` 368-377), measured \
-off the recording's sixth-octave interchannel curve — +0.94 at 127 Hz, −0.53 at 180, back \
-inside ±0.2 of zero above 500, and repeated by the same keys' other velocity layer. That is a \
-plate whose modes put a nodal line between two capsules, not a pair of microphones. Since \
-`DECISIONS.md` 379 the band is built as an **anti-phase copy of the pair's own sum** rather \
-than as a gain on the board's difference, on the direct path as well as the board's, so it is \
-there from a note's first sample instead of once the diffuse field has built — and the whole \
-section was refitted at a window that opens where the note does, which is `DECISIONS.md` 378 \
-and is the reason the numbers on this board moved. It is \
+about zero one octave up is a step no spatial coherence function has. It closed once, from \
+`DECISIONS.md` 368 until 484, on the board's **mode-controlled band** — `[voicing.mics.modal]`, \
+an anti-phase copy of the pair's own sum fitted to the recording's sixth-octave interchannel \
+curve — and **that band is not in the instrument any more**. `DECISIONS.md` 485 is the \
+owner's verdict on it, and `DECISIONS.md` 487 is the install: `[voicing.mics.modal]` is out \
+of the shipped preset altogether and `voicing.polarization_pan_spread` with it, so what \
+carries `PHYSICS.md` §8 here is the **pair alone** — two capsules at `width` 0.3, the \
+schema's own ceiling since item 485, radiating over a fitted **source extent** of 0.161 m \
+instead of from a point. So 125 Hz to 500 Hz is a **stated gap** again rather than a closed \
+one, and it is stated rather than left to be found: item 486 re-barred both coherence boards \
+to the neutral policy's ceiling on the side energy (`r0 = 0` and `pair_db = +3.01 dB`, which \
+is item 418's lift rail written in those boards' own units and a target no channel inversion \
+is needed to reach), the two per-key gates in `tuner/tests/stereo.rs` carry the current \
+distance in their `#[ignore]` reason strings, and the columns below print it against that \
+target. It is \
 still **not a room**: §9 is refused by measurement in item 315 and is out of scope. These are \
 six *phrases*; the per-key gate is `tuner/tests/stereo.rs` and `renders/stereo/STEREO.md` is \
 the A/B you can listen to.\n"

@@ -37,7 +37,7 @@ use piano_tuner::estimate::duplex::{
     assert_not_harmonic, duplex_row, partial_frequencies, DuplexConfig,
 };
 use piano_tuner::estimate::halo::{
-    between_partials, peaks_from_body_modes, refine, resonance_level, salamander_targets,
+    between_partials, peaks_from_body_modes, refine, salamander_targets,
     HaloConfig, HaloError, HaloVoicing,
 };
 use piano_tuner::library::MechanismKind;
@@ -86,12 +86,24 @@ struct Options {
     /// put them. Re-running the whole stage to move one table would put three
     /// closed-on-the-render fits back in play for no reason.
     only_duplex: bool,
+    /// `--only pan-spread`: run stage 3 alone and leave the duplex rows and the
+    /// halo exactly as the file has them.
+    ///
+    /// It exists for the same reason `--only duplex` does, one item later:
+    /// `DECISIONS.md` 485 re-decides what stage 3 *writes* and nothing else, so
+    /// the rows it retires have to be retired without putting the duplex
+    /// estimate of items 481-484 and the halo's closed-on-the-render loop back
+    /// in play. Under item 485 the stage renders, measures and prints exactly
+    /// what it always did and then writes the **null**: see
+    /// [`retire_pan_spread`].
+    only_pan_spread: bool,
 }
 
 fn parse(args: Vec<String>) -> Result<Options> {
     let mut sfz = None;
     let (mut base, mut out) = (None, None);
     let mut only_duplex = false;
+    let mut only_pan_spread = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -101,9 +113,11 @@ fn parse(args: Vec<String>) -> Result<Options> {
                     .ok_or_else(|| Error::Config("--only needs a stage".into()))?;
                 match value.as_str() {
                     "duplex" => only_duplex = true,
+                    "pan-spread" => only_pan_spread = true,
                     other => {
                         return Err(Error::Config(format!(
-                            "--only {other}: the only stage that can be run alone is `duplex`"
+                            "--only {other}: the stages that can be run alone are `duplex` \
+                             and `pan-spread`"
                         )))
                     }
                 }
@@ -129,6 +143,7 @@ fn parse(args: Vec<String>) -> Result<Options> {
         base: base.ok_or_else(|| Error::Config("--preset is required".into()))?,
         out,
         only_duplex,
+        only_pan_spread,
     })
 }
 
@@ -145,6 +160,21 @@ pub fn run(args: Vec<String>) -> Result<()> {
         library.sample_count(),
         library.mechanism_of(MechanismKind::StringResonance).len()
     );
+
+    // **Stage 3 alone, before stage 1 has run** (`DECISIONS.md` 485): the
+    // retirement writes a null and needs neither the duplex rows nor the halo,
+    // and re-estimating them to reach it would put two closed fits back in play.
+    if options.only_pan_spread {
+        retire_pan_spread(&library, &mut preset, &survey)?;
+        preset.validate()?;
+        println!(
+            "\nfinal (--only pan-spread): voicing.polarization_pan_spread {:.4} and \
+             notes.pan_spread {} rows; the duplex, the coupling and the bridge untouched",
+            preset.voicing.polarization_pan_spread,
+            preset.notes.pan_spread.len(),
+        );
+        return write_out(&options, &preset, &text);
+    }
 
     // ---------------------------------------------------------- 1. duplex
     let duplex = fit_duplex(&library, &preset)?;
@@ -165,7 +195,13 @@ pub fn run(args: Vec<String>) -> Result<()> {
         voicing.apply(&mut preset, peaks.clone())?;
 
         // ------------------------------------------------------ 3. pan spread
-        preset.notes.pan_spread = fit_pan_spread(&library, &preset, &survey)?;
+        // **A retirement since `DECISIONS.md` 485, not a fit**: the stage still
+        // renders and still prints the drift, and what it writes is the null.
+        // [`fit_pan_spread`] is kept beside it because it is the measurement a
+        // successor building item 467's gain trim inverts, and because deleting
+        // the instrument that made the diagnosis possible is how a repository
+        // forgets why a field is zero.
+        retire_pan_spread(&library, &mut preset, &survey)?;
 
         preset.validate()?;
         println!(
@@ -179,12 +215,16 @@ pub fn run(args: Vec<String>) -> Result<()> {
         );
     }
 
+    write_out(&options, &preset, &text)
+}
+
+/// Write the fitted preset, carrying the credit comment at the head of the file
+/// over by hand: it is not part of the schema and a round trip would lose it.
+fn write_out(options: &Options, preset: &Preset, text: &str) -> Result<()> {
     let Some(out) = &options.out else {
         println!("\n(no --out: nothing written)");
         return Ok(());
     };
-    // The credit comment at the head of the file is not part of the schema and
-    // would be lost by a round trip, so it is carried over by hand.
     let mut header = String::new();
     for line in text.lines().take_while(|line| line.starts_with('#')) {
         header.push_str(line);
@@ -493,7 +533,9 @@ fn measure_targets(
     Ok(errors)
 }
 
-/// `docs/history/TUNING_REPORT.md` §5's `harm*` measurement, on the engine.
+/// `docs/history/TUNING_REPORT.md` §5's `harm*` measurement, on the engine —
+/// and it is [`piano_tuner::estimate::halo::engine_halo_level`] and not a
+/// second copy of it (`DECISIONS.md` 501).
 ///
 /// The recording it is held against is a sample of the halo *alone* —
 /// Salamander records the string resonance separately from the key-off thump —
@@ -503,49 +545,19 @@ fn measure_targets(
 /// segments). The engine is deterministic, so the difference is exactly the
 /// sympathetic contribution, and no arbitrary "wait for the damper" window has
 /// to be chosen on one side and not the other.
+///
+/// It lives in `estimate::halo` because the `halo` column
+/// (`tuner/tests/halo.rs`) reads the same quantity, and a fit whose objective
+/// and whose gate are two copies of one measurement is a fit that can converge
+/// on a number the gate does not score.
 fn halo_level(engine: &piano_emulator::preset::Preset, key: u8) -> f64 {
-    let mut quiet = engine.clone();
-    // The mechanism is a separate recording in the library and a separate
-    // parameter set in the engine; it must not be counted as halo.
-    for event in [
-        &mut quiet.noise.key_off,
-        &mut quiet.noise.damper_lift,
-        &mut quiet.noise.pedal_down,
-        &mut quiet.noise.pedal_up,
-    ] {
-        for anchor in &mut event.level_db {
-            anchor.db = -200.0;
-        }
-    }
-    let mut bare = quiet.clone();
-    bare.voicing.resonance_coupling = 0.0;
-    bare.notes.duplex = Vec::new();
-
-    let events = [
-        RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(REFERENCE_VELOCITY) }),
-        RenderEvent::new(HOLD_S, Event::NoteOff { key, vel: 64 }),
-    ];
-    let (wl, wr) = render_to_buffer(&quiet, &events, RENDER_S);
-    let (bl, br) = render_to_buffer(&bare, &events, RENDER_S);
-    let with = mono(&wl, &wr);
-    let without = mono(&bl, &br);
-    let halo: Vec<f32> = with
-        .iter()
-        .zip(&without)
-        .skip((HOLD_S * SAMPLE_RATE as f32) as usize)
-        .map(|(&a, &b)| a - b)
-        .collect();
-
-    // The strike this is a ratio to: the same key at the same velocity, as the
-    // microphone hears it (`DECISIONS.md` 145).
-    let (sl, sr) = render_to_buffer(
-        &quiet,
-        &[RenderEvent::new(0.0, Event::NoteOn { key, vel: u16::from(REFERENCE_VELOCITY) })],
-        2.0,
-    );
-    let strike = mono(&sl, &sr);
-    resonance_level(&halo, 0.0, &strike, 0.0, f64::from(SAMPLE_RATE))
-        .map_or(f64::NAN, |level| level.peak_db)
+    piano_tuner::estimate::halo::engine_halo_level(
+        engine,
+        key,
+        REFERENCE_VELOCITY,
+        f64::from(HOLD_S),
+    )
+    .map_or(f64::NAN, |level| level.peak_db)
 }
 
 fn mono(left: &[f32], right: &[f32]) -> Vec<f32> {
@@ -554,8 +566,129 @@ fn mono(left: &[f32], right: &[f32]) -> Vec<f32> {
 
 // -------------------------------------------------------------- pan spread
 
+/// **Stage 3 under `DECISIONS.md` 485: it measures exactly what it always
+/// measured and writes the null.**
+///
+/// [`fit_pan_spread`] inverts a *drift* — how far a note's interchannel balance
+/// moves between 0.3 s and 2 s, which is a real measured property of the
+/// recordings and 1.2-6.2 dB of it — into `voicing.polarization_pan_spread`,
+/// which is a **position**: `voice.rs` renders the horizontal polarization at
+/// `pan + spread·sign` and the vertical at `pan − spread·sign`, with `sign`
+/// flipping on `key % 2`. Item 467 measured what that costs through a spaced
+/// pair rather than through a pan-pot — the two planes of C4 at pan −0.42 and
+/// +0.30, over a metre of string band apart, and the sign alternating note by
+/// note — and priced the exchange at **4:1 against**: about 2.9 dB of the drift
+/// bought with about ±11 dB of static image. It named the replacement (a
+/// per-polarization interchannel *gain* trim at the mic stage: same drift, one
+/// position, about 3 dB of image) and did not build it, because the image
+/// budget of item 470 had no owner.
+///
+/// Item 485 is that owner, and its verdict is about this mechanism by name: the
+/// per-key lean is not to dominate. A term that alternates its sign with the
+/// key parity is the largest per-key lean in the tree, so the stage stops
+/// writing one. What it still does is **render, measure and print** — the
+/// recordings' own drift at each ladder key, the engine's drift as the file
+/// stands, and the engine's drift with the spread out — so that the size of
+/// what is given up is on the page and a successor building item 467's trim
+/// knows what it has to buy back.
+fn retire_pan_spread(
+    library: &SampleLibrary,
+    preset: &mut Preset,
+    survey: &SurveyConfig,
+) -> Result<()> {
+    let config = DirectivityConfig::default();
+    let before = preset.clone();
+    let engine_zero = engine_with_spread(&before, 0.0)?;
+    let engine_as_is = piano_emulator::preset::Preset::from_toml(&before.to_toml())
+        .map_err(|e| Error::Preset(e.to_string()))?;
+
+    println!(
+        "\nstage 3 is a RETIREMENT (DECISIONS.md 485, on item 467's diagnosis): the drift is \
+         real and the position it was bought with is the dominant per-key lean in the tree, \
+         so the table is written as the null and the drift is printed rather than fitted."
+    );
+    println!("  key   recorded   engine now   engine with the spread out   spread now");
+    let keys: Vec<u8> = library.keys().collect();
+    let (mut kept, mut lost, mut n) = (0.0f64, 0.0f64, 0usize);
+    for key in keys {
+        let Some(sample) = library.nearest_layer(key, REFERENCE_VELOCITY) else {
+            continue;
+        };
+        let Some(index) = key_index(key) else { continue };
+        let f0 = f64::from(before.notes.f0_hz[index]);
+        let note_config = survey.note_config(f0)?;
+        let recording = audio::load_at(&sample.path, SAMPLE_RATE)?;
+        if recording.channel_count() < 2 {
+            continue;
+        }
+        let Ok(recorded) = balance_drift(
+            &recording.channels[0],
+            &recording.channels[1],
+            f0,
+            f64::from(SAMPLE_RATE),
+            &note_config,
+            &config,
+        ) else {
+            continue;
+        };
+        let drift_of = |engine: &piano_emulator::preset::Preset| -> Option<f64> {
+            let (left, right) = render_to_buffer(
+                engine,
+                &[RenderEvent::new(
+                    0.0,
+                    Event::NoteOn {
+                        key,
+                        vel: u16::from(REFERENCE_VELOCITY),
+                    },
+                )],
+                8.0,
+            );
+            balance_drift(&left, &right, f0, f64::from(SAMPLE_RATE), &note_config, &config)
+                .ok()
+                .map(|d| d.drift_db)
+        };
+        let (Some(now), Some(without)) = (drift_of(&engine_as_is), drift_of(&engine_zero)) else {
+            continue;
+        };
+        println!(
+            "  {key:>3}   {:>8.2}   {:>10.2}   {:>27.2}   {:>10.3}",
+            recorded.drift_db,
+            now,
+            without,
+            before
+                .notes
+                .pan_spread
+                .get(index)
+                .copied()
+                .unwrap_or(before.voicing.polarization_pan_spread),
+        );
+        kept += without.abs();
+        lost += (now - without).abs();
+        n += 1;
+    }
+    if n > 0 {
+        let band = piano_tuner::estimate::directivity::MEASURED_DRIFT_BAND;
+        println!(
+            "  over {n} keys: {:.2} dB of drift survives the retirement and {:.2} dB is given \
+             up, against the {:.1}-{:.1} dB the recordings carry — item 467's replacement \
+             (a per-polarization interchannel gain trim at the mic stage) is what buys it back",
+            kept / n as f64,
+            lost / n as f64,
+            band.0,
+            band.1,
+        );
+    }
+    preset.voicing.polarization_pan_spread = 0.0;
+    preset.notes.pan_spread = Vec::new();
+    Ok(())
+}
+
 /// `notes.pan_spread`, from the recordings' drift and two engine renders per
-/// key.
+/// key — **the fit `DECISIONS.md` 485 retired**, kept because it is the
+/// instrument item 467's replacement mechanism has to be fitted with and
+/// because a field that is zero without the measurement beside it is a field
+/// nobody can ever put back.
+#[allow(dead_code)]
 fn fit_pan_spread(
     library: &SampleLibrary,
     preset: &Preset,

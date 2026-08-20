@@ -21,7 +21,7 @@
 //!
 //! Only the opcodes that answer those questions are understood (`sample`,
 //! `pitch_keycenter`/`key`/`lokey`/`hikey`, `lovel`/`hivel`, `trigger`,
-//! `volume`, `amp_veltrack`, `pitch_keytrack`, `on_locc64`/`on_hicc64`);
+//! `volume`, `amp_veltrack`, `rt_decay`, `pitch_keytrack`, `on_locc64`/`on_hicc64`);
 //! everything else in the file is skipped. This is not an SFZ player.
 
 use std::collections::BTreeMap;
@@ -97,6 +97,18 @@ pub struct MechanismSample {
     /// place this matters so far.
     pub lovel: u8,
     pub hivel: u8,
+    /// `rt_decay`: decibels taken off this release region for every second the
+    /// key was **held** before it came up.
+    ///
+    /// It is not a detail of playback. A release resonance is a recording of
+    /// what the strings still hold when the damper lands, and how much that is
+    /// depends on how long the note has been decaying — so a release sample's
+    /// level is only comparable with a strike's once the hold is named.
+    /// Salamander declares 6-9 dB per second on the string resonances and 2 on
+    /// the key-off thumps, which at the one-second hold `estimate::halo` uses
+    /// is the difference between reading the halo 8 dB too loud and reading it
+    /// right (`DECISIONS.md` 501).
+    pub rt_decay: f64,
 }
 
 /// Every recording an SFZ instrument maps: the struck notes grouped by key, and
@@ -193,6 +205,7 @@ impl SampleLibrary {
                     amp_veltrack: region.amp_veltrack,
                     lovel: region.lovel.unwrap_or(1),
                     hivel: region.hivel.unwrap_or(127),
+                    rt_decay: region.rt_decay.unwrap_or(0.0),
                 });
                 continue;
             }
@@ -332,6 +345,7 @@ struct Opcodes {
     pitch_keytrack: Option<i32>,
     on_locc64: Option<i32>,
     on_hicc64: Option<i32>,
+    rt_decay: Option<f64>,
 }
 
 impl Opcodes {
@@ -351,6 +365,7 @@ impl Opcodes {
             pitch_keytrack: other.pitch_keytrack.or(self.pitch_keytrack),
             on_locc64: other.on_locc64.or(self.on_locc64),
             on_hicc64: other.on_hicc64.or(self.on_hicc64),
+            rt_decay: other.rt_decay.or(self.rt_decay),
         }
     }
 
@@ -369,6 +384,7 @@ impl Opcodes {
             "pitch_keytrack" => self.pitch_keytrack = value.parse().ok(),
             "on_locc64" => self.on_locc64 = value.parse().ok(),
             "on_hicc64" => self.on_hicc64 = value.parse().ok(),
+            "rt_decay" => self.rt_decay = value.parse().ok(),
             _ => {}
         }
     }

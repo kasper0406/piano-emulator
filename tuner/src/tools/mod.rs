@@ -18,12 +18,14 @@
 //! default-members and built on demand.
 
 pub mod ab;
+pub mod adapt;
 pub mod bench;
 pub mod brilliance;
 pub mod chain;
 pub mod compass;
 pub mod fit;
 pub mod level;
+pub mod listen;
 pub mod melody;
 pub mod mics;
 pub mod noise;

@@ -51,9 +51,30 @@
 //! gates the arithmetic and the second pass over the shipped preset returns
 //! −0.00 dB on both fields.
 //!
+//! # The other four events, and why they are here
+//!
+//! `--stage mechanism` writes the *other* four events — `key_off`,
+//! `damper_lift`, `pedal_down`, `pedal_up` — through
+//! [`estimate::noise::fit_noise_screened`], which is the same code `survey`
+//! runs. It has no engine in it and no render: those four are read off the
+//! library's own mechanism recordings against strikes of the same key, so
+//! nothing about them depends on the six stages that run between `survey` and
+//! here. It exists because they are written by stage **1** and are therefore
+//! unreachable on a finished preset without re-running the whole factory —
+//! which is exactly the position `DECISIONS.md` 531 found the range's two new
+//! presets in, shipping mechanism tables that stage 1 should have refused.
+//!
+//! The tables a library's recordings do not earn are taken from `--base`
+//! (`presets/default.toml` by default) rather than from the preset being
+//! written, so running this over a contaminated preset **repairs** it instead
+//! of preserving it. `[noise.strike]` is never touched by this stage: it is the
+//! balance fit's, above, and it is kept from the preset being written.
+//!
 //! ```sh
 //! cargo run --release -p piano-tuner -- noise \
 //!     [data/salamander] [presets/salamander-c5.toml] [--out <f>] [--key <n>]
+//! cargo run --release -p piano-tuner -- noise \
+//!     [data] [preset.toml] --stage mechanism [--base presets/default.toml] [--out <f>]
 //! ```
 
 use std::cell::RefCell;
@@ -69,7 +90,9 @@ use piano_tuner::estimate::attack::{
     balance_reading, fit_balance, BalanceReading, BalanceVerdict,
 };
 use piano_tuner::estimate::melody::note_onset;
+use piano_tuner::estimate::noise::{fit_noise_screened, NoiseConfig};
 use piano_tuner::realism::RecordedKeys;
+use piano_tuner::survey::measure_mechanism;
 use piano_tuner::sampler::SAMPLER_VERSION;
 use piano_tuner::{Audio, SampleLibrary, Sampler, TimedEvent, SAMPLE_RATE};
 
@@ -199,6 +222,69 @@ fn render_reference(
     sampler.render(&events, RENDER_S)
 }
 
+/// `--stage mechanism`: the four events the *library* measures, screened.
+///
+/// No render and no engine — see the module header. The base preset supplies
+/// every table the recordings do not earn, and `[noise.strike]` is carried over
+/// from the preset being written, because it belongs to the balance stage above
+/// and this one has no opinion about it.
+fn run_mechanism(
+    sfz: &Path,
+    preset_path: &Path,
+    base_path: &Path,
+    out: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The tuner's own mirror of the schema, not the engine's: this stage
+    // writes a preset file and `estimate::noise` speaks that side of it.
+    use piano_tuner::preset::Preset;
+    let preset = Preset::load(preset_path)?;
+    let config = NoiseConfig::default();
+    let library = SampleLibrary::from_sfz(sfz)?;
+    let measurements = measure_mechanism(&library, &config);
+    println!(
+        "the mechanism, from {} against strikes of the same key; base {}, preset {}",
+        sfz.display(),
+        base_path.display(),
+        preset_path.display()
+    );
+    if measurements.is_empty() {
+        println!("\nno mechanism recordings in this library — nothing to write");
+        return Ok(());
+    }
+    // The base's mechanism, but this preset's own hammer noise: `fit_noise`
+    // carries `strike` through from the base it is handed, and the base here is
+    // `presets/default.toml`, whose strike is silence.
+    let mut base = Preset::load(base_path)?.noise;
+    base.strike = preset.noise.strike.clone();
+    let (fitted, screening) = fit_noise_screened(&measurements, &base, &config);
+    crate::print_mechanism(&measurements, &fitted, &screening);
+
+    let mut written = preset.clone();
+    written.noise = fitted;
+    written.description = screening.describe(&written.description);
+    written.validate()?;
+    for (name, event) in written.noise.events() {
+        println!(
+            "\n[noise.{name}] {:.2} Hz, {:.4} s, {:.2} dB of velocity",
+            event.centroid_hz, event.decay_s, event.velocity_db
+        );
+        for anchor in &event.level_db {
+            println!("  key {:>3}  {:+.3} dB", anchor.key, anchor.db);
+        }
+    }
+    if written.noise == preset.noise && written.description == preset.description {
+        println!("\nnothing moved: this preset already carries what the gate allows");
+    }
+    match out {
+        Some(path) => {
+            written.save(path)?;
+            println!("\nwrote {}", path.display());
+        }
+        None => println!("\n(no --out: nothing written)"),
+    }
+    Ok(())
+}
+
 pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let data = PathBuf::from(
@@ -215,6 +301,8 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut out: Option<PathBuf> = None;
     let mut only: Option<Vec<u8>> = None;
+    let mut mechanism = false;
+    let mut base = PathBuf::from("presets/default.toml");
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -226,12 +314,27 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 only = Some(vec![args[i + 1].parse()?]);
                 i += 1;
             }
+            "--stage" => {
+                match args[i + 1].as_str() {
+                    "mechanism" => mechanism = true,
+                    "balance" => mechanism = false,
+                    other => return Err(format!("no such noise stage: {other}").into()),
+                }
+                i += 1;
+            }
+            "--base" => {
+                base = PathBuf::from(&args[i + 1]);
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
     }
 
-    let sfz = data.join("SalamanderGrandPiano-V3+20200602.sfz");
+    // Whichever library this tree is, rather than Salamander's own filename:
+    // `adapter::instrument_path` resolves a described library through its
+    // LibrarySpec and an undescribed one by its single map (DECISIONS.md 521).
+    let sfz = piano_tuner::adapter::instrument_path(&data)?;
     if !sfz.exists() {
         eprintln!(
             "the reference piano is not here: {}\nrun data/fetch_salamander.sh first (707 MiB).",
@@ -239,10 +342,19 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(2);
     }
-    if out.as_deref() == Some(preset_path.as_path()) {
+    // The balance stage measures the engine's own render of the preset it is
+    // given, so writing over that preset mid-run would corrupt the thing being
+    // measured. The mechanism stage has no render in it — its input is the
+    // library and `--base`, and the preset it is handed contributes only
+    // `[noise.strike]`, which it carries through untouched — so writing in
+    // place is how a preset gets regenerated through it, and it is idempotent.
+    if !mechanism && out.as_deref() == Some(preset_path.as_path()) {
         return Err("--out may not be the preset being measured".into());
     }
 
+    if mechanism {
+        return run_mechanism(&sfz, &preset_path, &base, out.as_deref());
+    }
     let preset = Preset::load(&preset_path)?;
     let quiet = without_strike(&preset);
     let library = SampleLibrary::from_sfz(&sfz)?;

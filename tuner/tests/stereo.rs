@@ -583,13 +583,49 @@ fn report(what: &str, columns: &[StereoColumn]) -> String {
 /// the bar is the recording against its own second take and the shortfall is
 /// the mechanism, not the measurement.
 #[test]
-#[ignore = "D418/D463 known gap: the recording's nodal band asks for a lift above the railed null; run with --ignored to read the current distance"]
+#[ignore = "D418/D486/D463 known gap, re-barred to the neutral policy's ceiling on the side energy (r0 = 0, which is D418's own lift rail in this board's units): all six bands are red on the point D487 installs, worst 0.977 of 0.120 at 125-250 — the pair the owner's verdict of D485 leaves carries 0.06-0.53 dB of side where the recording carries 2.8-3.9; run with --ignored to read the current distance"]
 fn the_engines_stereo_image_is_the_recordings_in_every_band() {
     let Some(m) = measured() else {
         eprintln!("no data/salamander in this tree; skipping the stereo gate");
         return;
     };
     let columns = realism::stereo_columns(&m.items);
+    // **The neutral-policy re-bar, printed before anything is asserted**
+    // (`DECISIONS.md` 486, `realism::NEUTRAL_SIDE_CEILING_R0`) — item 417's own
+    // rule for an acceptance: one nobody can read is indistinguishable from a
+    // widened bar. The statistic has not moved and neither has the bar; what
+    // has moved is the **target**, in the bands where the recording's own `r0`
+    // is negative and therefore asks for more difference than sum. `r0 < 0` is
+    // `E_side > E_mid` is `|T| > 1`, which is where `|1 − T|` can vanish and one
+    // loudspeaker inverts against the other — the thing item 418 railed
+    // `MIC_MODAL_LIFT` at one to forbid after a listener found it three ways.
+    println!(
+        "the neutral policy's ceiling on the side energy, excluded from this gate's target \
+(`DECISIONS.md` 486, on the owner's verdict of item 485; r0 = 0 is E_side = E_mid is the \
+lift rail of item 418 in this board's own units). The bar is unchanged in every band — it \
+is still the recording against its own second take, or the material's own uncertainty:"
+    );
+    for c in &columns {
+        if c.items == 0 {
+            continue;
+        }
+        println!(
+            "  {:>7}: recording asks r0 {:+.3} → target {:+.3} (excluded {:+.3}); \
+engine {:+.3}, |err| {:.3} against a bar of {:.3} — {}",
+            c.name,
+            c.reference_r0,
+            c.target_r0,
+            c.excluded_r0,
+            c.engine_r0,
+            c.error,
+            c.bar,
+            if c.excluded_r0.abs() < 1e-12 {
+                "untouched: the recording sees more sum than difference here"
+            } else {
+                "re-barred: the recording sees more difference than sum here, which no mono-exact pair can hold without a channel inversion"
+            },
+        );
+    }
     let red: Vec<&StereoColumn> = columns.iter().filter(|c| !c.pass).collect();
     let mut lines = String::new();
     for c in &red {
@@ -706,7 +742,7 @@ against a bar of {:.3} (floor {:.3}, scatter {:.3}, x{:.2}), worst key {} at {:.
 /// coherence board now carries are that one shortfall read four ways, and item
 /// 418 records the map.
 #[test]
-#[ignore = "D418/D463 known gap: the same railed-lift shortfall as the image gate, read per channel; run with --ignored to read the current distance"]
+#[ignore = "D418/D486/D463 known gap, re-barred with the coherence gate: the same shortfall read per channel — pair_db balance -0.16 to -2.95 across the six bands on the point D487 installs, worst 2.95 of 0.56 at 125-250; run with --ignored to read the current distance"]
 fn each_loudspeaker_has_the_recordings_spectrum_where_the_mic_pair_acts() {
     let Some(m) = measured() else {
         eprintln!("no data/salamander in this tree; skipping the per-channel gate");
@@ -790,6 +826,34 @@ best would be {:.2} — {}",
             } else {
                 "worse than that floor, so the exclusion is not what carries this band"
             },
+        );
+    }
+    // **And the second exclusion, which is item 486's and not item 417's.**
+    // `pair_db` is `10 log10(1 + E_side/E_mid)`, so `E_side/E_mid = 1` is
+    // +3.0103 dB — the same ceiling the coherence board reads as `r0 = 0`, and
+    // the same one item 418 railed `MIC_MODAL_LIFT` at. Where the recording's
+    // own pair energy is above it, this board has stopped asking for the
+    // difference.
+    println!(
+        "the neutral policy's ceiling on the side energy, excluded from this gate's \
+`pair_db` target (`DECISIONS.md` 486; +{:.4} dB is E_side = E_mid, which is item 418's \
+lift rail in this column's own units):",
+        realism::NEUTRAL_PAIR_CEILING_DB
+    );
+    for c in &columns {
+        if c.items == 0 {
+            continue;
+        }
+        println!(
+            "  {:>7}: recording asks pair_db {:+.2} → target {:+.2} (excluded {:.2}); \
+engine {:+.2}, balance {:+.2} against a bar of {:.2}",
+            c.name,
+            c.reference_pair_db,
+            c.target_pair_db,
+            c.excluded_pair_db,
+            c.engine_pair_db,
+            c.pair_balance,
+            c.pair_bar,
         );
     }
     println!(
@@ -1343,15 +1407,65 @@ fn the_recording_passes_its_own_bar_in_every_band() {
             c.bar,
             report("the recording against itself", &columns)
         );
+        // **The control splits in two, which is the honest form of an
+        // exclusion** (`DECISIONS.md` 486, taking item 466's own shape). Against
+        // the recording's *own* value the machinery has no bias of its own and
+        // reads exactly zero in every band. Against the neutral policy's ceiling
+        // on the side energy it stands off by exactly the excluded amount in
+        // each of the **four** bands where it sees more difference than sum —
+        // 125-250 and 250-500 by 0.115 and 0.226, and 500 Hz-2 kHz and 2-6 kHz
+        // by 0.002 and 0.012, a hair under zero — and it **fails** only where
+        // that exclusion is outside the band's own bar, which on this material
+        // is 250-500 alone. That is the size of the exclusion, written down as
+        // a test rather than as a claim.
         assert!(
-            c.pass,
-            "{}: the recording fails its own bar, {:.4} against {:.4}{}",
+            (c.engine_r0 - c.reference_r0).abs() < 1e-9,
+            "{}: the recording is not its own image, {:+.4} against {:+.4}{}",
+            c.name,
+            c.engine_r0,
+            c.reference_r0,
+            report("the recording against itself", &columns)
+        );
+        assert!(
+            (c.error - c.excluded_r0.abs()).abs() < 1e-9,
+            "{}: the recording's distance from the neutral target is {:.4} where the \
+             exclusion is {:.4} — the two have to be the same number or the target is \
+             not what item 486 says it is{}",
             c.name,
             c.error,
+            c.excluded_r0.abs(),
+            report("the recording against itself", &columns)
+        );
+        assert_eq!(
+            c.pass,
+            c.excluded_r0.abs() <= c.bar,
+            "{}: the recording passes iff the exclusion in this band is inside its own \
+             bar, and here they disagree — {:.4} excluded against a bar of {:.4}{}",
+            c.name,
+            c.excluded_r0.abs(),
             c.bar,
             report("the recording against itself", &columns)
         );
     }
+    let excluded: Vec<String> = columns
+        .iter()
+        .filter(|c| c.excluded_r0.abs() > 1e-9)
+        .map(|c| format!("{} {:+.3}", c.name, c.excluded_r0))
+        .collect();
+    println!(
+        "the neutral policy excludes this much of the recording's own decorrelation: {}",
+        if excluded.is_empty() {
+            "nothing".to_string()
+        } else {
+            excluded.join(", ")
+        }
+    );
+    assert!(
+        !excluded.is_empty(),
+        "no band of this recording asks for more difference than sum, so item 486's \
+         exclusion is of nothing and the policy has nothing to say here{}",
+        report("the recording against itself", &columns)
+    );
 }
 
 /// The control that says the gate catches the thing it names, with the engine
@@ -1455,15 +1569,31 @@ fn the_capsule_pair_without_the_mode_controlled_band_fails_in_the_middle() {
             text
         );
     }
+    // **The outside-the-middle clause is gone, and it is the band that took it
+    // with it** (`DECISIONS.md` 487). What that clause asserted was that
+    // `[voicing.mics.modal]` had not bought its two bands by spending the other
+    // four — a statement whose subject is the band, and the preset that ships no
+    // longer has one, so `m.without_modal` and the shipped instrument are now
+    // the same render and the clause has nothing to compare. What is left is the
+    // half that still has a subject and is still item 357's finding: a
+    // two-point geometry cannot hold 125-500 Hz, asserted above. The four bands
+    // outside it are printed rather than gated, and where they are red they are
+    // red on the instrument that ships — which is item 418's own gate's
+    // business (`the_engines_stereo_image_is_the_recordings_in_every_band`) and
+    // is carried there with its distance.
     for c in columns
         .iter()
         .filter(|c| c.items > 0 && (c.hi_hz <= 125.0 || c.lo_hz >= 500.0))
     {
-        assert!(
-            c.pass,
-            "{}: the pair alone already passed here, so the mode-controlled band must \
-             not be what carries it, {:.4} against {:.4}{}",
-            c.name, c.error, c.bar, text
+        println!(
+            "  outside the middle, printed and not gated since item 487: {} reads \
+{:+.3} against a target of {:+.3}, |err| {:.4} of {:.4} — {}",
+            c.name,
+            c.engine_r0,
+            c.target_r0,
+            c.error,
+            c.bar,
+            if c.pass { "inside" } else { "outside" },
         );
     }
 }

@@ -180,6 +180,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     let library = SampleLibrary::from_sfz(&sfz)?;
     let mut preset = Preset::load(&preset_path)?;
+    grow_per_key_tables(&mut preset);
     let survey = SurveyConfig::default();
     let config = MotionConfig::default();
 
@@ -210,7 +211,22 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             };
             let Ok(signal) = recording(sample) else { continue };
-            let measured = measure(&preset, key, &signal, config.max_partial);
+            // **A row may only name a partial this key's bank actually has**
+            // (`DECISIONS.md` 522). The recording is the authority on *which*
+            // partials beat and at what rate, and it will happily resolve a
+            // fifth partial at the top of the compass; the engine's string
+            // bank for that key may hold four, and the schema rejects a
+            // `notes.false_beat` row for a partial that does not exist — as it
+            // should, since there is nothing for such a row to modulate. This
+            // could not happen on a minor-third library because the top key's
+            // bank was always the larger of the two; the first whole-tone
+            // library found it in `solve_on_the_render`'s first render, as a
+            // panic rather than as a bad number, which is the good failure.
+            let bank = partial_count(&preset, key) as u32;
+            let measured: Vec<(u32, Motion)> = measure(&preset, key, &signal, config.max_partial)
+                .into_iter()
+                .filter(|(k, _)| *k <= bank)
+                .collect();
             let mut fit = fit_false_beat(key, &measured, &config);
             // The recording says *which* partials and at what rate; the engine
             // says at what level, because the asked level is quoted against one
@@ -1613,6 +1629,45 @@ fn solve_on_the_render(
     (loops.solved(), loops.unwritten())
 }
 
+
+/// Grows the two per-key texture tables to the full compass, so that a stage
+/// may index into them by key.
+///
+/// **Both are absent-means-old and may arrive empty**, and `presets/default.toml`
+/// — the base every new preset is built from — carries neither.
+/// `synthesize_texture` has grown them since it was written; the
+/// `partial_gains` stage never did, and never had to, because
+/// `presets/salamander-c5.toml` grew its table long ago and every run since has
+/// been over a preset that already carried one. **The first factory run that
+/// started from the default on a new library found it**, as `index out of
+/// bounds: the len is 0 but the index is 0` at the first key of
+/// `notes.partial_gains` — and a stage that cannot run on a fresh preset is a
+/// stage that cannot make a second piano (`DECISIONS.md` 522).
+///
+/// A table that is already the right length is left exactly as it is: this must
+/// not clear a preset that has been fitted before.
+///
+/// `notes.partial_sigma_scale` is grown here too, and it is **not** a table this
+/// stage writes. It is `tail`'s, and `tools/tail.rs` indexes it by key without a
+/// guard of its own — the identical bug, a third time, at `tail.rs:490`. That
+/// file belongs to the halo workstream, so the one-line guard it owes is queued
+/// rather than made here (the same reason `instrument_path` has three
+/// non-adopters, item 521); growing it at the end of `fit`, which every preset
+/// passes through before `tail` ever sees it, is what makes the factory run
+/// end-to-end on a new library today. **Delete this third clause when
+/// `tail.rs` grows its own.**
+fn grow_per_key_tables(preset: &mut Preset) {
+    if preset.notes.partial_gains.len() != piano_tuner::preset::NUM_KEYS {
+        preset.notes.partial_gains = vec![Vec::new(); piano_tuner::preset::NUM_KEYS];
+    }
+    if preset.notes.false_beat.len() != piano_tuner::preset::NUM_KEYS {
+        preset.notes.false_beat = vec![Vec::new(); piano_tuner::preset::NUM_KEYS];
+    }
+    if preset.notes.partial_sigma_scale.len() != piano_tuner::preset::NUM_KEYS {
+        preset.notes.partial_sigma_scale = vec![Vec::new(); piano_tuner::preset::NUM_KEYS];
+    }
+}
+
 /// Replaces one key's `notes.false_beat` row, growing the table to full length
 /// first so that a preset that had none can still be probed.
 fn set_false_beat(preset: &mut Preset, key: u8, rows: &[FalseBeat]) {
@@ -1865,4 +1920,60 @@ fn spectrum_of(analysis: &piano_tuner::NoteAnalysis) -> Vec<(u32, f64)> {
         .filter(|fit| fit.k >= 1 && fit.initial_amplitude() > 0.0)
         .map(|fit| (fit.k, fit.initial_amplitude()))
         .collect()
+}
+
+
+#[cfg(test)]
+mod growth_tests {
+    use super::*;
+
+    /// The falsification for `DECISIONS.md` 522's second half: a factory run
+    /// that starts from `presets/default.toml` — which carries neither table —
+    /// used to panic at the first key of the `partial_gains` stage.
+    #[test]
+    fn a_fresh_preset_grows_its_per_key_tables_before_a_stage_indexes_them() {
+        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the tuner sits in the workspace")
+            .to_path_buf();
+        let mut preset = Preset::load(repo.join("presets/default.toml")).expect("the base loads");
+        // The precondition: this is what the factory actually starts from.
+        assert!(
+            preset.notes.partial_gains.is_empty(),
+            "presets/default.toml has grown a partial_gains table; this test's \
+             precondition is gone and the bug it pins can no longer be reached \
+             from the default"
+        );
+        grow_per_key_tables(&mut preset);
+        assert_eq!(preset.notes.partial_gains.len(), piano_tuner::preset::NUM_KEYS);
+        assert_eq!(preset.notes.false_beat.len(), piano_tuner::preset::NUM_KEYS);
+        assert_eq!(
+            preset.notes.partial_sigma_scale.len(),
+            piano_tuner::preset::NUM_KEYS,
+            "tail indexes this one by key and has no guard of its own"
+        );
+        // Every key of the compass is now indexable, which is the whole claim.
+        for key in piano_tuner::preset::LOWEST_KEY..=piano_tuner::preset::HIGHEST_KEY {
+            let index = key_index(key).expect("on the keyboard");
+            assert!(preset.notes.partial_gains[index].is_empty());
+            assert!(preset.notes.false_beat[index].is_empty());
+        }
+    }
+
+    /// And it must not clear a preset that has already been fitted: growth is
+    /// growth, not a reset.
+    #[test]
+    fn growing_a_table_that_is_already_full_length_changes_nothing() {
+        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the tuner sits in the workspace")
+            .to_path_buf();
+        let mut preset = Preset::load(repo.join("presets/default.toml")).expect("the base loads");
+        preset.notes.partial_gains = vec![Vec::new(); piano_tuner::preset::NUM_KEYS];
+        preset.notes.partial_gains[0] = vec![1.0, 2.0, 3.0];
+        preset.notes.false_beat = vec![Vec::new(); piano_tuner::preset::NUM_KEYS];
+        let before = preset.notes.partial_gains.clone();
+        grow_per_key_tables(&mut preset);
+        assert_eq!(preset.notes.partial_gains, before);
+    }
 }

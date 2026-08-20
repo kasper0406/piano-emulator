@@ -34,6 +34,7 @@ use piano_emulator::preset::Preset;
 use piano_emulator::render::{render_to_buffer, RenderEvent};
 use piano_tuner::audio::Audio;
 use piano_tuner::estimate::melody::{self, Column, LineNote, NoteTexture, Window};
+use piano_tuner::adapter::{self, LibrarySpec};
 use piano_tuner::realism::{Phrase, RecordedKeys, VelocityLayers};
 use piano_tuner::sampler::engine_events;
 use piano_tuner::{SampleLibrary, SAMPLE_RATE};
@@ -204,6 +205,15 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let library = SampleLibrary::from_sfz(&sfz)?;
     let layers = VelocityLayers::from_library(&library)?;
     let recorded = RecordedKeys::from_library(&library)?;
+    // **Which library this board is about**, so that the prose below can state
+    // it rather than state Salamander's (`DECISIONS.md` 521). The data
+    // directory's own name is the described library's id; an undescribed tree
+    // gets `None` and the same sentences derived from the keys actually
+    // loaded.
+    let spec = data
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(LibrarySpec::find);
     let ladder_keys = melody::ladder_keys(&recorded, &melody::line_keys());
 
     println!(
@@ -319,6 +329,7 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             &preset_path,
             &sfz,
             &what,
+            spec,
         ),
     )?;
     println!("{}", report.display());
@@ -396,6 +407,42 @@ fn render_reference(
     melody::reference_line(sfz, data, phrase, name, events)
 }
 
+/// A small count in words, for the report's prose. Past what a melody line can
+/// hold it prints the digits, which is worse prose and not a wrong number.
+fn spelled(n: usize) -> String {
+    match n {
+        0 => "no".to_string(),
+        1 => "one".to_string(),
+        2 => "two".to_string(),
+        3 => "three".to_string(),
+        4 => "four".to_string(),
+        5 => "five".to_string(),
+        6 => "six".to_string(),
+        7 => "seven".to_string(),
+        8 => "eight".to_string(),
+        9 => "nine".to_string(),
+        10 => "ten".to_string(),
+        n => n.to_string(),
+    }
+}
+
+/// What the report puts after "The library": the **described** layout where
+/// this tree's library is one this repository describes, and otherwise the
+/// spacing of the keys the map actually loaded.
+fn spacing_phrase(spec: Option<&LibrarySpec>, recorded: &RecordedKeys) -> String {
+    if let Some(spec) = spec {
+        return spec.layout.spacing_phrase();
+    }
+    let keys = recorded.keys();
+    let mut gaps: Vec<u8> = keys.windows(2).map(|w| w[1] - w[0]).collect();
+    gaps.sort_unstable();
+    gaps.dedup();
+    match gaps.as_slice() {
+        [step] => format!("records one key every {}", adapter::interval_name(*step)),
+        _ => format!("records {} keys of the compass", keys.len()),
+    }
+}
+
 /// `MELODY.md`: the standing report for the gate in `tuner/tests/melody.rs`.
 #[allow(clippy::too_many_arguments)]
 fn melody_report(
@@ -407,15 +454,61 @@ fn melody_report(
     preset: &Path,
     sfz: &Path,
     what: &str,
+    spec: Option<&LibrarySpec>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
+    // **Everything in this file that is a property of the library rather than
+    // of the tune is derived here**, from the library's own description and
+    // from the keys it actually recorded (`DECISIONS.md` 521). It used to be
+    // typed, and what was typed was Salamander's: a board generated against
+    // another instrument said "the Yamaha C5", "one key every minor third" and
+    // "exactly one is a recording" whatever was true of it.
+    let instrument = spec.map_or_else(
+        || "the library this tree holds".to_string(),
+        |s| format!("the {}", s.instrument),
+    );
+    let spacing = spacing_phrase(spec, recorded);
+    let line = melody::line_keys();
+    let pitches = spelled(line.len());
+    let recorded_count = line.iter().filter(|&&k| recorded.is_recorded(k)).count();
+    let scored = match recorded_count {
+        0 => "not one is a recording".to_string(),
+        1 => "exactly one is a recording".to_string(),
+        n => format!("exactly {} are recordings", spelled(n)),
+    };
+    // How thin the line's own reference population is, which is the whole
+    // reason the bar is not taken from it: how many of its pitches are somebody
+    // else's take resampled, and how few distinct takes those come from.
+    let transposed = line.len() - recorded_count;
+    let mut takes: Vec<u8> = line
+        .iter()
+        .filter(|&&k| !recorded.is_recorded(k))
+        .filter_map(|&k| recorded.take_for(k))
+        .collect();
+    takes.sort_unstable();
+    takes.dedup();
+    let bar_reason = if transposed == 0 {
+        format!(
+            "every one of its {pitches} reference notes is a recording of its own, and \
+{pitches} notes of one tune are still too thin a population to set a bar on"
+        )
+    } else {
+        format!(
+            "{} of its {pitches} reference notes {} {} recordings cloned, so their scatter \
+about their own trend is far smaller than a piano's and a bar set on it would be a bar set \
+on a resampler",
+            spelled(transposed),
+            if transposed == 1 { "is" } else { "are" },
+            spelled(takes.len()),
+        )
+    };
     let _ = write!(
         out,
         "# The melody, note by note\n\n\
 The Ode to Joy melody line of `realism::excerpt` played **alone** — no harmony — \
-through the engine on `{}` ({what}) and through the recordings of the \
-Yamaha C5 at `{}`. Thirty notes over five pitches; the two half-beat passing \
+through the engine on `{}` ({what}) and through the recordings of {instrument} \
+at `{}`. Thirty notes over five pitches; the two half-beat passing \
 notes are too short to measure and the other 28 are.\n\n\
 This is the listener's own statistic. `COMPASS.md` strikes 88 keys alone and \
 scores each against its neighbours; `REALISM.md` averages six phrases into one \
@@ -458,8 +551,8 @@ line's own velocity, in the order the tune introduces them, one strike every \
 2.5 s and each held 2.2 s: every note is let go before the next is struck and \
 the window is entirely inside the held note.\n\n\
 ## Which reference notes are scored\n\n\
-`DECISIONS.md` 328, and it is permanent. The library records one key every minor \
-third. Of this line's five pitches **exactly one is a recording**:\n\n\
+`DECISIONS.md` 328, and it is permanent. The library {spacing}. Of this line's \
+{pitches} pitches **{scored}**:\n\n\
 | pitch | the reference note is |\n|---|---|\n",
         preset.display(),
         sfz.display(),
@@ -483,9 +576,7 @@ this library hears. It carries **no per-note score**: its inharmonicity, its \
 unison beat, its decay and its brightness are the neighbour's, resampled, and \
 scoring the engine against it measures a resampler. It is marked \
 *transposed — unscored* wherever a per-note number would otherwise be.\n\n\
-That also takes the **bar** off this line: four of its five reference notes are \
-two recordings cloned, so their scatter about their own trend is far smaller \
-than a piano's and a bar set on it would be a bar set on a resampler. Every bar \
+That also takes the **bar** off this line: {bar_reason}. Every bar \
 below is measured instead on the **recorded keys of the melody's register**, \
 played as the same music through the same window — {} — and is never smaller \
 than the **per-take scatter**, the distance between one recorded key and its own \
@@ -760,6 +851,84 @@ corr(ILD,ITD) | recording | layer | short by | bar | verdict |\n\
             c.agreement,
             c.agreement_bar,
             if c.agreement_pass { "pass" } else { "**FAIL**" },
+        );
+    }
+    // **The compass's own tilt** (`DECISIONS.md` 485), its own section because
+    // it is the one verdict on this board taken over the recorded **ladder**
+    // rather than over the tune.
+    let _ = write!(
+        out,
+        "\n## The compass's own tilt\n\n\
+`DECISIONS.md` 485, and it is the owner's own complaint written as a statistic. \
+Shown a ladder of instruments differing in nothing but `voicing.mics.width`, \
+rendered from a pair with the polarization spread zeroed and the source extent \
+fitted, the verdict was: *\"It should be 0.3 or less for sure. This effect \
+shouldn't be dominating at all.\"* The effect is the pan law read through a \
+spaced pair — a key's position along the string band becomes an interchannel \
+level difference, so the bass comes out of one loudspeaker and the treble out \
+of the other, steadily, all the way up the compass.\n\n\
+**No column above reads it**, and the shape of why is the one `CONTEXT.md`'s \
+standing rule keeps taking. `channel` is `E_L + E_R`, symmetric under swapping \
+the loudspeakers. `balance` is a **median magnitude** over the recorded ladder, \
+and a ramp about the ladder's own centre has median nothing — item 459's lesson \
+one register lower and at the fundamental instead of at the overtones. `comb` \
+*is* a slope, and it is taken over the **tune**: five semitones, which even at \
+the recording's own gradient is 1.4 dB and inside every bar here. So the \
+statistic that reads what the owner heard is a slope in key over the \
+**compass** — `comb` and `balance` read the tune, this reads the ladder.\n\n\
+It is the note's whole **broadband** `10 log10(E_L / E_R)`, Theil-Sen against \
+key over the nine recorded ladder keys, target zero with the rest of the image \
+columns, bar the recording's own gradient plus how far it moves between two \
+takes of it. Broadband and not at the fundamental, and that is a measurement \
+rather than a preference: the same slope taken on `balance` is **not monotone \
+in `width` at all**, because at one frequency the ratio is a function of \
+whatever comb phase and whatever band-shaped mechanism the preset has at that \
+pitch (measured: −0.161, −0.184, −0.286, −0.112, −0.075, −0.083 at widths 1.632 \
+down to 0.1). A gate on a mechanism has to be monotone in that mechanism.\n\n\
+**And the owner's number is a schema rail rather than a bar**: \
+`soundboard::MIC_WIDTH`'s ceiling is 0.3, `Preset::validate` refuses a preset \
+above it by name, and `Knob::Width`'s search bound stops there. A bar says *this \
+instrument is too far off*; a rail says *that instrument is not one this \
+repository builds*, which is what a verdict from the owner about how loud a \
+mechanism may be actually is.\n\n\
+| metric | window | gradient /semitone | recording | layer | error | bar | verdict |\n\
+|---|---|--:|--:|--:|--:|--:|---|\n"
+    );
+    for c in columns.iter().filter(|c| c.gated_on_gradient) {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | **{:+.3}** | {:+.3} | {:+.3} | {:.3} | {:.3} | {} |",
+            c.metric,
+            c.window.name(),
+            c.gradient,
+            c.reference_gradient,
+            c.layer_gradient,
+            c.gradient_error,
+            c.gradient_bar,
+            if c.gradient_pass { "pass" } else { "**FAIL**" },
+        );
+    }
+    let _ = write!(
+        out,
+        "\nAnd the same reading on every other column of the board, computed and \
+**not** gated, because a number that is not on the page is a dimension nobody \
+is scoring:\n\n\
+| metric | window | gradient /semitone | recording | error | bar |\n\
+|---|---|--:|--:|--:|--:|\n"
+    );
+    for c in columns
+        .iter()
+        .filter(|c| !c.gated_on_gradient && c.window == melody::Window::Head)
+    {
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | {:+.3} | {:+.3} | {:.3} | {:.3} |",
+            c.metric,
+            c.window.name(),
+            c.gradient,
+            c.reference_gradient,
+            c.gradient_error,
+            c.gradient_bar,
         );
     }
     let _ = write!(

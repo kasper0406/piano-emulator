@@ -68,7 +68,28 @@ pub const MIC_HEIGHT_M: (f32, f32) = (0.02, 3.0);
 pub const MIC_SPAN_M: (f32, f32) = (0.05, 3.0);
 
 /// Bounds on the two dimensionless trims, `width` and `diffuse_coherence`.
-pub const MIC_WIDTH: (f32, f32) = (0.0, 2.0);
+///
+/// **`width`'s ceiling is 0.3 and it is the owner's, not a fit's**
+/// (`DECISIONS.md` 485). Shown a ladder of instruments differing in nothing but
+/// this number, rendered from a pair with the polarization spread zeroed and
+/// the source extent fitted, the owner named the effect and sized it: *"It
+/// should be 0.3 or less for sure. This effect shouldn't be dominating at
+/// all."* The effect is what `width` scales — the geometric difference signal,
+/// which is where a key's position along the string band becomes an
+/// interchannel level difference, so the bass comes out of one loudspeaker and
+/// the treble out of the other, steadily, all the way up the compass.
+///
+/// It was **2.0** from `DECISIONS.md` 351 to 484 and the preset that shipped
+/// through those items sat at **1.632**, which is why this is a rail and not a
+/// bar: a bar says *this instrument is too far off*, and the whole content of
+/// the verdict is that instruments above 0.3 are not ones this repository
+/// builds. `Preset::validate` refuses them by name, `Knob::Width`'s search
+/// bound stops there, and `melody`'s `gradient` column
+/// (`estimate::melody::METRIC_IS_GRADIENT`) is the statistic that reads the
+/// effect the ceiling exists to hold down. A preset written before item 485
+/// with a larger `width` is refused rather than clamped; it has to be refitted
+/// under the rail, which is what item 486 does to the one in this tree.
+pub const MIC_WIDTH: (f32, f32) = (0.0, 0.3);
 pub const MIC_DIFFUSE_COHERENCE: (f32, f32) = (0.25, 8.0);
 
 /// Bound on [`MicVoicing::source_extent_m`], metres: how long a line the key's

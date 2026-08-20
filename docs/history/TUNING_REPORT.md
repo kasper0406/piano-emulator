@@ -305,6 +305,19 @@ Three readings:
 > within 4.5 and 0.4 dB of the recordings. Backlog item 5's cost line ("the level is a coupling parameter,
 > `resonance.rs`") is therefore wrong and is corrected below. `DECISIONS.md` 184.
 
+> **Update (halo-column milestone, `DECISIONS.md` 500-506). The column above is not a target and
+> now has a replacement.** The review pass immediately above got the *direction* right and the
+> *instrument* wrong. Re-measured with the bus **and** the segments removed, so that there is
+> provably no sympathetic path in the render at all: on a 341 ms window C6 reads **−47.70 with no
+> halo and −47.62 with the shipped one**, and C7 **−38.95 and −38.08** — 0.08 and 0.87 dB
+> of daylight, against recordings of the same two keys at −19.89 and −18.55. The whole mechanism
+> this section exists to size moves this column by less than a decibel, so no fit closed on it was
+> ever closing on the halo. `estimate::halo::salamander_targets`' three `between` rows are gone and
+> the halo is scored where §5 recorded it — **alone** — by `tuner/tests/halo.rs`. §5's own two rows
+> were wrong too, by 8-9 dB: a release recording pays `rt_decay` for the hold it was taken after and
+> `harmLC3` = −31 / `harmLC5` = −39 did not, where the same files with a one-second hold paid read
+> **−39.74 and −44.52**. `DECISIONS.md` 500-501.
+
 ### Phantom partials: confirmed, quadratic, and quiet
 
 `f_i + f_j` stands flat of transverse partial `i+j` by only `3 f0 B i j (i+j) / 2` hertz, which for

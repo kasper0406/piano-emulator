@@ -319,7 +319,7 @@ pub const ALLOWANCE: f64 = 1.25;
 
 /// How many columns this board carries. Every per-metric table below is this
 /// long and [`NoteTexture::values`] returns this many numbers.
-pub const METRIC_COUNT: usize = 10;
+pub const METRIC_COUNT: usize = 11;
 
 /// Names in the order [`NoteTexture::values`] returns them.
 pub const METRICS: [&str; METRIC_COUNT] = [
@@ -333,6 +333,7 @@ pub const METRICS: [&str; METRIC_COUNT] = [
     "comb",
     "cue",
     "loudness",
+    "gradient",
 ];
 
 /// Which of [`METRICS`] is a **balance**: scored against the recording's own
@@ -361,7 +362,7 @@ pub const METRICS: [&str; METRIC_COUNT] = [
 /// own and never against nought — and because that is what makes the reference
 /// and layer rows be measured at all.
 pub const METRIC_IS_BALANCE: [bool; METRIC_COUNT] = [
-    false, false, false, true, true, true, true, true, true, true,
+    false, false, false, true, true, true, true, true, true, true, true,
 ];
 
 /// Which of [`METRICS`] takes its **balance** over the line's own five pitches
@@ -412,7 +413,7 @@ pub const METRIC_IS_BALANCE: [bool; METRIC_COUNT] = [
 /// approximation of unknown size, and it is why the column is scored on the
 /// tune at all.
 pub const METRIC_ON_LINE: [bool; METRIC_COUNT] = [
-    false, false, false, false, false, false, true, true, true, false,
+    false, false, false, false, false, false, true, true, true, false, false,
 ];
 
 /// Which of [`METRICS`] is additionally gated on the **line's own spread**: how
@@ -447,7 +448,7 @@ pub const METRIC_ON_LINE: [bool; METRIC_COUNT] = [
 /// instead, which are the two halves of "the line's slope and swing against the
 /// recording's own".
 pub const METRIC_IS_SPREAD: [bool; METRIC_COUNT] = [
-    true, true, true, false, false, true, true, false, false, false,
+    true, true, true, false, false, true, true, false, false, false, false,
 ];
 
 /// Which of [`METRICS`] is scored against a **neutral image** — flat, centred,
@@ -489,7 +490,7 @@ pub const METRIC_IS_SPREAD: [bool; METRIC_COUNT] = [
 /// still printed on every line of the report, and still what
 /// `the_recordings_own_line_passes_the_balance_column` reads.
 pub const METRIC_IS_NEUTRAL: [bool; METRIC_COUNT] = [
-    false, false, false, false, false, true, true, true, false, false,
+    false, false, false, false, false, true, true, true, false, false, true,
 ];
 
 /// What `DECISIONS.md` 340's refit moved `[noise.strike]` by, kept here so that
@@ -524,6 +525,9 @@ pub const CUE_METRIC: usize = 8;
 /// The index of `loudness` in [`METRICS`].
 pub const LOUDNESS_METRIC: usize = 9;
 
+/// The index of `gradient` in [`METRICS`].
+pub const GRADIENT_METRIC: usize = 10;
+
 /// Which of [`METRICS`] takes its verdict on the **seam** — how far the
 /// engine's distance from one recorded key departs from the register's median
 /// distance — rather than on that median itself.
@@ -548,7 +552,7 @@ pub const LOUDNESS_METRIC: usize = 9;
 /// and therefore the smallest per-key level difference this library can resolve
 /// — times [`ALLOWANCE`]. It is not a bar anyone chose.
 pub const METRIC_IS_SEAM: [bool; METRIC_COUNT] = [
-    false, false, false, false, false, false, false, false, false, true,
+    false, false, false, false, false, false, false, false, false, true, false,
 ];
 
 /// Which of [`METRICS`] takes a verdict on the **slope of the line** —
@@ -568,7 +572,7 @@ pub const METRIC_IS_SEAM: [bool; METRIC_COUNT] = [
 /// tilt the piano itself does not hold to, and a bar of the recording's own
 /// slope alone would go to nothing wherever the recording happened to be flat.
 pub const METRIC_IS_SLOPE: [bool; METRIC_COUNT] = [
-    false, false, false, false, false, false, false, true, false, false,
+    false, false, false, false, false, false, false, true, false, false, false,
 ];
 
 /// Which of [`METRICS`] takes a verdict on the **swing of the line**: the
@@ -583,7 +587,7 @@ pub const METRIC_IS_SLOPE: [bool; METRIC_COUNT] = [
 /// trend, which is what [`METRIC_IS_SPREAD`] already is and what cannot see a
 /// ramp at all.
 pub const METRIC_IS_SWING: [bool; METRIC_COUNT] = [
-    false, false, false, false, false, false, false, true, false, false,
+    false, false, false, false, false, false, false, true, false, false, false,
 ];
 
 /// Which of [`METRICS`] takes a verdict on a **physical bound**: the largest
@@ -615,7 +619,7 @@ pub const METRIC_IS_SWING: [bool; METRIC_COUNT] = [
 /// rather than a statistic of the line, the largest `|value|` over the scored
 /// notes *is* the per-note test.
 pub const METRIC_IS_BOUND: [bool; METRIC_COUNT] = [
-    false, false, false, false, false, false, false, false, true, false,
+    false, false, false, false, false, false, false, false, true, false, false,
 ];
 
 /// Which of [`METRICS`] takes a verdict on **agreement with the level cue**:
@@ -656,7 +660,64 @@ pub const METRIC_IS_BOUND: [bool; METRIC_COUNT] = [
 /// is printed and not gated, which is the honest reading of a line whose notes
 /// are all in the middle.
 pub const METRIC_IS_AGREEMENT: [bool; METRIC_COUNT] = [
-    false, false, false, false, false, false, false, false, true, false,
+    false, false, false, false, false, false, false, false, true, false, false,
+];
+
+/// Which of [`METRICS`] takes a verdict on the **gradient**: the slope of the
+/// note's own image position against **key**, over the recorded ladder.
+///
+/// **`DECISIONS.md` 485, and it is the owner's own statistic.** Shown a width
+/// ladder rendered from the neutral base, the owner named the effect and sized
+/// it: *"It should be 0.3 or less for sure. This effect shouldn't be dominating
+/// at all."* The effect is the pan law read through a spaced pair — a key's
+/// position along the string band becomes an interchannel level difference, so
+/// the bass comes out of the left loudspeaker and the treble out of the right,
+/// steadily, all the way up the compass. Nothing on this board read it.
+///
+/// **Why nothing read it, in the shape `CONTEXT.md`'s standing rule keeps
+/// taking.** `balance` is a median magnitude over the recorded ladder, and a
+/// *ramp* about the ladder's own centre has median zero — the same arithmetic
+/// item 459 wrote `comb`'s slope for, one register lower and at the
+/// fundamental rather than at the overtones. `comb`'s slope *is* a slope, and
+/// it is taken over the **tune**: five semitones, which at the recording's own
+/// gradient is 1.4 dB and inside every bar on the board. `cue` is a time and
+/// `channel` is a sum. So the one statistic that reads what the owner heard is
+/// a slope in key over the **compass**, and this is it: `comb` and `balance`
+/// read the tune, this reads the ladder.
+///
+/// The statistic is the Theil-Sen slope of [`NoteTexture::lean_db`] — the
+/// note's whole broadband `10 log10(E_L / E_R)` — against that key's MIDI
+/// number, in dB per semitone, over the nine keys of the recorded ladder (D#3
+/// to D#5, two octaves). Pairwise-median for the reason [`theil_sen`] is used
+/// everywhere on this board: one key sitting on a nodal line must not tilt the
+/// line through the other eight. Its target is **zero**, with the rest of the
+/// image columns ([`METRIC_IS_NEUTRAL`], item 466): a neutral image does not
+/// walk across the loudspeakers as the pitch rises.
+///
+/// **It is broadband and not at the fundamental, and that is a measurement
+/// rather than a preference.** The obvious reading — the same slope of
+/// `balance`, which is this ratio at the note's own `f0` — was built first and
+/// refused: it is not monotone in `width`, because at one frequency the ratio
+/// is a function of the interchannel *phase* the path difference put there and
+/// of whatever band-shaped mechanism the preset carries at that pitch. See
+/// [`NoteTexture::lean_db`] for the six-point ladder that refused it. A gate on
+/// a mechanism has to be monotone in that mechanism, and this one is.
+///
+/// **The bar is the recording's own gradient plus how far that gradient moves
+/// between two takes of it**, times [`ALLOWANCE`] — the two-term form
+/// [`METRIC_IS_SLOPE`] already uses and for its reasons verbatim: a bar of the
+/// take floor alone would ask the engine to be flatter than the instrument the
+/// target was read off, and a bar of the recording's own gradient alone would
+/// go to nothing wherever the recording happened to be level.
+///
+/// **And the owner's number is a schema rail rather than a bar**
+/// ([`piano_emulator::soundboard::MIC_WIDTH`]): `width > 0.3` is a preset
+/// `Preset::validate` refuses, so no fit can propose one and no hand-edit can
+/// install one. A bar says *this instrument is too far off*; a rail says *that
+/// instrument is not one this repository builds*, which is what a verdict from
+/// the owner about how loud a mechanism may be actually is.
+pub const METRIC_IS_GRADIENT: [bool; METRIC_COUNT] = [
+    false, false, false, false, false, false, false, false, false, false, true,
 ];
 
 /// The largest interchannel time difference a head can produce, in microseconds
@@ -682,6 +743,28 @@ pub const HEAD_ITD_US: f64 = 660.0;
 /// wherever `Re B > 0` the band is not a widener but a **pan**, and over this
 /// span it pans the tune's fundamentals into the left loudspeaker.
 pub const M17_MODAL_BAND: (f32, f32, f32) = (174.264_39, 456.491_46, 0.99);
+
+/// **The `voicing.mics.width` the measured preset carried from `DECISIONS.md`
+/// 418 to 484**, kept here for the reason [`M17_MODAL_BAND`] and
+/// [`STRIKE_REFIT_LEVEL_DB`] are: so that the instrument the `gradient` column
+/// fails on can be built from whatever preset ships, without a hand-edited
+/// file.
+///
+/// It is above `soundboard::MIC_WIDTH`'s ceiling since item 485, so an
+/// instrument built from it is one `Preset::validate` **refuses** — which is
+/// the other half of what
+/// `the_gradient_gate_fails_on_the_width_that_shipped` asserts.
+pub const WIDTH_BEFORE_D485: f32 = 1.631_911_9;
+
+/// **The `voicing.polarization_pan_spread` the measured preset carried from
+/// `DECISIONS.md` 279 to 486**, kept for [`WIDTH_BEFORE_D485`]'s reason: item
+/// 487 retired it, so the instrument item 467's falsification convicts has to
+/// be built by putting it *back*.
+///
+/// Unlike the width it is still a legal value — the mechanism is not railed
+/// away, only unused by the preset that ships — so the falsification's
+/// instrument passes `Preset::validate`.
+pub const SPREAD_BEFORE_D487: f32 = 0.4;
 
 // ---------------------------------------------------------------------------
 // The line
@@ -1004,6 +1087,35 @@ pub struct NoteTexture {
     /// is scored against the recording's own values and against physics
     /// ([`HEAD_ITD_US`]) rather than against nought.
     pub cue_us: f64,
+    /// **Which loudspeaker the *note* comes out of**: `10 log10(E_L / E_R)`
+    /// over the note's whole window, broadband, in dB. Positive is a left lean.
+    ///
+    /// `DECISIONS.md` 485, and it is the eleventh reading on this board because
+    /// it is the one the owner's complaint is about. [`NoteTexture::balance_db`]
+    /// is this ratio at **one frequency** — the note's own fundamental — and
+    /// that frequency is where every band-shaped mechanism in the tree lives:
+    /// on the instrument that ships, `[voicing.mics.modal]`'s 174.3-456.5 Hz
+    /// brackets six of the nine recorded ladder keys' fundamentals and none of
+    /// the other three's, so the ladder's `balance` is a scramble whose
+    /// key-slope moves **±0.2 dB per semitone with nothing but the band's comb
+    /// phase** and is not monotone in `width` at all (measured: −0.161, −0.184,
+    /// −0.286, −0.112, −0.075, −0.083 at widths 1.632 down to 0.1). A statistic
+    /// that is not monotone in the mechanism it is meant to bound is not a gate
+    /// on that mechanism, whatever it is a good measurement of.
+    ///
+    /// Broadband it is monotone by construction and the arithmetic says why.
+    /// `L = mid + side` and `R = mid − side` with `side` scaled by `width`, so
+    /// at any one frequency the ratio depends on the interchannel *phase* the
+    /// path difference put there — a comb — while summed over a note's whole
+    /// spectrum the comb averages and what is left is the pan law: the key's
+    /// own position along the string band, times `width`. That is the effect
+    /// the owner named and the one `width` scales.
+    ///
+    /// It is not [`NoteTexture::channel_db`] read another way: `channel` is
+    /// `E_L + E_R` against the mono fold-down, symmetric under swapping the two
+    /// loudspeakers, and it cannot see a lean at all — which is
+    /// `DECISIONS.md` 446's finding, one register wider.
+    pub lean_db: f64,
 }
 
 impl NoteTexture {
@@ -1019,6 +1131,7 @@ impl NoteTexture {
             self.comb_db,
             self.cue_us,
             self.loudness_db,
+            self.lean_db,
         ]
     }
 }
@@ -1134,6 +1247,15 @@ pub fn measure_line(
                         sample_rate,
                     ),
                 },
+                lean_db: match stereo {
+                    // One channel is its own pair and leans nowhere, which is
+                    // the convention every other stereo reading here takes.
+                    None => 0.0,
+                    Some((left, right)) => broadband_lean_db(
+                        &left[lo.min(left.len())..hi.min(left.len())],
+                        &right[lo.min(right.len())..hi.min(right.len())],
+                    ),
+                },
                 cue_us: match (stereo, hz.first()) {
                     // One channel is its own pair, and a pair that is one
                     // signal twice arrives at both loudspeakers at once — the
@@ -1205,6 +1327,26 @@ fn a_weight(f: f64) -> f64 {
 /// they are, which is what a side signal is; and every mono board in this
 /// repository is a function of that fold-down, so this is precisely the part
 /// none of them can see.
+/// `10 log10(E_L / E_R)` over the whole window: **which loudspeaker the note
+/// comes out of**, broadband, positive for a left lean.
+///
+/// [`NoteTexture::lean_db`], `DECISIONS.md` 485. Deliberately not heterodyned
+/// and deliberately not weighted: [`fundamental_balance_db`] and
+/// [`overtone_image_db`] already read this ratio at a frequency and over a set
+/// of partials, and both of them are functions of the interchannel *phase* the
+/// pair's path difference puts at that frequency — a comb. This one is the
+/// energy a loudspeaker actually radiates for this note against the energy the
+/// other one does, which is the quantity a per-key pan law writes and the one a
+/// listener localises a whole note by.
+pub fn broadband_lean_db(left: &[f32], right: &[f32]) -> f64 {
+    let energy = |s: &[f32]| s.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>();
+    let (l, r) = (energy(left), energy(right));
+    if !l.is_finite() || !r.is_finite() || l <= 0.0 || r <= 0.0 {
+        return f64::NAN;
+    }
+    10.0 * (l / r).log10()
+}
+
 pub fn pair_over_mono_db(left: &[f32], right: &[f32], mono: &[f32]) -> f64 {
     let energy = |s: &[f32]| s.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>();
     let (pair, mid) = (energy(left) + energy(right), energy(mono));
@@ -1823,6 +1965,26 @@ pub struct Column {
     /// Whether [`Column::balance`] is the engine's own image against a neutral
     /// target rather than its distance from the recording's.
     pub neutral_target: bool,
+
+    // --- the compass's own tilt: the gradient (`DECISIONS.md` 485) ----------
+    /// Whether this column is gated on [`Column::gradient_error`] — see
+    /// [`METRIC_IS_GRADIENT`].
+    pub gated_on_gradient: bool,
+    /// The Theil-Sen slope of the **engine's** value against key over the
+    /// **recorded ladder**, dB per semitone. Positive means the treble leans
+    /// further left than the bass does.
+    pub gradient: f64,
+    /// The same slope on the recordings' ladder, and on their neighbouring
+    /// velocity layer.
+    pub reference_gradient: f64,
+    pub layer_gradient: f64,
+    /// `|gradient − target|`, the target being zero on a neutral column
+    /// (`METRIC_IS_NEUTRAL`) and the recording's own gradient elsewhere.
+    pub gradient_error: f64,
+    /// What that has to come in under: the recording's own gradient plus how
+    /// far it moves between two takes of it, times [`ALLOWANCE`].
+    pub gradient_bar: f64,
+    pub gradient_pass: bool,
 }
 
 impl Column {
@@ -2299,7 +2461,7 @@ pub fn compare(
             // what a flag decides is which of them the gate asserts.
             let names_another_statistic =
                 gated_on_seam || gated_on_slope || gated_on_swing || gated_on_bound
-                    || gated_on_agreement;
+                    || gated_on_agreement || METRIC_IS_GRADIENT[m];
             let gated_on_balance = METRIC_IS_BALANCE[m] && !names_another_statistic;
             let gated_on_spread = METRIC_IS_SPREAD[m];
             let balance_pass = balance.abs() <= balance_bar;
@@ -2329,6 +2491,45 @@ pub fn compare(
             let seam_bar = seam_floor.max(seam_spread) * ALLOWANCE;
             let seam_pass = seam <= seam_bar;
 
+            // ---- the compass's own tilt (`DECISIONS.md` 485) ---------------
+            //
+            // The same Theil-Sen slope `slope_of` takes over the tune, taken
+            // over the **recorded ladder** instead, which is the whole
+            // difference between a statistic that reads five semitones and one
+            // that reads two octaves. It is computed for every column and
+            // asserted only where `METRIC_IS_GRADIENT` names one, exactly as
+            // the other four line statistics are.
+            let ladder_slope_of = |rows: &[(u8, [f64; METRIC_COUNT])]| -> f64 {
+                let points: Vec<(f64, f64)> = rows
+                    .iter()
+                    .map(|&(k, v)| (f64::from(k), v[m]))
+                    .filter(|p| p.1.is_finite())
+                    .collect();
+                if points.len() < 2 {
+                    return f64::NAN;
+                }
+                theil_sen(&points).0
+            };
+            let (gradient, reference_gradient, layer_gradient) = (
+                ladder_slope_of(&population.engine),
+                ladder_slope_of(&population.reference),
+                ladder_slope_of(&population.layer),
+            );
+            // Zero on a neutral column — a still image does not walk across the
+            // loudspeakers as the pitch rises — and the recording's own tilt
+            // everywhere else, which is `slope_target`'s rule verbatim.
+            let gradient_target = if METRIC_IS_NEUTRAL[m] {
+                0.0
+            } else {
+                reference_gradient
+            };
+            let gradient_error = (gradient - gradient_target).abs();
+            let gradient_bar = (reference_gradient.abs()
+                + (reference_gradient - layer_gradient).abs())
+                * ALLOWANCE;
+            let gradient_pass = within(gradient_error, gradient_bar);
+            let gated_on_gradient = METRIC_IS_GRADIENT[m];
+
             Column {
                 metric,
                 window,
@@ -2341,7 +2542,8 @@ pub fn compare(
                     && (!gated_on_slope || slope_pass)
                     && (!gated_on_swing || swing_pass)
                     && (!gated_on_bound || bound_pass)
-                    && (!gated_on_agreement || agreement_pass),
+                    && (!gated_on_agreement || agreement_pass)
+                    && (!gated_on_gradient || gradient_pass),
                 notes,
                 population: population_rows,
                 standout,
@@ -2398,6 +2600,13 @@ pub fn compare(
                 cue_is_readable,
                 balance_vs_reference,
                 neutral_target: METRIC_IS_NEUTRAL[m],
+                gated_on_gradient,
+                gradient,
+                reference_gradient,
+                layer_gradient,
+                gradient_error,
+                gradient_bar,
+                gradient_pass,
             }
         })
         .collect()
@@ -2581,6 +2790,22 @@ pub fn report(columns: &[Column]) -> String {
             c.ild_swing,
             c.ild_floor,
             verdict(c.gated_on_agreement && c.cue_is_readable, c.agreement_pass),
+        );
+        // **The compass's own tilt** (`DECISIONS.md` 485), printed for every
+        // column for the same reason and asserted only on `gradient`. It is a
+        // slope over the *ladder*, so it is on its own line rather than beside
+        // the four that are slopes over the tune.
+        let _ = writeln!(
+            out,
+            "{:<15}   gradient {:+7.3}/sm over the ladder (rec {:+.3}, layer {:+.3}) \
+err {:6.3} bar {:5.3}{}",
+            "",
+            c.gradient,
+            c.reference_gradient,
+            c.layer_gradient,
+            c.gradient_error,
+            c.gradient_bar,
+            verdict(c.gated_on_gradient, c.gradient_pass),
         );
         let _ = writeln!(
             out,

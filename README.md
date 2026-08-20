@@ -299,6 +299,60 @@ cargo run --release -p piano-tuner -- stereo  # the stereo A/B into renders/ster
 cargo run --release -p forensics --bin verify_milestone_b -- [old-preset.toml]
 ```
 
+### Another piano: the library adapter
+
+The factory is not Salamander-shaped any more. What a sample library *is* —
+which keys it genuinely recorded, how many velocity layers and where their
+bands sit, the rate it was published at, how a file names its key, and where
+its key-off thumps and pedal actions are — is one `LibrarySpec` per library in
+`tuner/src/adapter.rs`, and `piano-tuner adapt` turns a downloaded tree into a
+measurement input from it. Two jobs, both once per library rather than once per
+fit: it **writes the instrument definition** a library does not ship (bitKlavier
+ships none; VCSL ships one that re-levels its own layers and carries −47 cents
+of bad pitch detection, so it is kept and not read), and it **brings a tree
+published at another rate onto the engine's clock** in one offline pass of the
+crate's own band-limited sinc resampler, so the boundary resampler is not
+inside every subsequent measurement of that preset.
+
+Salamander is the first `LibrarySpec` and is deliberately the one nothing is
+generated for: it ships its own map, every bar in this repository was measured
+through that map, and `adapt salamander` refuses. Its description exists to be
+falsified against the shipped file
+(`adapter::tests::the_salamander_description_agrees_with_the_shipped_sfz`), and
+`tuner/tests/adapter.rs::the_salamander_reference_render_is_bit_exact` pins an
+FNV-1a hash of the sampler's render of all six benchmark phrases so that no
+adapter change can move the reference the boards are barred against.
+
+```sh
+piano-tuner adapt --list                      # the libraries described here
+data/fetch_bitklavier.sh                      # 2.59 GiB, md5+sha1+sha256 checked
+data/fetch_vcsl_knight_upright.sh             # 625 MiB, sha256 pinned at first fetch
+```
+
+Then the same seven stages, pointed at the new tree — the boards' bars come
+from **that library's own** take-to-take floors, because each preset is scored
+against its own recordings and never against another piano's:
+
+```sh
+piano-tuner survey data/bitklavier-piano-bar/bitklavier-piano-bar.sfz \
+    --preset presets/default.toml --cache data/cache/bitklavier \
+    --name concert-grand-d --out presets/concert-grand-d.toml --credit '...'
+piano-tuner sympathetic  data/bitklavier-piano-bar/bitklavier-piano-bar.sfz ...
+piano-tuner fit          data/bitklavier-piano-bar/bitklavier-piano-bar.sfz ...
+piano-tuner tail         data/bitklavier-piano-bar presets/concert-grand-d.toml ...
+piano-tuner noise        data/bitklavier-piano-bar presets/concert-grand-d.toml ...
+piano-tuner mics         data/bitklavier-piano-bar presets/concert-grand-d.toml ...
+piano-tuner level        data/bitklavier-piano-bar presets/concert-grand-d.toml ...
+piano-tuner bench        data/bitklavier-piano-bar renders/realism-grand presets/concert-grand-d.toml
+piano-tuner compass      data/bitklavier-piano-bar renders/compass-grand presets/concert-grand-d.toml
+piano-tuner listen       data/bitklavier-piano-bar presets/concert-grand-d.toml
+```
+
+`listen` is the per-preset listening material: the melody line and a pedalled
+chord phrase, engine and **that library's own** recordings, each normalised
+separately, into `renders/<preset>/` with a `README.md` naming which of the
+tune's keys are genuine takes and which are the library's resampler.
+
 `verify_milestone_b` — a `forensics/` instrument, built on demand — re-measures
 the sympathetic milestone from rendered audio
 with the same code the recordings are measured with — the spectrum census, the
@@ -505,6 +559,30 @@ Where a history document and `DECISIONS.md` disagree, the log wins.
   of the engine's own distance, on how much of "the reference" at those keys is
   the resampler.
 - **Brilliance** has no standing report, because the audit that measured it (`DECISIONS.md` 292-295) moved nothing: `cargo run --release -p piano-tuner -- brilliance` prints, per key and per phrase, how much 2-6 kHz and 6-12 kHz energy the engine carries against the recording of the same note at 0.1 s and at 1 s, each against the reference's own velocity-layer spread. It exists because `COMPASS.md`'s `centroid` is a mean *partial index* and the ear's brightness is absolute. It refused the top octave's decay (the recording's late energy there is its room, 20-30 dB over the note's own partial), acquitted the master shelf on its measured leverage, and convicted the partial envelope above the fitted rows — an error in partial *number* rather than in frequency, and one whose fix is a decay re-fit rather than a filter. The measurements are in `tuner/src/estimate/brilliance.rs`.
+### The preset range
+
+Every measured preset here is **parameters estimated from recordings of a real
+piano**; the recordings are never redistributed (`ATTRIBUTION.md`), and preset
+names are **descriptive rather than brand names** — the instrument, the
+library, the author and the licence live in `ATTRIBUTION.md` and in the
+preset's own `description` field.
+
+| preset | instrument | library | licence | shape |
+|---|---|---|---|---|
+| `presets/default.toml` | — | — | — | the hand-tuned v1 instrument, written out in full |
+| `presets/salamander-c5.toml` | Yamaha C5 grand | Salamander Grand Piano V3 (Alexander Holm) | CC BY 3.0 | 30 keys at minor thirds, 16 layers, 48 kHz native |
+| `presets/concert-grand-d.toml` | Steinway D concert grand, Taplin Auditorium, Princeton | bitKlavier Grand Sample Library, Piano Bar image (Daniel Trueman) | CC BY 4.0 | 30 keys at minor thirds, 16 layers, 48 kHz native |
+| `presets/upright-parlour.toml` | Knight upright | VCSL "Upright Piano, Knight" (Versilian Studios / Simon Dalzell) | CC0 1.0 | 45 keys at whole tones + C8, 2 layers, resampled 44.1 → 48 kHz at fetch |
+
+The two new presets carry **five of the seven factory stages** — survey,
+sympathetic, fit, tail, level. `noise` refuses on both libraries (its inversion
+rails: their mechanism recordings sit far louder against their own note than
+Salamander's attenuated key-off group) so `[noise.strike]` is inherited from the
+default and is not a measurement of either piano, and `mics` has no
+`[voicing.mics]` section to move, so both ship with the engine's pan-pot rather
+than a fitted capsule pair. `DECISIONS.md` 528-530 has the numbers and the
+reasons; neither was forced.
+
 - `presets/default.toml` — the hand-tuned v1 instrument, written out in full.
 - `presets/salamander-c5.toml` — the same instrument with everything stage 1 could measure off a real Yamaha C5 written into it. Its `notes.partial_gains` and `notes.false_beat` tables now cover the whole compass: 28 keys measured against their own recordings and 50 **drawn** from those keys' distributions, named in `notes.synthesized_texture` (`DECISIONS.md` 284-291, 300). Both halves of a drawn key are closed on the **render** — the row against the recordings' own roughness of that register, the splits against their own beat depth — which is what a fitted key's row and a fitted key's splits are each closed against too.
 
@@ -516,13 +594,24 @@ key and no in-app purchase anywhere in the plan, which is why
 they are still an accurate account of what the Mac App Store requires of anyone
 who does charge.
 
-The **recordings** the measured preset was estimated from are not MIT and are
-not distributed here: the Salamander Grand Piano V3 is CC-BY 3.0 by Alexander
-Holm, credited in `ATTRIBUTION.md`, in `presets/salamander-c5.toml`'s own
-`description` field, and by the fetch script that downloads it. What ships in
-this repository is the *parameters* estimated from those recordings, not the
-audio. Any future library the pipeline is pointed at has to be recorded in
-`ATTRIBUTION.md` before its numbers ship in a preset.
+The **recordings** the measured presets were estimated from are not MIT and are
+not distributed here — none of them, in any form, whole or excerpted. The
+Salamander Grand Piano V3 is CC BY 3.0 by Alexander Holm; the bitKlavier Grand
+Sample Library is CC BY 4.0 by Daniel Trueman of Princeton University; VCSL's
+Knight upright is CC0 1.0 by Versilian Studios LLC, sampled by Simon Dalzell.
+Each is credited in `ATTRIBUTION.md`, in its preset's own `description` field,
+and by the fetch script that downloads it. What ships in this repository is the
+*parameters* estimated from those recordings, not the audio.
+
+**The rule is tested rather than remembered.** Any library the pipeline is
+pointed at has its licence, its licence URL and its source recorded in
+`ATTRIBUTION.md` **and** in its fetch script before its numbers ship in a
+preset, and `tuner/tests/adapter.rs` fails if either is missing or if a preset
+file does not carry its own provenance. `ATTRIBUTION.md` also records the
+libraries that were examined and **refused** — unverifiable public-domain
+claims, all-rights-reserved soundfonts, and one otherwise-ideal Steinway
+library whose own page prohibits redistribution — so that ground is not walked
+twice.
 
 ## Live input
 
