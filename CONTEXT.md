@@ -61,7 +61,21 @@ instrument. MIT, free, open source; App Store via AUv3 planned
 - `presets/`, `data/` (gitignored, fetch scripts checked in), `renders/`
   (gitignored), `docs/history/` (superseded investigation records).
 
-## The preset range and the library adapter (D516-530)
+## The preset range and the library adapter (D516-532)
+
+**The decay gate (D532).** The survey's prompt-decay fit refuses a fast
+component whose whole 60 dB fall fits inside one envelope hop
+(`survey::MIN_PROMPT_HOPS` — a rate the envelope never sampled is the window,
+not the string). The VCSL G5's vl1 layer carried one such slack term (60 dB in
+6.6 µs against a 5.3 ms hop, 1.8e-4 of the strike amplitude) and wrote
+`sigma1` = 3750 into three keys of `upright-parlour`, which thunked dead in
+milliseconds and left their duplex segments ringing naked — the owner heard it
+as a very high-frequency side-effect. The preset is regenerated through the
+factory with the gate in (nothing hand-edited; the un-gated chain reproduces
+the shipped file, so the diff is the fix's footprint), and
+`forensics/src/bin/prompt_rates` is the instrument. `piano-tuner estimate`
+cannot see this class of defect: its fixed 65536-sample window is not the
+survey's per-note geometry.
 
 **Three measured pianos, one factory.** `salamander-c5` (Yamaha C5, CC BY 3.0),
 `concert-grand-d` (Steinway D concert grand, bitKlavier Grand "Piano Bar"
@@ -342,6 +356,9 @@ number: the side energy the owner's verdict spent.**
   gates self-skip). Full `cargo test --release --workspace` at most twice per
   agent, at phase ends. Since D463 the suite is **green / 0 failed**:
   **771 passed / 0 failed / 9 ignored** at D488, against 735 / 0 / 9 before it.
+  At D532 the suite is still green with one test added (the decay gate's
+  falsification): 743 / 0 / 37 in the dev profile, where the release-only
+  gates count as ignored rather than passed — the same 780 tests plus one.
   The remaining known gaps are `#[ignore]`d with their decision number in the
   reason string and `cargo test -- --ignored` runs the inventory on demand.
   **Six, and the inventory turned over at D485-488**: D446's `balance`, D451's

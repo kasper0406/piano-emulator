@@ -670,15 +670,56 @@ impl Survey {
     }
 }
 
+/// Envelope hops a prompt decay has to last before its rate is a measurement.
+///
+/// The other side of [`DecayConfig::max_t60_ratio`], and it was missing. That
+/// one refuses a fast component too *slow* to have finished inside the record;
+/// this one refuses one too *fast* to have been sampled at all. The degenerate
+/// direction is not hypothetical: the envelope's first frame is timestamped
+/// half a window after the strike, so a component steep enough to be spent
+/// before it costs the residual nothing whatever rate it is given, and the fit
+/// will hand it any rate at all — the same degeneracy
+/// [`DecayConfig::max_extrapolation_db`] names, arriving through the rate
+/// instead of the amplitude, where nothing was watching for it.
+///
+/// One hop, because that is the whole of the claim: an envelope sampled every
+/// `span_s / points` seconds cannot report a 60 dB fall that happened inside
+/// one of its own samples. It has to exclude `upright-parlour`'s G5, whose vl1
+/// layer came back with a seventh partial decaying 60 dB in **6.6
+/// microseconds** against a 5.3 ms hop — 0.0012 of a hop, and a `sigma1` of
+/// 8763 out of that layer alone. It has to admit every genuine treble prompt on
+/// the same material, and the tightest of those is 0.372 s over a 5.3 ms hop,
+/// which is **70** hops. Seventy against a thousandth is why the constant is
+/// not delicate and why it is not tuned: anything from 0.01 to 10 draws the
+/// same line, and 1 is the one that can be stated without a coefficient.
+const MIN_PROMPT_HOPS: f64 = 1.0;
+
+/// Whether this fit's fast component decayed slowly enough for the envelope to
+/// have watched it happen. See [`MIN_PROMPT_HOPS`].
+///
+/// A fit with no points has no resolution to compare against and no envelope
+/// behind it, so it is not a measurement either.
+fn resolvable_prompt(fit: &DecayFit) -> bool {
+    if fit.points == 0 || fit.span_s <= 0.0 {
+        return false;
+    }
+    // A non-finite span leaves a non-finite hop, and the comparison below is
+    // false against it — which is the right answer for a fit with no envelope.
+    let hop = fit.span_s / fit.points as f64;
+    LN_1000 / fit.fast.sigma >= MIN_PROMPT_HOPS * hop
+}
+
 /// `sigma0` and `sigma1` from the prompt rates of one recording's partials.
 ///
 /// The same weighted line as [`fit_decay_curve`](crate::estimate::decay), over
 /// a different ordinate: `fast.sigma / factor` instead of the partial's T60.
-/// See [`NoteSurvey::decay_curve`] for why. The guard is the same one that
-/// keeps an unmeasured T60 out of the curve, applied to the prompt rate — a
-/// partial whose prompt decay is slower than the record is long has not been
-/// seen decay either.
-fn prompt_decay_curve(
+/// See [`NoteSurvey::decay_curve`] for why. A rate is admitted only if the
+/// record can have *seen* it, and a record bounds a rate from both sides: it is
+/// only so long, and it is only sampled so finely.
+///
+/// Public only so that `forensics/src/bin/prompt_rates` can put the shipped
+/// arithmetic — not a paraphrase of it — under the per-partial table it prints.
+pub fn prompt_decay_curve(
     partials: &[DecayFit],
     factor: f64,
     config: &DecayConfig,
@@ -690,6 +731,7 @@ fn prompt_decay_curve(
         .iter()
         .filter(|fit| fit.frequency_hz > 0.0 && fit.fast.sigma > 0.0)
         .filter(|fit| LN_1000 / fit.fast.sigma <= config.max_t60_ratio * fit.span_s)
+        .filter(|fit| resolvable_prompt(fit))
         .map(|fit| ((fit.frequency_hz / 1000.0).powi(2), fit.fast.sigma / factor))
         .collect();
     if rates.len() < 2 {
@@ -944,9 +986,17 @@ mod tests {
     /// is all the aggregation needs to be exercised. Each layer's partials
     /// decay at `value` (its prompt rate) so that the medians can be checked
     /// through both the tuning and the damping.
+    ///
+    /// The point count follows the rate rather than being fixed, so that the
+    /// envelope this fixture describes could have *seen* what it claims to have
+    /// measured: `prompt_decay_curve`'s resolution guard refuses a rate whose
+    /// T60 is shorter than one hop, and a fixture that trips it would be
+    /// measuring the guard instead of the median it is here for. Ten points per
+    /// T60 is about what a survey has on a treble prompt.
     fn survey_of(values: &[f64]) -> NoteSurvey {
         use crate::estimate::decay::{DecayReport, Exponential, PolarizationSplit};
         use crate::estimate::inharmonic::InharmonicFit;
+        const SPAN_S: f64 = 60.0;
         let partials = |sigma: f64| {
             (1..=4)
                 .map(|k| DecayFit {
@@ -962,8 +1012,8 @@ mod tests {
                     },
                     beats: Default::default(),
                     residual_db: 0.0,
-                    points: 100,
-                    span_s: 60.0,
+                    points: (10.0 * SPAN_S * sigma / LN_1000).ceil().max(1.0) as usize,
+                    span_s: SPAN_S,
                 })
                 .collect()
         };
@@ -1073,6 +1123,124 @@ mod tests {
         let curve = prompt_decay_curve(&seen, 1.0, &config).unwrap();
         assert!((curve.sigma0 - 1.0).abs() < 1e-9, "{curve:?}");
         assert!(prompt_decay_curve(&seen[2..], 1.0, &config).is_none());
+    }
+
+    /// The vertical split `presets/default.toml` ships, which is the divisor
+    /// every prompt rate in the two tables below went through.
+    const G5_FACTOR: f64 = 2.645_930_712_580_517;
+
+    /// One row of `forensics/src/bin/prompt_rates`, in the order it prints
+    /// them: `(k, Hz, fast sigma, fast amplitude, slow sigma, slow amplitude,
+    /// span_s, points)`.
+    fn measured(row: (u32, f64, f64, f64, f64, f64, f64, usize)) -> DecayFit {
+        use crate::estimate::decay::Exponential;
+        let (k, hz, fast_sigma, fast_amp, slow_sigma, slow_amp, span_s, points) = row;
+        DecayFit {
+            k,
+            frequency_hz: hz,
+            fast: Exponential {
+                amplitude: fast_amp,
+                sigma: fast_sigma,
+            },
+            slow: Exponential {
+                amplitude: slow_amp,
+                sigma: slow_sigma,
+            },
+            beats: Default::default(),
+            residual_db: 0.0,
+            points,
+            span_s,
+        }
+    }
+
+    /// The defect `upright-parlour` shipped: `notes.sigma1` = 3750 at G5, five
+    /// orders of magnitude above every other value in every other preset, and a
+    /// note that thunks and leaves only its duplex segments ringing.
+    ///
+    /// These eight columns are the vl1 layer of the VCSL Knight upright's G5
+    /// (`Player_vl1_rr1_G4.wav`, MIDI 79) as `forensics/src/bin/prompt_rates`
+    /// measured them at the survey's own geometry — a 4096-sample window hopped
+    /// sixteen ways, which is what makes the seventh partial's fit degenerate
+    /// and is why `piano-tuner estimate`, at 65536, could never find this.
+    ///
+    /// Partial 7 is the whole of it. Its fast component holds **1.8e-4** of the
+    /// partial's initial amplitude — it is not a component, it is the fit using
+    /// a spare parameter to shave residual — and having no amplitude to
+    /// constrain it, its rate ran to `1.05e6 /s`: 60 dB in **6.6 microseconds**,
+    /// against an envelope sampled every 5.3 ms. At `(5.58 kHz)^2` on the
+    /// abscissa that one row decided the line, and the ungated arithmetic
+    /// returned **sigma0 0.0, sigma1 8762.965** — which the survey then
+    /// medianed with the healthy vl2 layer (this library has *two* velocity
+    /// layers, so a median of two is a mean) into the 3981.57 it wrote at MIDI
+    /// 79 and spread to 78 and 80.
+    #[test]
+    fn a_prompt_decay_shorter_than_the_envelopes_hop_is_not_in_the_damping_law() {
+        let config = DecayConfig::default();
+        let vl1: Vec<DecayFit> = [
+            (1, 786.284, 6.3368e-1, 5.2606e-3, 0.6337, 3.3546e-3, 10.021, 1779),
+            (2, 1570.518, 1.8137e0, 4.3742e-4, 0.0915, 4.0662e-6, 8.827, 850),
+            (3, 2383.635, 2.0379e0, 1.4593e-4, 0.0059, 7.7861e-7, 10.240, 1916),
+            (4, 3219.922, 2.9392e0, 5.6112e-5, 0.0436, 1.0546e-6, 10.240, 1921),
+            (5, 4137.418, 2.1190e0, 1.6111e-5, 0.0001, 2.5905e-18, 0.619, 117),
+            (7, 5583.265, 1.0495e6, 1.2027e-10, 0.0064, 6.6132e-7, 10.240, 1921),
+        ]
+        .into_iter()
+        .map(measured)
+        .collect();
+
+        let curve = prompt_decay_curve(&vl1, G5_FACTOR, &config).unwrap();
+        // Was **8762.902** through the ungated arithmetic on these very rows —
+        // the instrument reads 8762.965 off the unrounded fit, and the sixty
+        // parts per million between them is this table's four figures. A
+        // `sigma1` is a decay rate in 1/s at 1 kHz and no piano string has one
+        // in double figures, let alone four: the whole shipped compass of every
+        // preset lives under 0.53.
+        assert!(curve.sigma1 < 10.0, "{curve:?}");
+        assert!(curve.sigma0 < 10.0, "{curve:?}");
+        // What the five real partials say on their own, to four figures — the
+        // gate drops exactly one row and changes nothing else.
+        assert!((curve.sigma0 - 0.5040).abs() < 5e-4, "{curve:?}");
+        assert!((curve.sigma1 - 0.0300).abs() < 5e-4, "{curve:?}");
+        assert_eq!(
+            prompt_decay_curve(&vl1[..5], G5_FACTOR, &config),
+            Some(curve),
+            "the gate must be doing this and not the arithmetic"
+        );
+
+        // The control: the same key's vl2 layer, which was never broken. Nine
+        // partials, none of them degenerate, and the gate must leave the curve
+        // it already produced exactly where it was — these two literals are the
+        // *ungated* measurement.
+        let vl2: Vec<DecayFit> = [
+            (1, 784.984, 1.4628e0, 2.1916e-2, 0.3387, 8.7134e-4, 11.413, 1762),
+            (2, 1574.631, 2.2765e0, 8.6339e-3, 0.4333, 3.0710e-4, 5.291, 936),
+            (3, 2366.512, 4.5874e0, 2.5353e-3, 1.1634, 3.4990e-4, 3.536, 580),
+            (4, 3179.077, 2.6644e0, 3.4883e-3, 0.0000, 5.0132e-6, 3.701, 492),
+            (5, 3998.476, 3.6965e0, 1.1348e-3, 0.0000, 8.8836e-7, 12.080, 1107),
+            (6, 4852.063, 5.2711e0, 5.9208e-4, 1.6716, 1.7820e-5, 1.120, 211),
+            (7, 5704.438, 5.6004e0, 7.3328e-4, 0.0000, 6.9646e-7, 12.117, 1179),
+            (8, 6552.751, 5.1977e0, 1.1731e-4, 0.0079, 4.9764e-7, 0.827, 156),
+            (9, 7441.130, 6.8256e0, 6.9067e-5, 4.1719, 1.0055e-5, 0.416, 79),
+        ]
+        .into_iter()
+        .map(measured)
+        .collect();
+        let control = prompt_decay_curve(&vl2, G5_FACTOR, &config).unwrap();
+        assert!((control.sigma0 - 0.9416).abs() < 5e-4, "{control:?}");
+        assert!((control.sigma1 - 0.0303).abs() < 5e-4, "{control:?}");
+        // Every one of the nine is still admitted: the guard is not trimming
+        // the treble, where the prompt rates are genuinely fastest. The
+        // tightest of them decays 60 dB in 1.01 s over a 5.3 ms hop — 192 hops,
+        // against the degenerate row's 0.0012.
+        assert!(
+            vl2.iter().all(resolvable_prompt),
+            "the guard dropped a partial the recording plainly measured"
+        );
+
+        // And the two together are what the preset wrote: a median of two is a
+        // mean, so the blown layer landed half its value in the file. With the
+        // gate, both layers agree.
+        assert!((curve.sigma1 - control.sigma1).abs() < 0.01, "{curve:?} {control:?}");
     }
 
     #[test]
